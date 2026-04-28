@@ -104,9 +104,9 @@ export function getCodexBinaryHealth(input: {
     }
 
     return {
-      status: "not-detected",
-      tone: "warn",
-      detailSource: "missing",
+      status: "pending",
+      tone: "neutral",
+      detailSource: "waiting-for-host",
     };
   }
 

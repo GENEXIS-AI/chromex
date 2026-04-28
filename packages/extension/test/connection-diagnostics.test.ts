@@ -78,7 +78,7 @@ describe("connection diagnostics", () => {
     });
   });
 
-  test("warns when Codex cannot be auto-detected after the host is usable", () => {
+  test("does not block sign-in when Codex path detection is missing but the host is usable", () => {
     expect(
       getCodexBinaryHealth({
         nativeHostStatus: "connected",
@@ -89,9 +89,9 @@ describe("connection diagnostics", () => {
         modelCatalogState: "error",
       }),
     ).toEqual({
-      status: "not-detected",
-      tone: "warn",
-      detailSource: "missing",
+      status: "pending",
+      tone: "neutral",
+      detailSource: "waiting-for-host",
     });
   });
 
