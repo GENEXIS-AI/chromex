@@ -20,6 +20,8 @@ import { toFriendlyNativeHostErrorMessage } from "./native-host-errors.js";
 
 const NATIVE_HOST_NAME = "com.codex.sidepanel.bridge";
 const SAFARI_NATIVE_APPLICATION_ID = "application.id";
+const SAFARI_EXTENSION_BUNDLE_ID = "ai.openclaw.chromex.ChromexSafari.Extension";
+const SAFARI_APP_BUNDLE_ID = "ai.openclaw.chromex.ChromexSafari";
 const SAFARI_EVENT_POLL_METHOD = "__chromex.events.poll";
 const SAFARI_EVENT_POLL_INTERVAL_MS = 250;
 
@@ -126,6 +128,22 @@ function getNativeApplicationName(): string {
   return isSafariWebExtensionRuntime() ? SAFARI_NATIVE_APPLICATION_ID : NATIVE_HOST_NAME;
 }
 
+function getConnectionlessNativeApplicationNames(): string[] {
+  if (!isSafariWebExtensionRuntime()) {
+    return [NATIVE_HOST_NAME];
+  }
+  return [SAFARI_NATIVE_APPLICATION_ID, SAFARI_EXTENSION_BUNDLE_ID, SAFARI_APP_BUNDLE_ID];
+}
+
+function isEmptyBridgeResponse(message: BridgeMessage): boolean {
+  return (
+    !message.id &&
+    !Object.prototype.hasOwnProperty.call(message, "result") &&
+    !message.error &&
+    !message.event
+  );
+}
+
 function sendNativeMessageCompat(
   runtime: ConnectionlessNativeMessagingRuntime,
   application: string,
@@ -190,15 +208,22 @@ export class NativeBridgeClient {
       return this.#requestConnectionless<TResult>(method, params, options);
     }
 
-    let port: chrome.runtime.Port;
     try {
-      port = this.#ensurePort();
+      return this.#requestWithPort<TResult>(method, params, options);
     } catch (error) {
       if (getConnectionlessNativeMessagingRuntime()) {
         return this.#requestConnectionless<TResult>(method, params, options);
       }
       throw error;
     }
+  }
+
+  #requestWithPort<TResult>(
+    method: string,
+    params: Record<string, unknown>,
+    options: BridgeRequestOptions,
+  ): Promise<TResult> {
+    const port = this.#ensurePort();
     const id = crypto.randomUUID();
     const response = new Promise<TResult>((resolve, reject) => {
       const pending: PendingBridgeRequest = {
@@ -232,18 +257,36 @@ export class NativeBridgeClient {
 
     this.#startSafariEventPolling();
     const id = crypto.randomUUID();
-    const message = await withOptionalTimeout(
-      sendNativeMessageCompat(runtime, getNativeApplicationName(), { id, method, params }),
-      options.timeoutMs,
-      options.timeoutMessage ?? `${method} did not respond in time.`,
-    );
-    this.#handleEventMessagesFromConnectionlessResponse(message);
+    let lastError: Error | null = null;
+    for (const applicationName of getConnectionlessNativeApplicationNames()) {
+      try {
+        const message = await withOptionalTimeout(
+          sendNativeMessageCompat(runtime, applicationName, { id, method, params }),
+          options.timeoutMs,
+          options.timeoutMessage ?? `${method} did not respond in time.`,
+        );
+        this.#handleEventMessagesFromConnectionlessResponse(message);
 
-    if (message.error) {
-      throw new Error(message.error.message);
+        if (isEmptyBridgeResponse(message) && isSafariWebExtensionRuntime()) {
+          lastError = new Error(`Safari native bridge returned an empty response for ${applicationName}.`);
+          continue;
+        }
+
+        if (message.error) {
+          throw new Error(message.error.message);
+        }
+
+        return message.result as TResult;
+      } catch (error) {
+        lastError = error instanceof Error ? error : new Error(String(error));
+      }
     }
 
-    return message.result as TResult;
+    if (isSafariWebExtensionRuntime() && hasPortNativeMessagingRuntime()) {
+      return this.#requestWithPort<TResult>(method, params, options);
+    }
+
+    throw lastError ?? new Error("Safari native bridge did not respond.");
   }
 
   #ensurePort(): chrome.runtime.Port {
@@ -254,7 +297,7 @@ export class NativeBridgeClient {
     let nativeRuntime: NativeMessagingRuntime;
     try {
       nativeRuntime = getNativeMessagingRuntime();
-      this.#port = nativeRuntime.connectNative(NATIVE_HOST_NAME);
+      this.#port = nativeRuntime.connectNative(getNativeApplicationName());
     } catch (error) {
       throw new Error(
         toFriendlyNativeHostErrorMessage(

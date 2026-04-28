@@ -267,4 +267,33 @@ describe("NativeBridgeClient", () => {
       expect.any(Function),
     );
   });
+
+  test("falls back to Safari port messaging when connectionless native messaging returns an empty response", async () => {
+    vi.useFakeTimers();
+    const port = createFakeNativePort();
+    const connectNative = vi.fn(() => port);
+    const sendNativeMessage = vi.fn(async () => ({}));
+    vi.stubGlobal("navigator", {
+      userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15",
+    });
+    vi.stubGlobal("chrome", {
+      runtime: {
+        connectNative,
+        sendNativeMessage,
+        getURL: () => "safari-web-extension://example/",
+        lastError: null,
+      },
+    });
+
+    const client = new NativeBridgeClient();
+    const request = client.request<{ ok: true }>("model.list");
+
+    await vi.waitFor(() => expect(port.postMessage).toHaveBeenCalled());
+    const posted = port.postMessage.mock.calls[0]?.[0] as { id: string };
+    port.emit({ id: posted.id, result: { ok: true } });
+
+    await expect(request).resolves.toEqual({ ok: true });
+    expect(sendNativeMessage).toHaveBeenCalledTimes(3);
+    expect(connectNative).toHaveBeenCalledWith("application.id");
+  });
 });
