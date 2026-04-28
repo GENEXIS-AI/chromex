@@ -130,12 +130,39 @@ describe("NativeBridgeClient", () => {
     expect(sendNativeMessage).toHaveBeenCalledWith(
       "com.codex.sidepanel.bridge",
       expect.objectContaining({ method: "model.list" }),
+      expect.any(Function),
     );
     expect(sendNativeMessage).toHaveBeenCalledWith(
       "com.codex.sidepanel.bridge",
       expect.objectContaining({ method: "__chromex.events.poll" }),
+      expect.any(Function),
     );
     expect(events).toEqual([{ type: "turn.completed" }]);
+  });
+
+  test("supports Safari callback-style connectionless native messaging", async () => {
+    vi.useFakeTimers();
+    const sendNativeMessage = vi.fn(
+      (_application: string, message: { id: string; method: string }, callback: (response: PortMessage) => void) => {
+        queueMicrotask(() => callback({ id: message.id, result: { ok: true } }));
+      },
+    );
+    vi.stubGlobal("chrome", undefined);
+    vi.stubGlobal("browser", {
+      runtime: {
+        sendNativeMessage,
+        lastError: null,
+      },
+    });
+
+    const client = new NativeBridgeClient();
+
+    await expect(client.request<{ ok: true }>("model.list", {}, { timeoutMs: 25 })).resolves.toEqual({ ok: true });
+    expect(sendNativeMessage).toHaveBeenCalledWith(
+      "com.codex.sidepanel.bridge",
+      expect.objectContaining({ method: "model.list" }),
+      expect.any(Function),
+    );
   });
 
   test("prefers Safari connectionless native messaging even when a port API is present", async () => {
@@ -172,6 +199,7 @@ describe("NativeBridgeClient", () => {
     expect(sendNativeMessage).toHaveBeenCalledWith(
       "com.codex.sidepanel.bridge",
       expect.objectContaining({ method: "model.list" }),
+      expect.any(Function),
     );
   });
 });

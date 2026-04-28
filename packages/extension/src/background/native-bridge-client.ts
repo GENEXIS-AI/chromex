@@ -34,7 +34,11 @@ type NativeMessagingRuntime = {
 };
 
 type ConnectionlessNativeMessagingRuntime = {
-  sendNativeMessage: (application: string, message: unknown) => Promise<BridgeMessage>;
+  sendNativeMessage: (
+    application: string,
+    message: unknown,
+    responseCallback?: (response?: BridgeMessage) => void,
+  ) => Promise<BridgeMessage> | BridgeMessage | undefined;
   lastError?: { message?: string } | null;
 };
 
@@ -84,6 +88,48 @@ function shouldUseConnectionlessNativeMessaging(): boolean {
   }
 
   return !hasPortNativeMessagingRuntime() || isSafariWebExtensionRuntime();
+}
+
+function sendNativeMessageCompat(
+  runtime: ConnectionlessNativeMessagingRuntime,
+  application: string,
+  message: unknown,
+): Promise<BridgeMessage> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const settle = (response: BridgeMessage | undefined): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      const lastErrorMessage = runtime.lastError?.message;
+      if (lastErrorMessage) {
+        reject(new Error(toFriendlyNativeHostErrorMessage(lastErrorMessage)));
+        return;
+      }
+      resolve(response ?? {});
+    };
+    const fail = (error: unknown): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      reject(error instanceof Error ? error : new Error(toFriendlyNativeHostErrorMessage(String(error))));
+    };
+
+    try {
+      const maybePromise = runtime.sendNativeMessage(application, message, settle);
+      if (maybePromise && typeof (maybePromise as Promise<BridgeMessage>).then === "function") {
+        (maybePromise as Promise<BridgeMessage>).then(settle, fail);
+        return;
+      }
+      if (maybePromise !== undefined) {
+        settle(maybePromise as BridgeMessage);
+      }
+    } catch (error) {
+      fail(error);
+    }
+  });
 }
 
 export class NativeBridgeClient {
@@ -150,9 +196,8 @@ export class NativeBridgeClient {
 
     this.#startSafariEventPolling();
     const id = crypto.randomUUID();
-    const response = Promise.resolve(runtime.sendNativeMessage(NATIVE_HOST_NAME, { id, method, params }));
     const message = await withOptionalTimeout(
-      response,
+      sendNativeMessageCompat(runtime, NATIVE_HOST_NAME, { id, method, params }),
       options.timeoutMs,
       options.timeoutMessage ?? `${method} did not respond in time.`,
     );
@@ -222,7 +267,7 @@ export class NativeBridgeClient {
 
     this.#safariEventPollInFlight = true;
     try {
-      const message = await runtime.sendNativeMessage(NATIVE_HOST_NAME, {
+      const message = await sendNativeMessageCompat(runtime, NATIVE_HOST_NAME, {
         id: crypto.randomUUID(),
         method: SAFARI_EVENT_POLL_METHOD,
         params: {},
