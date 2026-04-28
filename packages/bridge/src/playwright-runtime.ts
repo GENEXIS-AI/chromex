@@ -171,6 +171,7 @@ export function chromiumExecutableCandidates(platformName: NodeJS.Platform = pla
         "chrome-mac/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
         "chrome-mac-arm64/Chromium.app/Contents/MacOS/Chromium",
         "chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+        "chrome-mac-x64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
       ];
     case "win32":
       return [
