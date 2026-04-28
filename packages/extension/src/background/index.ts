@@ -1330,9 +1330,16 @@ async function handleAccountLogin(
     });
   }
 
-  const result = await bridge.request<{ authUrl?: string }>("account.login.start", {
-    type: "chatgpt",
-  });
+  const result = await bridge.request<{ authUrl?: string }>(
+    "account.login.start",
+    {
+      type: "chatgpt",
+    },
+    {
+      timeoutMs: 10_000,
+      timeoutMessage: "Safari native bridge did not respond while starting ChatGPT login.",
+    },
+  );
   if (result.authUrl) {
     await chrome.tabs.create({ url: result.authUrl });
   }

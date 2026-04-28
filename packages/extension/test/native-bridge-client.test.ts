@@ -193,7 +193,7 @@ describe("NativeBridgeClient", () => {
 
     await expect(client.request<{ ok: true }>("model.list", {}, { timeoutMs: 25 })).resolves.toEqual({ ok: true });
     expect(sendNativeMessage).toHaveBeenCalledWith(
-      "com.codex.sidepanel.bridge",
+      "application.id",
       expect.objectContaining({ method: "model.list" }),
       expect.any(Function),
     );
@@ -231,7 +231,7 @@ describe("NativeBridgeClient", () => {
 
     expect(connectNative).not.toHaveBeenCalled();
     expect(sendNativeMessage).toHaveBeenCalledWith(
-      "com.codex.sidepanel.bridge",
+      "application.id",
       expect.objectContaining({ method: "model.list" }),
       expect.any(Function),
     );
@@ -262,7 +262,7 @@ describe("NativeBridgeClient", () => {
 
     expect(connectNative).not.toHaveBeenCalled();
     expect(sendNativeMessage).toHaveBeenCalledWith(
-      "com.codex.sidepanel.bridge",
+      "application.id",
       expect.objectContaining({ method: "model.list" }),
       expect.any(Function),
     );

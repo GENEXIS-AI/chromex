@@ -19,6 +19,7 @@ type PendingBridgeRequest = {
 import { toFriendlyNativeHostErrorMessage } from "./native-host-errors.js";
 
 const NATIVE_HOST_NAME = "com.codex.sidepanel.bridge";
+const SAFARI_NATIVE_APPLICATION_ID = "application.id";
 const SAFARI_EVENT_POLL_METHOD = "__chromex.events.poll";
 const SAFARI_EVENT_POLL_INTERVAL_MS = 250;
 
@@ -115,6 +116,14 @@ function shouldUseConnectionlessNativeMessaging(): boolean {
   }
 
   return !hasPortNativeMessagingRuntime() || isSafariWebExtensionRuntime();
+}
+
+function getNativeApplicationName(): string {
+  // Safari Web Extensions route native messages to their containing app extension.
+  // Apple examples use the placeholder "application.id" and Safari resolves it to
+  // the bundled SafariWebExtensionHandler; the Chrome native-host name is for the
+  // desktop browser manifest path and can fail to route in Safari.
+  return isSafariWebExtensionRuntime() ? SAFARI_NATIVE_APPLICATION_ID : NATIVE_HOST_NAME;
 }
 
 function sendNativeMessageCompat(
@@ -224,7 +233,7 @@ export class NativeBridgeClient {
     this.#startSafariEventPolling();
     const id = crypto.randomUUID();
     const message = await withOptionalTimeout(
-      sendNativeMessageCompat(runtime, NATIVE_HOST_NAME, { id, method, params }),
+      sendNativeMessageCompat(runtime, getNativeApplicationName(), { id, method, params }),
       options.timeoutMs,
       options.timeoutMessage ?? `${method} did not respond in time.`,
     );
@@ -294,7 +303,7 @@ export class NativeBridgeClient {
 
     this.#safariEventPollInFlight = true;
     try {
-      const message = await sendNativeMessageCompat(runtime, NATIVE_HOST_NAME, {
+      const message = await sendNativeMessageCompat(runtime, getNativeApplicationName(), {
         id: crypto.randomUUID(),
         method: SAFARI_EVENT_POLL_METHOD,
         params: {},

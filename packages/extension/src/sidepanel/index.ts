@@ -8113,13 +8113,21 @@ function openNativeTextDialog(
 }
 
 async function startCodexOauthLogin(): Promise<void> {
+  state.actionStatus = "Démarrage de la connexion ChatGPT…";
+  state.initError = "";
+  render();
   try {
-    await sendRuntimeMessage({ type: "account.login.start", loginType: "chatgpt" });
+    const result = await sendRuntimeMessage<{ authUrl?: string }>({ type: "account.login.start", loginType: "chatgpt" });
+    if (result.authUrl) {
+      state.actionStatus = "Lien ChatGPT reçu — ouverture de la connexion…";
+      window.open(result.authUrl, "_blank", "noopener");
+    }
     await scheduleInitialize();
     state.initError = "";
-    state.actionStatus = "";
+    state.actionStatus = state.accountStatus?.codexAuthenticated ? "Connexion ChatGPT active." : "Connexion ChatGPT lancée.";
   } catch (error) {
     state.initError = toUserFacingRuntimeError(error);
+    state.actionStatus = "";
     render();
   }
 }
