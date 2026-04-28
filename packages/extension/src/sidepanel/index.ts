@@ -8117,14 +8117,30 @@ async function startCodexOauthLogin(): Promise<void> {
   state.initError = "";
   render();
   try {
-    const result = await sendRuntimeMessage<{ authUrl?: string }>({ type: "account.login.start", loginType: "chatgpt" });
+    const result = await sendRuntimeMessage<{ authUrl?: string; alreadyAuthenticated?: boolean }>({
+      type: "account.login.start",
+      loginType: "chatgpt",
+    });
+    if (!result || typeof result !== "object") {
+      throw new Error("Réponse vide du bridge Safari pendant la connexion ChatGPT.");
+    }
     if (result.authUrl) {
       state.actionStatus = "Lien ChatGPT reçu — ouverture de la connexion…";
       window.open(result.authUrl, "_blank", "noopener");
     }
     await scheduleInitialize();
     state.initError = "";
-    state.actionStatus = state.accountStatus?.codexAuthenticated ? "Connexion ChatGPT active." : "Connexion ChatGPT lancée.";
+    if (result.authUrl) {
+      state.actionStatus = state.accountStatus?.codexAuthenticated ? "Connexion ChatGPT active." : "Connexion ChatGPT lancée.";
+      render();
+      return;
+    }
+    if (result.alreadyAuthenticated || state.accountStatus?.codexAuthenticated) {
+      state.actionStatus = "Connexion ChatGPT active.";
+      render();
+      return;
+    }
+    throw new Error("Codex n’a pas renvoyé de lien de connexion ChatGPT.");
   } catch (error) {
     state.initError = toUserFacingRuntimeError(error);
     state.actionStatus = "";

@@ -1340,10 +1340,25 @@ async function handleAccountLogin(
       timeoutMessage: "Safari native bridge did not respond while starting ChatGPT login.",
     },
   );
+  if (!result || typeof result !== "object") {
+    throw new Error("Safari native bridge returned an empty ChatGPT login response.");
+  }
   if (result.authUrl) {
     await chrome.tabs.create({ url: result.authUrl });
+    return result;
   }
-  return result;
+  const status = await bridge.request<UiInitPayload["accountStatus"]>(
+    "account.status",
+    {},
+    {
+      timeoutMs: 5_000,
+      timeoutMessage: "Safari native bridge did not confirm ChatGPT account status.",
+    },
+  );
+  if (status.codexAuthenticated) {
+    return { ...result, alreadyAuthenticated: true };
+  }
+  throw new Error("Codex did not return a ChatGPT sign-in URL.");
 }
 
 async function openAppInstallUrl(url: string): Promise<{ ok: true }> {

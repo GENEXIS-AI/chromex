@@ -135,9 +135,8 @@ function getConnectionlessNativeApplicationNames(): string[] {
   return [SAFARI_NATIVE_APPLICATION_ID, SAFARI_EXTENSION_BUNDLE_ID, SAFARI_APP_BUNDLE_ID];
 }
 
-function isEmptyBridgeResponse(message: BridgeMessage): boolean {
+function isBridgeResponseMissingPayload(message: BridgeMessage): boolean {
   return (
-    !message.id &&
     !Object.prototype.hasOwnProperty.call(message, "result") &&
     !message.error &&
     !message.event
@@ -267,7 +266,7 @@ export class NativeBridgeClient {
         );
         this.#handleEventMessagesFromConnectionlessResponse(message);
 
-        if (isEmptyBridgeResponse(message) && isSafariWebExtensionRuntime()) {
+        if (isBridgeResponseMissingPayload(message) && isSafariWebExtensionRuntime()) {
           lastError = new Error(`Safari native bridge returned an empty response for ${applicationName}.`);
           continue;
         }
@@ -399,6 +398,11 @@ export class NativeBridgeClient {
 
     if (message.error) {
       pending.reject(new Error(message.error.message));
+      return;
+    }
+
+    if (isBridgeResponseMissingPayload(message)) {
+      pending.reject(new Error("Native bridge returned an empty response."));
       return;
     }
 
