@@ -87,6 +87,14 @@ export function getCodexBinaryHealth(input: {
   }
 
   if (input.runtimeConfig.codexBinSource === "missing") {
+    if (input.modelCatalogState === "ready" || input.modelCatalogState === "empty") {
+      return {
+        status: "automatic",
+        tone: "ok",
+        detailSource: "detected",
+      };
+    }
+
     return {
       status: "not-detected",
       tone: "warn",

@@ -94,4 +94,21 @@ describe("connection diagnostics", () => {
       detailSource: "missing",
     });
   });
+
+  test("trusts a successful model catalog even when Safari cannot read the Codex path quickly", () => {
+    expect(
+      getCodexBinaryHealth({
+        nativeHostStatus: "connected",
+        runtimeConfig: {
+          codexBinSource: "missing",
+          configuredCodexBinPathInvalid: false,
+        },
+        modelCatalogState: "ready",
+      }),
+    ).toEqual({
+      status: "automatic",
+      tone: "ok",
+      detailSource: "detected",
+    });
+  });
 });
