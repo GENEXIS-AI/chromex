@@ -111,4 +111,21 @@ describe("connection diagnostics", () => {
       detailSource: "detected",
     });
   });
+
+  test("keeps Codex binary pending while the catalog check is still loading", () => {
+    expect(
+      getCodexBinaryHealth({
+        nativeHostStatus: "connected",
+        runtimeConfig: {
+          codexBinSource: "missing",
+          configuredCodexBinPathInvalid: false,
+        },
+        modelCatalogState: "loading",
+      }),
+    ).toEqual({
+      status: "pending",
+      tone: "neutral",
+      detailSource: "waiting-for-host",
+    });
+  });
 });

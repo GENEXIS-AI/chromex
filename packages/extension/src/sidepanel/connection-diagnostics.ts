@@ -95,6 +95,14 @@ export function getCodexBinaryHealth(input: {
       };
     }
 
+    if (input.modelCatalogState === "loading") {
+      return {
+        status: "pending",
+        tone: "neutral",
+        detailSource: "waiting-for-host",
+      };
+    }
+
     return {
       status: "not-detected",
       tone: "warn",
