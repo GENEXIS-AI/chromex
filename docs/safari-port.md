@@ -11,6 +11,7 @@ Port Chromex from a Chrome MV3 side-panel extension to a Safari Web Extension di
 Run from the repo root:
 
 ```bash
+npm run check:safari:tooling
 npm run build:safari:webextension
 ```
 
@@ -69,17 +70,37 @@ Background code now guards `chrome.sidePanel` calls so Safari does not crash whe
 - native messaging availability
 - context menus
 
+## Native bridge strategy
+
+Chrome's bridge is already split in a useful way:
+
+```text
+extension background -> chrome.runtime.connectNative("com.codex.sidepanel.bridge") -> packages/native-host -> packages/bridge
+```
+
+For Safari, keep `packages/bridge` as the shared core and replace only the transport:
+
+```text
+Safari WebExtension background -> browser.runtime.connectNative(...) -> SafariWebExtensionHandler.swift -> containing macOS app / XPC -> Node bridge process
+```
+
+The important Safari difference is that the extension can only native-message its own containing app/extension. There is no Chrome-style `NativeMessagingHosts/*.json` registration. The containing app should own process launch, lifetime, logging, and any App Sandbox/App Group/XPC configuration.
+
+For an MVP, target a single long-lived native port because Chromex expects both request/response messages and asynchronous bridge events such as turn progress, plans, diffs, and rate-limit updates.
+
 ## Proposed next steps
 
 1. Install/open full Xcode on the Mac.
-2. Run `npm run build:safari:webextension`.
-3. Convert the staged extension with Apple's Safari Web Extension converter.
-4. Create the containing macOS app bundle ID and signing settings.
-5. Replace Chrome native-host install assumptions with Safari app-owned bridge launching.
-6. Test minimal flow first: popup opens, reads current page, sends prompt to local Codex, streams response.
+2. Run `npm run check:safari:tooling` and confirm the converter is available.
+3. Run `npm run build:safari:webextension`.
+4. Convert the staged extension with Apple's Safari Web Extension converter.
+5. Create the containing macOS app bundle ID and signing settings.
+6. Replace Chrome native-host install assumptions with Safari app-owned bridge launching.
+7. Test minimal flow first: popup opens, reads current page, sends prompt to local Codex, streams response.
 
 ## Current local patches related to Safari/Chromex
 
 - `packages/extension/src/background/index.ts`: guards `chrome.sidePanel` and uses a helper to no-op where unavailable.
 - `scripts/build-safari-web-extension.mjs`: creates the Safari-staged WebExtension artifact.
-- `package.json`: exposes the Safari staging script.
+- `scripts/check-safari-tooling.mjs`: checks whether Xcode/Safari conversion tooling is installed.
+- `package.json`: exposes the Safari staging/tooling scripts.
