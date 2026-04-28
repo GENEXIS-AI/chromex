@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { appendFile, cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
 const repoRoot = process.cwd();
@@ -20,7 +20,7 @@ const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
 // this UI into the containing macOS app window.
 manifest.action = {
   ...(manifest.action ?? {}),
-  default_popup: "sidepanel.html",
+  default_popup: "sidepanel.html?mode=popup",
 };
 
 delete manifest.side_panel;
@@ -41,6 +41,20 @@ manifest.host_permissions = ["<all_urls>"];
 delete manifest.optional_host_permissions;
 
 await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+await appendFile(
+  resolve(safariOut, "sidepanel.css"),
+  `
+/* Safari toolbar popup sizing. Chrome side panels provide their own viewport;
+   Safari popovers need an intrinsic document size or they collapse. */
+html,
+body {
+  width: 460px;
+  min-width: 460px;
+  height: 720px;
+  min-height: 720px;
+}
+`,
+);
 await writeFile(
   resolve(safariOut, "SAFARI_PORT_NOTES.txt"),
   [
@@ -50,9 +64,10 @@ await writeFile(
     "It is not a complete Safari app bundle yet.",
     "",
     "Important differences from the Chrome build:",
-    "- Chrome side_panel is removed; sidepanel.html is exposed as action.default_popup.",
+    "- Chrome side_panel is removed; sidepanel.html is exposed as action.default_popup with popup mode.",
     "- sidePanel and Safari-unsupported history permissions are removed.",
     "- background.type is removed because the bundled background script does not need module loading in Safari.",
+    "- Safari popup sizing CSS is appended so the toolbar popover does not collapse.",
     "- <all_urls> is a required host permission for the current page-reading path.",
     "- Chrome's native messaging host installer does not apply to Safari; a containing macOS app bridge is still required.",
     "",
