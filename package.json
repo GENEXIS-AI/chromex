@@ -20,6 +20,7 @@
     "smoke:install-browser": "npx -y playwright@1.59.1 install chromium",
     "diagnose:extension": "node scripts/diagnose-extension-load.mjs",
     "sync:extension": "npm run build && node scripts/diagnose-extension-load.mjs --sync",
+    "build:safari:webextension": "node scripts/build-safari-web-extension.mjs",
     "package:webstore": "npm run build --workspace @codex-sidepanel/extension && node scripts/package-chrome-web-store.mjs",
     "package:public": "npm run build && node scripts/package-public-release.mjs",
     "store:assets": "node scripts/generate-webstore-assets.mjs",

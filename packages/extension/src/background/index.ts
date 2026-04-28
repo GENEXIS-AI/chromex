@@ -240,6 +240,10 @@ type PendingDictationShortcut = {
   requestId: string;
   createdAt: number;
 };
+type OptionalSidePanelApi = {
+  open?: (options: { windowId: number } | { tabId: number }) => Promise<void>;
+  setPanelBehavior?: (options: { openPanelOnActionClick: boolean }) => Promise<void>;
+};
 let activeAiControlTab: ReadableBrowserTab | null = null;
 const state = {
   selectedProfileId: "default",
@@ -277,6 +281,17 @@ const state = {
   lastAutoCompactThreadId: "" as string,
   lastAutoCompactBucket: null as number | null,
 };
+
+function getSidePanelApi(): OptionalSidePanelApi | undefined {
+  return (chrome as typeof chrome & { sidePanel?: OptionalSidePanelApi }).sidePanel;
+}
+
+async function openExtensionPanel(windowId: number | undefined): Promise<void> {
+  if (!windowId) {
+    return;
+  }
+  await getSidePanelApi()?.open?.({ windowId }).catch(() => undefined);
+}
 
 bridge.subscribe((event) => {
   const bridgeEvent = event as { type?: string };
@@ -384,7 +399,7 @@ function registerContextMenus(): void {
 
 chrome.runtime.onInstalled.addListener(() => {
   registerContextMenus();
-  void chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => undefined);
+  void getSidePanelApi()?.setPanelBehavior?.({ openPanelOnActionClick: true }).catch(() => undefined);
 });
 
 chrome.commands.onCommand.addListener((command) => {
@@ -396,7 +411,7 @@ chrome.action.onClicked.addListener(async (tab) => {
     return;
   }
   state.browserWindowId = tab.windowId;
-  await chrome.sidePanel.open({ windowId: tab.windowId });
+  await openExtensionPanel(tab.windowId);
   void broadcastActiveTabSnapshot();
 });
 
@@ -475,13 +490,17 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
 });
 
 async function openSidePanelForContextMenu(tab?: chrome.tabs.Tab): Promise<void> {
+  const sidePanel = getSidePanelApi();
+  if (!sidePanel?.open) {
+    return;
+  }
   const windowId = typeof tab?.windowId === "number" ? tab.windowId : chrome.windows.WINDOW_ID_CURRENT;
   try {
-    await chrome.sidePanel.open({ windowId });
+    await sidePanel.open({ windowId });
     return;
   } catch (error) {
     if (typeof tab?.id === "number") {
-      await chrome.sidePanel.open({ tabId: tab.id });
+      await sidePanel.open({ tabId: tab.id });
       return;
     }
     throw error;
@@ -982,7 +1001,7 @@ async function handleCommand(command: string): Promise<void> {
   }
 
   if (command === "open-side-panel" && activeTab?.windowId) {
-    await chrome.sidePanel.open({ windowId: activeTab.windowId });
+    await openExtensionPanel(activeTab.windowId);
     return;
   }
 
@@ -4550,7 +4569,7 @@ async function dockChat(targetWindowId?: number, popupWindowId?: number) {
   const activeWindowId = targetWindowId ?? state.browserWindowId;
   if (typeof activeWindowId === "number") {
     state.browserWindowId = activeWindowId;
-    await chrome.sidePanel.open({ windowId: activeWindowId });
+    await openExtensionPanel(activeWindowId);
   }
   if (typeof popupWindowId === "number") {
     await chrome.windows.remove(popupWindowId).catch(() => undefined);
