@@ -165,6 +165,40 @@ describe("NativeBridgeClient", () => {
     );
   });
 
+  test("uses chrome.sendNativeMessage when Safari browser runtime lacks that method", async () => {
+    vi.useFakeTimers();
+    const sendNativeMessage = vi.fn(
+      (_application: string, message: { id: string; method: string }, callback: (response: PortMessage) => void) => {
+        queueMicrotask(() => callback({ id: message.id, result: { ok: true } }));
+      },
+    );
+    vi.stubGlobal("navigator", {
+      userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15",
+    });
+    vi.stubGlobal("browser", {
+      runtime: {
+        getURL: () => "safari-web-extension://example/",
+        lastError: null,
+      },
+    });
+    vi.stubGlobal("chrome", {
+      runtime: {
+        sendNativeMessage,
+        getURL: () => "safari-web-extension://example/",
+        lastError: null,
+      },
+    });
+
+    const client = new NativeBridgeClient();
+
+    await expect(client.request<{ ok: true }>("model.list", {}, { timeoutMs: 25 })).resolves.toEqual({ ok: true });
+    expect(sendNativeMessage).toHaveBeenCalledWith(
+      "com.codex.sidepanel.bridge",
+      expect.objectContaining({ method: "model.list" }),
+      expect.any(Function),
+    );
+  });
+
   test("prefers Safari connectionless native messaging even when a port API is present", async () => {
     vi.useFakeTimers();
     const port = createFakeNativePort();
@@ -187,6 +221,37 @@ describe("NativeBridgeClient", () => {
       runtime: {
         connectNative,
         sendNativeMessage,
+        lastError: null,
+      },
+    });
+
+    const client = new NativeBridgeClient();
+
+    await expect(client.request<{ ok: true }>("model.list", {}, { timeoutMs: 25 })).resolves.toEqual({ ok: true });
+
+    expect(connectNative).not.toHaveBeenCalled();
+    expect(sendNativeMessage).toHaveBeenCalledWith(
+      "com.codex.sidepanel.bridge",
+      expect.objectContaining({ method: "model.list" }),
+      expect.any(Function),
+    );
+  });
+
+  test("detects Safari from the extension URL when the background user agent is generic", async () => {
+    vi.useFakeTimers();
+    const connectNative = vi.fn(() => createFakeNativePort());
+    const sendNativeMessage = vi.fn(async (_application: string, message: { id: string; method: string }) => ({
+      id: message.id,
+      result: { ok: true },
+    }));
+    vi.stubGlobal("navigator", {
+      userAgent: "Mozilla/5.0",
+    });
+    vi.stubGlobal("chrome", {
+      runtime: {
+        connectNative,
+        sendNativeMessage,
+        getURL: () => "safari-web-extension://example/",
         lastError: null,
       },
     });

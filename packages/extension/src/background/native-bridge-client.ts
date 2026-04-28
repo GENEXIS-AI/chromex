@@ -25,6 +25,7 @@ const SAFARI_EVENT_POLL_INTERVAL_MS = 250;
 type RuntimeCandidate = {
   connectNative?: unknown;
   sendNativeMessage?: unknown;
+  getURL?: unknown;
   lastError?: { message?: string } | null;
 };
 
@@ -55,8 +56,8 @@ function getRuntimeCandidates(): { chromeRuntime: RuntimeCandidate | undefined; 
 
 function getNativeMessagingRuntime(): NativeMessagingRuntime {
   const { chromeRuntime, browserRuntime } = getRuntimeCandidates();
-  const runtime = chromeRuntime ?? browserRuntime;
-  if (typeof runtime?.connectNative === "function") {
+  const runtime = getRuntimeCandidateWithFunction("connectNative", [chromeRuntime, browserRuntime]);
+  if (runtime) {
     return runtime as NativeMessagingRuntime;
   }
 
@@ -65,8 +66,8 @@ function getNativeMessagingRuntime(): NativeMessagingRuntime {
 
 function getConnectionlessNativeMessagingRuntime(): ConnectionlessNativeMessagingRuntime | null {
   const { browserRuntime, chromeRuntime } = getRuntimeCandidates();
-  const runtime = browserRuntime ?? chromeRuntime;
-  if (typeof runtime?.sendNativeMessage === "function") {
+  const runtime = getRuntimeCandidateWithFunction("sendNativeMessage", [browserRuntime, chromeRuntime]);
+  if (runtime) {
     return runtime as ConnectionlessNativeMessagingRuntime;
   }
   return null;
@@ -74,12 +75,38 @@ function getConnectionlessNativeMessagingRuntime(): ConnectionlessNativeMessagin
 
 function hasPortNativeMessagingRuntime(): boolean {
   const { chromeRuntime, browserRuntime } = getRuntimeCandidates();
-  return typeof (chromeRuntime ?? browserRuntime)?.connectNative === "function";
+  return Boolean(getRuntimeCandidateWithFunction("connectNative", [chromeRuntime, browserRuntime]));
+}
+
+function getRuntimeCandidateWithFunction(
+  functionName: "connectNative" | "sendNativeMessage",
+  runtimes: Array<RuntimeCandidate | undefined>,
+): RuntimeCandidate | undefined {
+  return runtimes.find((runtime) => typeof runtime?.[functionName] === "function");
 }
 
 function isSafariWebExtensionRuntime(): boolean {
   const userAgent = (globalThis as { navigator?: { userAgent?: string } }).navigator?.userAgent ?? "";
-  return /\bSafari\//.test(userAgent) && !/\b(?:Chrome|Chromium|Edg|OPR|CriOS|FxiOS)\//.test(userAgent);
+  if (/\bSafari\//.test(userAgent) && !/\b(?:Chrome|Chromium|Edg|OPR|CriOS|FxiOS)\//.test(userAgent)) {
+    return true;
+  }
+
+  const { browserRuntime, chromeRuntime } = getRuntimeCandidates();
+  for (const runtime of [browserRuntime, chromeRuntime]) {
+    if (typeof runtime?.getURL !== "function") {
+      continue;
+    }
+    try {
+      const extensionUrl = (runtime.getURL as (path: string) => string)("");
+      if (extensionUrl.startsWith("safari-web-extension://") || extensionUrl.startsWith("safari-extension://")) {
+        return true;
+      }
+    } catch {
+      // Ignore runtime URL detection failures and fall back to user-agent checks.
+    }
+  }
+
+  return false;
 }
 
 function shouldUseConnectionlessNativeMessaging(): boolean {
