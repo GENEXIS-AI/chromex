@@ -15,16 +15,17 @@ npm run check:safari:tooling
 npm run build:safari:webextension
 ```
 
-Once full Xcode is installed, generate the Safari/macOS wrapper with:
+Once full Xcode is installed, generate and compile the Safari/macOS wrapper with:
 
 ```bash
 npm run create:safari:xcode
+npm run build:safari:xcode
 ```
 
 Optional overrides:
 
 ```bash
-SAFARI_APP_NAME=ChromexSafari SAFARI_BUNDLE_ID=ai.openclaw.chromex.safari npm run create:safari:xcode
+SAFARI_APP_NAME=ChromexSafari SAFARI_BUNDLE_ID=ai.openclaw.chromex.ChromexSafari npm run create:safari:xcode
 ```
 
 The staging build writes:
@@ -115,5 +116,6 @@ For an MVP, target a single long-lived native port because Chromex expects both 
 - `scripts/build-safari-web-extension.mjs`: creates the Safari-staged WebExtension artifact.
 - `scripts/check-safari-tooling.mjs`: checks whether Xcode/Safari conversion tooling is installed.
 - `scripts/create-safari-xcode-project.mjs`: runs the converter once full Xcode is installed.
+- `scripts/build-safari-xcode-app.mjs`: compiles the generated Safari app with Xcode.
 - `packages/extension/src/background/native-bridge-client.ts`: uses Chrome's native runtime when present and falls back to `browser.runtime.connectNative` for Safari-style WebExtensions.
 - `package.json`: exposes the Safari staging/tooling scripts.

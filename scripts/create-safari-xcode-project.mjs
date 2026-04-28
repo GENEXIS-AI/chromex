@@ -6,7 +6,10 @@ const repoRoot = process.cwd();
 const webExtensionDir = resolve(repoRoot, "output/safari/ChromexSafariExtension");
 const projectLocation = resolve(repoRoot, "output/safari/xcode");
 const appName = process.env.SAFARI_APP_NAME || "ChromexSafari";
-const bundleIdentifier = process.env.SAFARI_BUNDLE_ID || "ai.openclaw.chromex.safari";
+// Apple's converter derives the containing app bundle ID from this value and
+// appends `.Extension` for the extension target. Keep the app name as the final
+// component so the extension bundle ID is prefixed by the parent app ID.
+const bundleIdentifier = process.env.SAFARI_BUNDLE_ID || "ai.openclaw.chromex.ChromexSafari";
 
 const converter = spawnSync("xcrun", ["--find", "safari-web-extension-converter"], { encoding: "utf8" });
 if (converter.status !== 0) {
@@ -35,9 +38,10 @@ run("xcrun", [
   "--bundle-identifier",
   bundleIdentifier,
   "--swift",
-  "--macOS-only",
+  "--macos-only",
   "--copy-resources",
   "--no-open",
+  "--no-prompt",
   "--force",
 ]);
 
