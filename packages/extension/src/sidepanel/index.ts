@@ -617,6 +617,20 @@ const query = new URLSearchParams(window.location.search);
 const panelMode = query.get("mode") === "popup" ? "popup" : "sidepanel";
 const targetWindowId = Number(query.get("targetWindowId") || "") || undefined;
 const smokeTestMode = query.get("test") === "1";
+
+function isSafariWebExtensionUiRuntime(): boolean {
+  const userAgent = navigator.userAgent ?? "";
+  if (/\bSafari\//.test(userAgent) && !/\b(?:Chrome|Chromium|Edg|OPR|CriOS|FxiOS)\//.test(userAgent)) {
+    return true;
+  }
+  try {
+    const runtimeUrl = chrome.runtime.getURL("");
+    return runtimeUrl.startsWith("safari-web-extension://") || runtimeUrl.startsWith("safari-extension://");
+  } catch {
+    return false;
+  }
+}
+
 const MAX_VOICE_RECONNECT_ATTEMPTS = 2;
 const STREAMING_DELTA_RENDER_INTERVAL_MS = 80;
 const CHAT_SCROLL_USER_OVERRIDE_MS = 800;
@@ -3037,6 +3051,7 @@ function renderNow(): void {
   });
   const showOnboarding =
     !smokeTestMode && state.activeView === "chat" && (showAuthOnboarding || showUsageNoticeOnboarding);
+  const showPanelModeToggle = !isSafariWebExtensionUiRuntime();
   const scrollState = captureScrollPositions();
   const composerState = captureComposerRenderState();
   const returningToChatView =
@@ -3068,12 +3083,12 @@ function renderNow(): void {
           >${renderAppMenuDotsIcon()}</button>
           ${state.appMenuOpen ? renderAppMenu(isPopup, false) : ""}
           <button id="new-chat" class="icon-button" title="${escapeAttribute(strings.newChat)}" aria-label="${escapeAttribute(strings.newChat)}">${renderUiIcon("plus")}</button>
-          <button
+          ${showPanelModeToggle ? `<button
             id="${isPopup ? "dock-chat" : "popout-chat"}"
             class="icon-button"
             title="${escapeAttribute(isPopup ? strings.dock : strings.popOut)}"
             aria-label="${escapeAttribute(isPopup ? strings.dock : strings.popOut)}"
-          >${renderPanelModeIcon(isPopup)}</button>
+          >${renderPanelModeIcon(isPopup)}</button>` : ""}
         </div>
       </header>`
       }

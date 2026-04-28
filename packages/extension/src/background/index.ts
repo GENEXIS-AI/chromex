@@ -134,7 +134,7 @@ import {
   shouldLogBackgroundMessageError,
   toExpectedPermissionErrorResponse,
 } from "./background-error-response.js";
-import { createPopoutUrlPath, selectBrowserWindowIdForPopout } from "./popup-window-target.js";
+import { createPopoutUrlPath, selectBrowserWindowIdForPopout, shouldCloseWindowWhenDocking } from "./popup-window-target.js";
 import {
   createHistorySearchOptions,
   createHistoryContextSummary,
@@ -4594,7 +4594,10 @@ async function dockChat(targetWindowId?: number, popupWindowId?: number) {
     await openExtensionPanel(activeWindowId);
   }
   if (typeof popupWindowId === "number") {
-    await chrome.windows.remove(popupWindowId).catch(() => undefined);
+    const popupWindow = await chrome.windows.get(popupWindowId).catch(() => null);
+    if (shouldCloseWindowWhenDocking(popupWindow)) {
+      await chrome.windows.remove(popupWindowId).catch(() => undefined);
+    }
   }
   return { ok: true };
 }

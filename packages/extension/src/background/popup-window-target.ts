@@ -19,6 +19,10 @@ export function createPopoutUrlPath(targetWindowId?: number | undefined): string
   return "sidepanel.html?mode=popup";
 }
 
+export function shouldCloseWindowWhenDocking(windowInfo: { type?: string | undefined } | null | undefined): boolean {
+  return windowInfo?.type === "popup";
+}
+
 function firstFiniteWindowId(...values: Array<number | undefined>): number | undefined {
   return values.find((value): value is number => typeof value === "number" && Number.isFinite(value));
 }

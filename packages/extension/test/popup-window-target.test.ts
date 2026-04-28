@@ -1,6 +1,10 @@
 import { describe, expect, test } from "vitest";
 
-import { createPopoutUrlPath, selectBrowserWindowIdForPopout } from "../src/background/popup-window-target.js";
+import {
+  createPopoutUrlPath,
+  selectBrowserWindowIdForPopout,
+  shouldCloseWindowWhenDocking,
+} from "../src/background/popup-window-target.js";
 
 describe("popup window target selection", () => {
   test("uses the active tab window when available", () => {
@@ -46,5 +50,11 @@ describe("popup window target selection", () => {
   test("includes the browser window target only when one is known", () => {
     expect(createPopoutUrlPath(77)).toBe("sidepanel.html?mode=popup&targetWindowId=77");
     expect(createPopoutUrlPath(Number.NaN)).toBe("sidepanel.html?mode=popup");
+  });
+
+  test("only closes real popup windows when docking", () => {
+    expect(shouldCloseWindowWhenDocking({ type: "popup" })).toBe(true);
+    expect(shouldCloseWindowWhenDocking({ type: "normal" })).toBe(false);
+    expect(shouldCloseWindowWhenDocking(null)).toBe(false);
   });
 });
