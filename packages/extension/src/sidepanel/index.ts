@@ -8117,12 +8117,15 @@ async function startCodexOauthLogin(): Promise<void> {
   state.initError = "";
   render();
   try {
-    const result = await sendRuntimeMessage<{ authUrl?: string; alreadyAuthenticated?: boolean }>({
+    const result = await sendRuntimeMessage<{ authUrl?: string; alreadyAuthenticated?: boolean; error?: string }>({
       type: "account.login.start",
       loginType: "chatgpt",
     });
     if (!result || typeof result !== "object") {
       throw new Error("Réponse vide du bridge Safari pendant la connexion ChatGPT.");
+    }
+    if (result.error) {
+      throw new Error(result.error);
     }
     if (result.authUrl) {
       state.actionStatus = "Lien ChatGPT reçu — ouverture de la connexion…";

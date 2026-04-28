@@ -24,6 +24,7 @@ const SAFARI_EXTENSION_BUNDLE_ID = "ai.openclaw.chromex.ChromexSafari.Extension"
 const SAFARI_APP_BUNDLE_ID = "ai.openclaw.chromex.ChromexSafari";
 const SAFARI_EVENT_POLL_METHOD = "__chromex.events.poll";
 const SAFARI_EVENT_POLL_INTERVAL_MS = 250;
+const SAFARI_HTTP_BRIDGE_ORIGIN = "http://127.0.0.1:38457";
 
 type RuntimeCandidate = {
   connectNative?: unknown;
@@ -185,6 +186,59 @@ function sendNativeMessageCompat(
   });
 }
 
+function shouldUseSafariHttpBridge(): boolean {
+  if (!isSafariWebExtensionRuntime() || typeof globalThis.fetch !== "function") {
+    return false;
+  }
+
+  // Vitest runs in Node where `process` exists; avoid real localhost probes in unit tests.
+  return !("process" in globalThis);
+}
+
+async function requestSafariHttpBridge(
+  method: string,
+  params: Record<string, unknown>,
+  options: BridgeRequestOptions,
+): Promise<BridgeMessage> {
+  const response = await withOptionalTimeout(
+    fetch(`${SAFARI_HTTP_BRIDGE_ORIGIN}/rpc`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: crypto.randomUUID(), method, params }),
+      cache: "no-store",
+    }),
+    options.timeoutMs,
+    options.timeoutMessage ?? `${method} did not respond in time.`,
+  );
+  if (!response.ok) {
+    throw new Error(`Safari local HTTP bridge failed with HTTP ${response.status}.`);
+  }
+  return await response.json() as BridgeMessage;
+}
+
+async function pollSafariHttpBridgeEvents(): Promise<BridgeMessage> {
+  const response = await fetch(`${SAFARI_HTTP_BRIDGE_ORIGIN}/events`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ id: crypto.randomUUID() }),
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw new Error(`Safari local HTTP bridge event poll failed with HTTP ${response.status}.`);
+  }
+  return await response.json() as BridgeMessage;
+}
+
+function resolveBridgeMessage<TResult>(message: BridgeMessage): TResult {
+  if (message.error) {
+    throw new Error(message.error.message);
+  }
+  if (isBridgeResponseMissingPayload(message)) {
+    throw new Error("Native bridge returned an empty response.");
+  }
+  return message.result as TResult;
+}
+
 export class NativeBridgeClient {
   #port: chrome.runtime.Port | null = null;
   #lastDisconnectError: string | null = null;
@@ -270,19 +324,28 @@ export class NativeBridgeClient {
           lastError = new Error(`Safari native bridge returned an empty response for ${applicationName}.`);
           continue;
         }
+        return resolveBridgeMessage<TResult>(message);
+      } catch (error) {
+        lastError = error instanceof Error ? error : new Error(String(error));
+      }
+    }
 
-        if (message.error) {
-          throw new Error(message.error.message);
-        }
-
-        return message.result as TResult;
+    if (shouldUseSafariHttpBridge()) {
+      try {
+        const message = await requestSafariHttpBridge(method, params, options);
+        this.#handleEventMessagesFromConnectionlessResponse(message);
+        return resolveBridgeMessage<TResult>(message);
       } catch (error) {
         lastError = error instanceof Error ? error : new Error(String(error));
       }
     }
 
     if (isSafariWebExtensionRuntime() && hasPortNativeMessagingRuntime()) {
-      return this.#requestWithPort<TResult>(method, params, options);
+      try {
+        return await this.#requestWithPort<TResult>(method, params, options);
+      } catch (error) {
+        lastError = error instanceof Error ? error : new Error(String(error));
+      }
     }
 
     throw lastError ?? new Error("Safari native bridge did not respond.");
@@ -345,11 +408,13 @@ export class NativeBridgeClient {
 
     this.#safariEventPollInFlight = true;
     try {
-      const message = await sendNativeMessageCompat(runtime, getNativeApplicationName(), {
-        id: crypto.randomUUID(),
-        method: SAFARI_EVENT_POLL_METHOD,
-        params: {},
-      });
+      const message = shouldUseSafariHttpBridge()
+        ? await pollSafariHttpBridgeEvents()
+        : await sendNativeMessageCompat(runtime, getNativeApplicationName(), {
+            id: crypto.randomUUID(),
+            method: SAFARI_EVENT_POLL_METHOD,
+            params: {},
+          });
       this.#handleEventMessagesFromConnectionlessResponse(message);
     } catch {
       // Keep polling best-effort; normal foreground requests surface bridge errors to the UI.
@@ -406,7 +471,7 @@ export class NativeBridgeClient {
       return;
     }
 
-    pending.resolve(message.result);
+    pending.resolve(resolveBridgeMessage(message));
   }
 }
 
