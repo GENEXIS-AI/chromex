@@ -20,6 +20,28 @@ import { toFriendlyNativeHostErrorMessage } from "./native-host-errors.js";
 
 const NATIVE_HOST_NAME = "com.codex.sidepanel.bridge";
 
+type NativeMessagingRuntime = {
+  connectNative: (application: string) => chrome.runtime.Port;
+  lastError?: { message?: string } | null;
+};
+
+function getNativeMessagingRuntime(): NativeMessagingRuntime {
+  type RuntimeCandidate = {
+    connectNative?: unknown;
+    lastError?: { message?: string } | null;
+  };
+  const globalScope = globalThis as {
+    chrome?: { runtime?: RuntimeCandidate };
+    browser?: { runtime?: RuntimeCandidate };
+  };
+  const runtime = globalScope.chrome?.runtime ?? globalScope.browser?.runtime;
+  if (typeof runtime?.connectNative === "function") {
+    return runtime as NativeMessagingRuntime;
+  }
+
+  throw new Error(toFriendlyNativeHostErrorMessage("Native messaging API is unavailable"));
+}
+
 export class NativeBridgeClient {
   #port: chrome.runtime.Port | null = null;
   #lastDisconnectError: string | null = null;
@@ -63,8 +85,10 @@ export class NativeBridgeClient {
       return this.#port;
     }
 
+    let nativeRuntime: NativeMessagingRuntime;
     try {
-      this.#port = chrome.runtime.connectNative(NATIVE_HOST_NAME);
+      nativeRuntime = getNativeMessagingRuntime();
+      this.#port = nativeRuntime.connectNative(NATIVE_HOST_NAME);
     } catch (error) {
       throw new Error(
         toFriendlyNativeHostErrorMessage(
@@ -76,7 +100,7 @@ export class NativeBridgeClient {
     this.#port.onMessage.addListener((message: BridgeMessage) => this.#handleMessage(message));
     this.#port.onDisconnect.addListener(() => {
       this.#lastDisconnectError = toFriendlyNativeHostErrorMessage(
-        chrome.runtime.lastError?.message ?? "Native host disconnected",
+        nativeRuntime.lastError?.message ?? "Native host disconnected",
       );
       const error = new Error(this.#lastDisconnectError);
       for (const pending of this.#pending.values()) {

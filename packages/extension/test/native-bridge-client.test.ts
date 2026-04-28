@@ -82,4 +82,25 @@ describe("NativeBridgeClient", () => {
     await expect(request).resolves.toEqual({ ok: true });
     await vi.advanceTimersByTimeAsync(25);
   });
+
+  test("falls back to browser.runtime.connectNative for Safari-style WebExtensions", async () => {
+    vi.useFakeTimers();
+    const port = createFakeNativePort();
+    const connectNative = vi.fn(() => port);
+    vi.stubGlobal("chrome", undefined);
+    vi.stubGlobal("browser", {
+      runtime: {
+        connectNative,
+        lastError: null,
+      },
+    });
+
+    const client = new NativeBridgeClient();
+    const request = client.request<{ ok: true }>("model.list", {}, { timeoutMs: 25 });
+    const posted = port.postMessage.mock.calls[0]?.[0] as { id: string };
+    port.emit({ id: posted.id, result: { ok: true } });
+
+    expect(connectNative).toHaveBeenCalledWith("com.codex.sidepanel.bridge");
+    await expect(request).resolves.toEqual({ ok: true });
+  });
 });
