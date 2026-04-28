@@ -73,6 +73,19 @@ function hasPortNativeMessagingRuntime(): boolean {
   return typeof (chromeRuntime ?? browserRuntime)?.connectNative === "function";
 }
 
+function isSafariWebExtensionRuntime(): boolean {
+  const userAgent = (globalThis as { navigator?: { userAgent?: string } }).navigator?.userAgent ?? "";
+  return /\bSafari\//.test(userAgent) && !/\b(?:Chrome|Chromium|Edg|OPR|CriOS|FxiOS)\//.test(userAgent);
+}
+
+function shouldUseConnectionlessNativeMessaging(): boolean {
+  if (!getConnectionlessNativeMessagingRuntime()) {
+    return false;
+  }
+
+  return !hasPortNativeMessagingRuntime() || isSafariWebExtensionRuntime();
+}
+
 export class NativeBridgeClient {
   #port: chrome.runtime.Port | null = null;
   #lastDisconnectError: string | null = null;
@@ -91,11 +104,19 @@ export class NativeBridgeClient {
     params: Record<string, unknown> = {},
     options: BridgeRequestOptions = {},
   ): Promise<TResult> {
-    if (!hasPortNativeMessagingRuntime()) {
+    if (shouldUseConnectionlessNativeMessaging()) {
       return this.#requestConnectionless<TResult>(method, params, options);
     }
 
-    const port = this.#ensurePort();
+    let port: chrome.runtime.Port;
+    try {
+      port = this.#ensurePort();
+    } catch (error) {
+      if (getConnectionlessNativeMessagingRuntime()) {
+        return this.#requestConnectionless<TResult>(method, params, options);
+      }
+      throw error;
+    }
     const id = crypto.randomUUID();
     const response = new Promise<TResult>((resolve, reject) => {
       const pending: PendingBridgeRequest = {
