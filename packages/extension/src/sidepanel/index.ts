@@ -4043,12 +4043,16 @@ function renderAuthOnboarding(
             ? ""
             : `<p class="auth-onboarding-warning">${escapeHtml(strings.onboarding.authDisabled)}</p>`
         }
-        <div class="auth-onboarding-install">
+        ${
+          readiness.canStartAuth
+            ? ""
+            : `<div class="auth-onboarding-install">
           <div class="auth-onboarding-install-title">${escapeHtml(strings.onboarding.installTitle)}</div>
           <p>${escapeHtml(strings.onboarding.installBody)}</p>
           <code>${escapeHtml(getNativeHostInstallCommand(strings))}</code>
           <p>${escapeHtml(strings.onboarding.webOnlyUnavailable)}</p>
-        </div>
+        </div>`
+        }
         <div class="auth-onboarding-actions">
           <button id="onboarding-chatgpt-login" class="auth-onboarding-primary" type="button"${disabledAttribute}>
             ${escapeHtml(strings.onboarding.chatgptCta)}
