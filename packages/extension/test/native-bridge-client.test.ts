@@ -103,4 +103,38 @@ describe("NativeBridgeClient", () => {
     expect(connectNative).toHaveBeenCalledWith("com.codex.sidepanel.bridge");
     await expect(request).resolves.toEqual({ ok: true });
   });
+
+  test("uses connectionless native messaging and polls queued Safari events when ports are unavailable", async () => {
+    vi.useFakeTimers();
+    const sendNativeMessage = vi.fn(async (_application: string, message: { id: string; method: string }) => {
+      if (message.method === "__chromex.events.poll") {
+        return { id: message.id, result: { events: [{ type: "turn.completed" }] } };
+      }
+      return { id: message.id, result: { ok: true } };
+    });
+    vi.stubGlobal("chrome", undefined);
+    vi.stubGlobal("browser", {
+      runtime: {
+        sendNativeMessage,
+        lastError: null,
+      },
+    });
+
+    const client = new NativeBridgeClient();
+    const events: unknown[] = [];
+    client.subscribe((event) => events.push(event));
+
+    await expect(client.request<{ ok: true }>("model.list", {}, { timeoutMs: 25 })).resolves.toEqual({ ok: true });
+    await vi.advanceTimersByTimeAsync(250);
+
+    expect(sendNativeMessage).toHaveBeenCalledWith(
+      "com.codex.sidepanel.bridge",
+      expect.objectContaining({ method: "model.list" }),
+    );
+    expect(sendNativeMessage).toHaveBeenCalledWith(
+      "com.codex.sidepanel.bridge",
+      expect.objectContaining({ method: "__chromex.events.poll" }),
+    );
+    expect(events).toEqual([{ type: "turn.completed" }]);
+  });
 });

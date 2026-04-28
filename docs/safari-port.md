@@ -38,23 +38,32 @@ The staged WebExtension is generated from the Chrome extension dist with Safari-
 
 - removes Chrome-only `side_panel`
 - removes Chrome-only `sidePanel` permission
+- removes Safari-unsupported optional `history` permission and background `type`
 - exposes the existing `sidepanel.html` UI as `action.default_popup`
 - uses required `<all_urls>` host permission so the current page-reading/injection path can work after user approval
 - keeps the rest of the extension code as close to Chrome as possible for early testing
 
-## Known hard blockers
-
-### 1. Full Xcode is required
-
-This machine currently has only Command Line Tools:
+The generated macOS app builds to:
 
 ```text
-/Library/Developer/CommandLineTools
+output/safari/DerivedData/Build/Products/Debug/ChromexSafari.app
 ```
 
-`xcrun safari-web-extension-converter` is missing. Installing full Xcode should provide the converter and the Safari Web Extension project templates. The repo now has `npm run create:safari:xcode`, which will generate the wrapper automatically once that converter exists.
+## Known remaining blockers
 
-### 2. Native messaging is not portable as-is
+### 1. Safari signing / registration is still a user-side step
+
+The project compiles with local/ad-hoc signing for CLI validation. Safari may still require opening the generated Xcode project and selecting a development team for both the containing app and extension targets before the extension appears cleanly in Safari settings.
+
+Open:
+
+```text
+output/safari/xcode/ChromexSafari/ChromexSafari.xcodeproj
+```
+
+Then enable the extension in Safari settings after launching the app.
+
+### 2. Native messaging is bridged, but needs browser-level validation
 
 Chrome uses:
 
@@ -62,7 +71,13 @@ Chrome uses:
 Chrome Extension -> Chrome Native Messaging Host -> Chromex bridge -> codex app-server
 ```
 
-Safari needs a containing macOS app / Safari Web Extension wrapper. The Chrome native-host manifests under Chrome's profile directories do not apply. The bridge can likely be reused, but the Safari app must own the native communication path and launch/relay to the existing Node bridge.
+Safari now uses the generated Swift handler as the transport shim:
+
+```text
+Safari WebExtension -> browser.runtime.sendNativeMessage(...) -> SafariWebExtensionHandler.swift -> packages/bridge/dist/cli.js -> codex app-server
+```
+
+Because Safari native messaging is request/response rather than Chrome's long-lived native port, the extension client falls back to `sendNativeMessage` and polls a small event queue for async bridge events. This compiles, but the full prompt/streaming flow still needs validation inside Safari.
 
 ### 3. No direct Safari Side Panel equivalent
 
@@ -94,21 +109,20 @@ extension background -> chrome.runtime.connectNative("com.codex.sidepanel.bridge
 For Safari, keep `packages/bridge` as the shared core and replace only the transport:
 
 ```text
-Safari WebExtension background -> browser/chrome.runtime.connectNative(...) -> SafariWebExtensionHandler.swift -> containing macOS app / XPC -> Node bridge process
+Safari WebExtension background -> browser.runtime.sendNativeMessage(...) -> SafariWebExtensionHandler.swift -> Node bridge process
 ```
 
 The important Safari difference is that the extension can only native-message its own containing app/extension. There is no Chrome-style `NativeMessagingHosts/*.json` registration. The containing app should own process launch, lifetime, logging, and any App Sandbox/App Group/XPC configuration.
 
-For an MVP, target a single long-lived native port because Chromex expects both request/response messages and asynchronous bridge events such as turn progress, plans, diffs, and rate-limit updates.
+For the MVP, the generated handler launches a single Node bridge process and keeps it alive. Async events such as turn progress, plans, diffs, and rate-limit updates are queued in Swift and fetched by the WebExtension fallback poller.
 
 ## Proposed next steps
 
-1. Install/open full Xcode on the Mac.
-2. Run `npm run check:safari:tooling` and confirm the converter is available.
-3. Run `npm run create:safari:xcode`.
-4. Open the generated project under `output/safari/xcode` and set signing for both app and extension targets.
-5. Replace Chrome native-host install assumptions with Safari app-owned bridge launching.
-6. Test minimal flow first: popup opens, reads current page, sends prompt to local Codex, streams response.
+1. Run `npm run check:safari:tooling` and confirm the converter is available.
+2. Run `npm run create:safari:xcode`.
+3. Run `npm run build:safari:xcode`.
+4. Open the generated project under `output/safari/xcode` and set signing for both app and extension targets if Safari does not list the ad-hoc build.
+5. Test minimal flow first: popup opens, reads current page, sends prompt to local Codex, streams response.
 
 ## Current local patches related to Safari/Chromex
 
@@ -117,5 +131,5 @@ For an MVP, target a single long-lived native port because Chromex expects both 
 - `scripts/check-safari-tooling.mjs`: checks whether Xcode/Safari conversion tooling is installed.
 - `scripts/create-safari-xcode-project.mjs`: runs the converter once full Xcode is installed.
 - `scripts/build-safari-xcode-app.mjs`: compiles the generated Safari app with Xcode.
-- `packages/extension/src/background/native-bridge-client.ts`: uses Chrome's native runtime when present and falls back to `browser.runtime.connectNative` for Safari-style WebExtensions.
+- `packages/extension/src/background/native-bridge-client.ts`: uses Chrome's native runtime when present, falls back to `browser.runtime.connectNative`, and finally supports Safari's connectionless `sendNativeMessage` path with event polling.
 - `package.json`: exposes the Safari staging/tooling scripts.

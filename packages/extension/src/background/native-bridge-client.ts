@@ -19,22 +19,39 @@ type PendingBridgeRequest = {
 import { toFriendlyNativeHostErrorMessage } from "./native-host-errors.js";
 
 const NATIVE_HOST_NAME = "com.codex.sidepanel.bridge";
+const SAFARI_EVENT_POLL_METHOD = "__chromex.events.poll";
+const SAFARI_EVENT_POLL_INTERVAL_MS = 250;
+
+type RuntimeCandidate = {
+  connectNative?: unknown;
+  sendNativeMessage?: unknown;
+  lastError?: { message?: string } | null;
+};
 
 type NativeMessagingRuntime = {
   connectNative: (application: string) => chrome.runtime.Port;
   lastError?: { message?: string } | null;
 };
 
-function getNativeMessagingRuntime(): NativeMessagingRuntime {
-  type RuntimeCandidate = {
-    connectNative?: unknown;
-    lastError?: { message?: string } | null;
-  };
+type ConnectionlessNativeMessagingRuntime = {
+  sendNativeMessage: (application: string, message: unknown) => Promise<BridgeMessage>;
+  lastError?: { message?: string } | null;
+};
+
+function getRuntimeCandidates(): { chromeRuntime: RuntimeCandidate | undefined; browserRuntime: RuntimeCandidate | undefined } {
   const globalScope = globalThis as {
     chrome?: { runtime?: RuntimeCandidate };
     browser?: { runtime?: RuntimeCandidate };
   };
-  const runtime = globalScope.chrome?.runtime ?? globalScope.browser?.runtime;
+  return {
+    chromeRuntime: globalScope.chrome?.runtime,
+    browserRuntime: globalScope.browser?.runtime,
+  };
+}
+
+function getNativeMessagingRuntime(): NativeMessagingRuntime {
+  const { chromeRuntime, browserRuntime } = getRuntimeCandidates();
+  const runtime = chromeRuntime ?? browserRuntime;
   if (typeof runtime?.connectNative === "function") {
     return runtime as NativeMessagingRuntime;
   }
@@ -42,11 +59,27 @@ function getNativeMessagingRuntime(): NativeMessagingRuntime {
   throw new Error(toFriendlyNativeHostErrorMessage("Native messaging API is unavailable"));
 }
 
+function getConnectionlessNativeMessagingRuntime(): ConnectionlessNativeMessagingRuntime | null {
+  const { browserRuntime, chromeRuntime } = getRuntimeCandidates();
+  const runtime = browserRuntime ?? chromeRuntime;
+  if (typeof runtime?.sendNativeMessage === "function") {
+    return runtime as ConnectionlessNativeMessagingRuntime;
+  }
+  return null;
+}
+
+function hasPortNativeMessagingRuntime(): boolean {
+  const { chromeRuntime, browserRuntime } = getRuntimeCandidates();
+  return typeof (chromeRuntime ?? browserRuntime)?.connectNative === "function";
+}
+
 export class NativeBridgeClient {
   #port: chrome.runtime.Port | null = null;
   #lastDisconnectError: string | null = null;
   #pending = new Map<string, PendingBridgeRequest>();
   #listeners = new Set<(event: unknown) => void>();
+  #safariEventPollTimer: ReturnType<typeof setInterval> | null = null;
+  #safariEventPollInFlight = false;
 
   subscribe(listener: (event: unknown) => void): () => void {
     this.#listeners.add(listener);
@@ -58,6 +91,10 @@ export class NativeBridgeClient {
     params: Record<string, unknown> = {},
     options: BridgeRequestOptions = {},
   ): Promise<TResult> {
+    if (!hasPortNativeMessagingRuntime()) {
+      return this.#requestConnectionless<TResult>(method, params, options);
+    }
+
     const port = this.#ensurePort();
     const id = crypto.randomUUID();
     const response = new Promise<TResult>((resolve, reject) => {
@@ -78,6 +115,33 @@ export class NativeBridgeClient {
 
     port.postMessage({ id, method, params });
     return response;
+  }
+
+  async #requestConnectionless<TResult>(
+    method: string,
+    params: Record<string, unknown>,
+    options: BridgeRequestOptions,
+  ): Promise<TResult> {
+    const runtime = getConnectionlessNativeMessagingRuntime();
+    if (!runtime) {
+      throw new Error(toFriendlyNativeHostErrorMessage("Native messaging API is unavailable"));
+    }
+
+    this.#startSafariEventPolling();
+    const id = crypto.randomUUID();
+    const response = Promise.resolve(runtime.sendNativeMessage(NATIVE_HOST_NAME, { id, method, params }));
+    const message = await withOptionalTimeout(
+      response,
+      options.timeoutMs,
+      options.timeoutMessage ?? `${method} did not respond in time.`,
+    );
+    this.#handleEventMessagesFromConnectionlessResponse(message);
+
+    if (message.error) {
+      throw new Error(message.error.message);
+    }
+
+    return message.result as TResult;
   }
 
   #ensurePort(): chrome.runtime.Port {
@@ -115,11 +179,63 @@ export class NativeBridgeClient {
     return this.#port;
   }
 
+  #startSafariEventPolling(): void {
+    if (this.#safariEventPollTimer) {
+      return;
+    }
+
+    this.#safariEventPollTimer = setInterval(() => {
+      void this.#pollSafariEvents();
+    }, SAFARI_EVENT_POLL_INTERVAL_MS);
+  }
+
+  async #pollSafariEvents(): Promise<void> {
+    if (this.#safariEventPollInFlight) {
+      return;
+    }
+
+    const runtime = getConnectionlessNativeMessagingRuntime();
+    if (!runtime) {
+      return;
+    }
+
+    this.#safariEventPollInFlight = true;
+    try {
+      const message = await runtime.sendNativeMessage(NATIVE_HOST_NAME, {
+        id: crypto.randomUUID(),
+        method: SAFARI_EVENT_POLL_METHOD,
+        params: {},
+      });
+      this.#handleEventMessagesFromConnectionlessResponse(message);
+    } catch {
+      // Keep polling best-effort; normal foreground requests surface bridge errors to the UI.
+    } finally {
+      this.#safariEventPollInFlight = false;
+    }
+  }
+
+  #handleEventMessagesFromConnectionlessResponse(message: BridgeMessage): void {
+    if (message.event) {
+      this.#emitEvent(message.event);
+    }
+
+    const events = (message.result as { events?: unknown[] } | undefined)?.events;
+    if (Array.isArray(events)) {
+      for (const event of events) {
+        this.#emitEvent(event);
+      }
+    }
+  }
+
+  #emitEvent(event: unknown): void {
+    for (const listener of this.#listeners) {
+      listener(event);
+    }
+  }
+
   #handleMessage(message: BridgeMessage): void {
     if (message.event) {
-      for (const listener of this.#listeners) {
-        listener(message.event);
-      }
+      this.#emitEvent(message.event);
       return;
     }
 
@@ -142,5 +258,25 @@ export class NativeBridgeClient {
     }
 
     pending.resolve(message.result);
+  }
+}
+
+async function withOptionalTimeout<T>(promise: Promise<T>, timeoutMs: number | undefined, timeoutMessage: string): Promise<T> {
+  if (!timeoutMs || timeoutMs <= 0) {
+    return promise;
+  }
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(timeoutMessage)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
   }
 }

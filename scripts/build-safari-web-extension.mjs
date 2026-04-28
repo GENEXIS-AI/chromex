@@ -28,6 +28,10 @@ delete manifest.minimum_chrome_version;
 delete manifest.key;
 
 manifest.permissions = (manifest.permissions ?? []).filter((permission) => permission !== "sidePanel");
+manifest.optional_permissions = (manifest.optional_permissions ?? []).filter((permission) => permission !== "history");
+if (manifest.background && typeof manifest.background === "object") {
+  delete manifest.background.type;
+}
 
 // Safari's site-access UX is stricter and the Chrome optional-host flow is not
 // enough for the current scripted page-reading path. Keep the staged Safari
@@ -47,7 +51,8 @@ await writeFile(
     "",
     "Important differences from the Chrome build:",
     "- Chrome side_panel is removed; sidepanel.html is exposed as action.default_popup.",
-    "- sidePanel permission is removed.",
+    "- sidePanel and Safari-unsupported history permissions are removed.",
+    "- background.type is removed because the bundled background script does not need module loading in Safari.",
     "- <all_urls> is a required host permission for the current page-reading path.",
     "- Chrome's native messaging host installer does not apply to Safari; a containing macOS app bridge is still required.",
     "",
