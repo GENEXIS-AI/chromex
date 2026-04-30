@@ -1444,7 +1444,9 @@ async function handlePromptCancel(clientRequestId?: unknown, threadId?: unknown,
   await stopCurrentAiControlIndicator(0);
 
   if (typeof threadId === "string" && typeof turnId === "string") {
-    await handleTurnInterrupt(threadId, turnId).catch(() => undefined);
+    await handleTurnInterrupt(threadId, turnId).catch((error) => {
+      console.error("Failed to interrupt turn:", error);
+    });
   }
 
   return { cancelled: true };
@@ -2766,7 +2768,9 @@ async function broadcastActiveTabSnapshot(): Promise<void> {
   if (!activeTab) {
     return;
   }
-  void installImagePromptHoverForTab(activeTab).catch(() => undefined);
+  void installImagePromptHoverForTab(activeTab).catch((error) => {
+    console.error("Failed to install image prompt hover:", error);
+  });
   const currentTab = tabToOpenTabContext(activeTab);
   await chrome.runtime
     .sendMessage({
@@ -3463,7 +3467,9 @@ async function recordDiagnostic(event: string, details: Record<string, unknown> 
       event,
       details,
     })
-    .catch(() => undefined);
+    .catch((error) => {
+      console.error("Failed to record diagnostic:", error);
+    });
 }
 
 async function dataUrlToEditableJpegInput(dataUrl: string, fallbackFilename: string) {

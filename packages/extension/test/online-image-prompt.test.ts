@@ -101,7 +101,8 @@ describe("online image prompt extraction", () => {
     expect(contentSource).toContain("function handleImagePromptPointerOver");
     expect(contentSource).toContain("function isPointerInsideImagePromptHoverSurface");
     expect(backgroundSource).toContain("function installImagePromptHoverForTab");
-    expect(backgroundSource).toContain("void installImagePromptHoverForTab(activeTab).catch(() => undefined)");
+    expect(backgroundSource).toContain('void installImagePromptHoverForTab(activeTab).catch((error) => {');
+    expect(backgroundSource).toContain('console.error("Failed to install image prompt hover:", error)');
     expect(backgroundSource).toContain('case "page.image-prompt-hover.install"');
     expect(backgroundSource).toContain('case "page.image-prompt.extract"');
     expect(backgroundSource).toContain("chrome.sidePanel.open");
