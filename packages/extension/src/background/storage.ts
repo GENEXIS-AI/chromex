@@ -303,6 +303,14 @@ export async function deleteConversation(conversationId: string): Promise<SavedC
   return next.conversations;
 }
 
+export async function getConversationCount(): Promise<number> {
+  const area = await getConversationStorageArea();
+  const result = (await area.get(STORAGE_KEYS.conversations))[STORAGE_KEYS.conversations] as
+    | unknown[]
+    | undefined;
+  return Array.isArray(result) ? result.length : 0;
+}
+
 export async function clearConversations(): Promise<void> {
   const area = await getConversationStorageArea();
   const next = clearConversationHistoryState();

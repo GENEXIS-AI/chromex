@@ -64,6 +64,7 @@ import {
   getSelectedServiceTier,
   getStoredSettings,
   listDeletedProfileIds,
+  getConversationCount,
   listConversations,
   listCustomProfiles,
   listSkills,
@@ -3894,6 +3895,7 @@ async function handleConversationDelete(conversationId: string) {
 }
 
 async function handleConversationClear() {
+  const deletedCount = await getConversationCount();
   await clearConversations();
   conversationRuntime.clear();
   state.currentConversationId = "";
@@ -3907,6 +3909,7 @@ async function handleConversationClear() {
   state.lastAutoCompactBucket = null;
   return {
     recentChats: [],
+    deletedCount,
     currentConversation: null,
   };
 }

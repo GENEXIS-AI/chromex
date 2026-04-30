@@ -93,6 +93,15 @@ describe("settings panel structure", () => {
     expect(sidepanelSource).toContain('state.recentChats.length ? "" : "disabled"');
   });
 
+  test("previews the number of recent chats before clearing history", () => {
+    expect(sidepanelSource).toContain("visibleChatCount");
+    expect(sidepanelSource).toMatch(/strings\.prompts\.clearChatHistoryConfirm/);
+    expect(sidepanelSource).toMatch(/strings\.labels\.recentChats[\s\S]*visibleChatCount/);
+    expect(sidepanelSource).toMatch(/strings\.actions\.clearRecentChats[\s\S]*visibleChatCount/);
+    expect(sidepanelSource).toMatch(/\bdeletedCount\b/);
+    expect(sidepanelSource).toMatch(/strings\.status\.chatHistoryCleared[\s\S]*result\.deletedCount/);
+  });
+
   test("uses compact typography for settings rows and controls", () => {
     expect(readFinalDeclaration(".settings-page-header h2", "font-size")).toBe("22px");
     expect(readFinalDeclaration(".settings-page-header h2", "line-height")).toBe("30px");

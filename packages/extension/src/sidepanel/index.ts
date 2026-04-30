@@ -5570,7 +5570,9 @@ function renderWorkspaceView(strings: ReturnType<typeof getUiStrings>): string {
             renderSettingsRow(
               "chat-history",
               strings.labels.recentChats,
-              strings.settingsPanel.chatHistoryDescription,
+              state.recentChats.length
+                ? `${strings.settingsPanel.chatHistoryDescription} (${state.recentChats.length})`
+                : strings.settingsPanel.chatHistoryDescription,
               `<button class="settings-compact-button danger" type="button" data-clear-chat-history="settings" ${
                 state.recentChats.length ? "" : "disabled"
               }>${escapeHtml(strings.actions.clearRecentChats)}</button>`,
@@ -11675,9 +11677,10 @@ async function clearConversationHistoryFromUi(options: { returnToSettings?: bool
   }
 
   const strings = stringsForState();
-  const message = strings.prompts.clearChatHistoryConfirm;
+  const visibleChatCount = state.recentChats.length;
+  const message = `${strings.prompts.clearChatHistoryConfirm} — ${strings.labels.recentChats}: ${visibleChatCount}`;
   const approved = await requestNativeConfirmation(message, {
-    title: strings.actions.clearRecentChats,
+    title: `${strings.actions.clearRecentChats} (${visibleChatCount})`,
     confirmLabel: strings.actions.clearRecentChats,
     tone: "danger",
   });
@@ -11687,6 +11690,7 @@ async function clearConversationHistoryFromUi(options: { returnToSettings?: bool
 
   const result = await sendRuntimeMessage<{
     recentChats: ConversationSummary[];
+    deletedCount: number;
     currentConversation: SavedConversation | null;
   }>({
     type: "conversation.clear",
@@ -11695,7 +11699,9 @@ async function clearConversationHistoryFromUi(options: { returnToSettings?: bool
   hydrateConversation(result.currentConversation);
   state.activeView = options.returnToSettings ? "workspace" : "chat";
   state.appMenuOpen = false;
-  state.actionStatus = strings.status.chatHistoryCleared;
+  state.actionStatus = result.deletedCount
+    ? `${strings.status.chatHistoryCleared} (${result.deletedCount})`
+    : strings.status.chatHistoryCleared;
   render();
 }
 
