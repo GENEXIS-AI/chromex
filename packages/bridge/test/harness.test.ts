@@ -119,8 +119,9 @@ describe("BridgeHarnessRuntime", () => {
   test("sanitizes hook environments before running workspace commands", async () => {
     const env = createHookProcessEnv(
       {
-        PATH: "/usr/bin",
+        Path: "C:\\Program Files\\nodejs;C:\\Users\\example\\AppData\\Roaming\\npm",
         HOME: "/Users/example",
+        COMSPEC: "C:\\Windows\\System32\\cmd.exe",
         HTTPS_PROXY: "http://proxy.internal:8080",
         OPENAI_API_KEY: "test-openai-key",
       },
@@ -130,8 +131,9 @@ describe("BridgeHarnessRuntime", () => {
       },
     );
 
-    expect(env.PATH).toBe("/usr/bin");
+    expect(env.PATH).toBe("C:\\Program Files\\nodejs;C:\\Users\\example\\AppData\\Roaming\\npm");
     expect(env.HOME).toBe("/Users/example");
+    expect(env.ComSpec).toBe("C:\\Windows\\System32\\cmd.exe");
     expect(env.HTTPS_PROXY).toBe("http://proxy.internal:8080");
     expect(env.CODEX_SIDEPANEL_WORKSPACE_ROOT).toBe("/workspace");
     expect(env.CODEX_SIDEPANEL_HOME).toBe("/home/user/.codex-sidepanel");

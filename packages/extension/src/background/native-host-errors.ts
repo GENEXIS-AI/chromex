@@ -13,11 +13,11 @@ export function toFriendlyNativeHostErrorMessage(rawMessage: string | undefined)
   const normalized = message.toLowerCase();
 
   if (MISSING_HOST_PATTERNS.some((pattern) => normalized.includes(pattern))) {
-    return "Codex native host is not installed for this browser profile yet. Install the local bridge once, then finish the rest of the setup from Workspace > Connection.";
+    return "Codex native host is not installed for this browser profile yet. Install the local bridge once, then reload the extension. On Windows, use the extension ID shown in chrome://extensions with --browser=chrome instead of a profile folder.";
   }
 
   if (FORBIDDEN_HOST_PATTERNS.some((pattern) => normalized.includes(pattern))) {
-    return "This browser profile is connected to a different native host registration. Reinstall the local bridge for the currently loaded extension, then use Workspace > Connection to finish setup.";
+    return "This browser profile is connected to a different native host registration. Reinstall the local bridge for the currently loaded extension ID, then reload the extension. On Windows, native messaging is registered through the current-user registry.";
   }
 
   if (normalized.includes("disconnected")) {

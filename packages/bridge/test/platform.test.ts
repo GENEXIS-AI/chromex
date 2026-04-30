@@ -30,7 +30,7 @@ describe("cross-platform runtime paths", () => {
       resolveDefaultGeneratedImageDir({
         platformName: "win32",
         homeDirectory: "C:\\Users\\Alice",
-        env: { LOCALAPPDATA: "C:\\Users\\Alice\\AppData\\Local" },
+        env: { LocalAppData: "C:\\Users\\Alice\\AppData\\Local" },
       }),
     ).toBe("C:\\Users\\Alice\\AppData\\Local\\CodexSidepanel\\Generated Images");
   });
@@ -57,7 +57,7 @@ describe("cross-platform runtime paths", () => {
   });
 
   test("does not hard-code /bin/bash for Windows hook execution", () => {
-    expect(resolveHookShellCommand("echo hi", { platformName: "win32", env: { ComSpec: "C:\\Windows\\cmd.exe" } }))
+    expect(resolveHookShellCommand("echo hi", { platformName: "win32", env: { COMSPEC: "C:\\Windows\\cmd.exe" } }))
       .toEqual({
         command: "C:\\Windows\\cmd.exe",
         args: ["/d", "/s", "/c", "echo hi"],

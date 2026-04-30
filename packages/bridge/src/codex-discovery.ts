@@ -1,7 +1,7 @@
-import { access } from "node:fs/promises";
+import { access, stat } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
 import { homedir, platform } from "node:os";
-import { delimiter, posix, win32 } from "node:path";
+import { posix, win32 } from "node:path";
 
 export type CodexCommandSource = "configured" | "env" | "path" | "common" | "missing";
 
@@ -15,20 +15,31 @@ export interface CodexCommandResolution {
 export async function resolveCodexCommand(options: {
   configuredCommand?: string | null;
   envCommand?: string | null;
+  env?: NodeJS.ProcessEnv;
   pathValue?: string | undefined;
   homeDirectory?: string;
   platformName?: NodeJS.Platform;
   isExecutable?: (path: string) => Promise<boolean>;
+  isDirectory?: (path: string) => Promise<boolean>;
 } = {}): Promise<CodexCommandResolution> {
+  const env = options.env ?? process.env;
   const configuredCommand = options.configuredCommand?.trim() ?? "";
-  const envCommand = options.envCommand?.trim() ?? "";
-  const pathValue = options.pathValue ?? process.env.PATH ?? "";
+  const envCommand = (options.envCommand ?? readEnvValue(env, "CODEX_BIN") ?? "").trim();
+  const pathValue = options.pathValue ?? readEnvValue(env, "PATH") ?? "";
   const homeDirectory = options.homeDirectory ?? homedir();
   const platformName = options.platformName ?? platform();
   const isExecutable = options.isExecutable ?? isExecutableFile;
+  const isDirectory = options.isDirectory ?? isDirectoryPath;
 
   if (configuredCommand) {
-    const resolvedConfigured = await findExecutable(configuredCommand, { pathValue, platformName, isExecutable });
+    const resolvedConfigured = await findExecutable(configuredCommand, {
+      env,
+      homeDirectory,
+      pathValue,
+      platformName,
+      isExecutable,
+      isDirectory,
+    });
     if (resolvedConfigured) {
       return {
         configuredCommand,
@@ -40,7 +51,14 @@ export async function resolveCodexCommand(options: {
   }
 
   if (envCommand) {
-    const resolvedEnv = await findExecutable(envCommand, { pathValue, platformName, isExecutable });
+    const resolvedEnv = await findExecutable(envCommand, {
+      env,
+      homeDirectory,
+      pathValue,
+      platformName,
+      isExecutable,
+      isDirectory,
+    });
     if (resolvedEnv) {
       return {
         configuredCommand,
@@ -51,7 +69,14 @@ export async function resolveCodexCommand(options: {
     }
   }
 
-  const resolvedPathCommand = await findExecutable("codex", { pathValue, platformName, isExecutable });
+  const resolvedPathCommand = await findExecutable("codex", {
+    env,
+    homeDirectory,
+    pathValue,
+    platformName,
+    isExecutable,
+    isDirectory,
+  });
   if (resolvedPathCommand) {
     return {
       configuredCommand,
@@ -61,8 +86,15 @@ export async function resolveCodexCommand(options: {
     };
   }
 
-  for (const candidate of commonCodexCandidates(homeDirectory, platformName)) {
-    const resolvedCandidate = await findExecutable(candidate, { pathValue, platformName, isExecutable });
+  for (const candidate of commonCodexCandidates(homeDirectory, platformName, env)) {
+    const resolvedCandidate = await findExecutable(candidate, {
+      env,
+      homeDirectory,
+      pathValue,
+      platformName,
+      isExecutable,
+      isDirectory,
+    });
     if (resolvedCandidate) {
       return {
         configuredCommand,
@@ -84,12 +116,15 @@ export async function resolveCodexCommand(options: {
 async function findExecutable(
   candidate: string,
   options: {
+    env: NodeJS.ProcessEnv;
+    homeDirectory: string;
     pathValue: string;
     platformName: NodeJS.Platform;
     isExecutable: (path: string) => Promise<boolean>;
+    isDirectory: (path: string) => Promise<boolean>;
   },
 ): Promise<string | null> {
-  const trimmed = candidate.trim();
+  const trimmed = expandPathCandidate(candidate.trim(), options);
   const pathApi = getPathApi(options.platformName);
   const pathDelimiter = options.platformName === "win32" ? ";" : ":";
   if (!trimmed) {
@@ -98,7 +133,18 @@ async function findExecutable(
 
   if (looksLikePath(trimmed, options.platformName)) {
     const absoluteCandidate = pathApi.isAbsolute(trimmed) ? trimmed : pathApi.resolve(trimmed);
-    return (await options.isExecutable(absoluteCandidate)) ? absoluteCandidate : null;
+    if (await options.isExecutable(absoluteCandidate)) {
+      return absoluteCandidate;
+    }
+    if (await options.isDirectory(absoluteCandidate)) {
+      for (const variant of commandVariants("codex", options.platformName)) {
+        const nestedCandidate = pathApi.join(absoluteCandidate, variant);
+        if (await options.isExecutable(nestedCandidate)) {
+          return nestedCandidate;
+        }
+      }
+    }
+    return null;
   }
 
   for (const pathEntry of options.pathValue.split(pathDelimiter).filter(Boolean)) {
@@ -130,12 +176,29 @@ function commandVariants(command: string, platformName: NodeJS.Platform): string
   return [command, `${command}.exe`, `${command}.cmd`, `${command}.bat`];
 }
 
-function commonCodexCandidates(homeDirectory: string, platformName: NodeJS.Platform): string[] {
+function commonCodexCandidates(
+  homeDirectory: string,
+  platformName: NodeJS.Platform,
+  env: NodeJS.ProcessEnv,
+): string[] {
   if (platformName === "win32") {
-    return [
-      win32.resolve(homeDirectory, "AppData", "Local", "Programs", "Codex", "codex.exe"),
+    const localAppData = readEnvValue(env, "LOCALAPPDATA") || win32.resolve(homeDirectory, "AppData", "Local");
+    const appData = readEnvValue(env, "APPDATA") || win32.resolve(homeDirectory, "AppData", "Roaming");
+    const fallbackLocalAppData = win32.resolve(homeDirectory, "AppData", "Local");
+    const fallbackAppData = win32.resolve(homeDirectory, "AppData", "Roaming");
+    const programFiles = readEnvValue(env, "ProgramFiles");
+    const programFilesX86 = readEnvValue(env, "ProgramFiles(x86)");
+    return dedupeCandidates([
+      win32.resolve(localAppData, "Programs", "Codex", "codex.exe"),
+      win32.resolve(appData, "npm", "codex.cmd"),
+      win32.resolve(appData, "npm", "codex.exe"),
+      win32.resolve(fallbackLocalAppData, "Programs", "Codex", "codex.exe"),
+      win32.resolve(fallbackAppData, "npm", "codex.cmd"),
+      win32.resolve(fallbackAppData, "npm", "codex.exe"),
       win32.resolve(homeDirectory, "scoop", "shims", "codex.cmd"),
-    ];
+      ...(programFiles ? [win32.resolve(programFiles, "Codex", "codex.exe")] : []),
+      ...(programFilesX86 ? [win32.resolve(programFilesX86, "Codex", "codex.exe")] : []),
+    ]);
   }
 
   return [
@@ -151,14 +214,62 @@ function commonCodexCandidates(homeDirectory: string, platformName: NodeJS.Platf
   ];
 }
 
+function dedupeCandidates(candidates: string[]): string[] {
+  return [...new Set(candidates)];
+}
+
 function getPathApi(platformName: NodeJS.Platform): typeof posix | typeof win32 {
   return platformName === "win32" ? win32 : posix;
+}
+
+function expandPathCandidate(
+  value: string,
+  options: {
+    env: NodeJS.ProcessEnv;
+    homeDirectory: string;
+    platformName: NodeJS.Platform;
+  },
+): string {
+  let expanded = value;
+
+  if (expanded === "~" || expanded.startsWith("~/") || expanded.startsWith("~\\")) {
+    expanded = `${options.homeDirectory}${expanded.slice(1)}`;
+  }
+
+  if (options.platformName === "win32") {
+    expanded = expanded.replace(/%([^%]+)%/gu, (match, key: string) => readEnvValue(options.env, key) ?? match);
+    expanded = expanded.replace(/\$env:([A-Za-z_][A-Za-z0-9_]*)/giu, (match, key: string) =>
+      readEnvValue(options.env, key) ?? match,
+    );
+  }
+
+  return expanded;
+}
+
+function readEnvValue(env: NodeJS.ProcessEnv, key: string): string | undefined {
+  const exactValue = env[key];
+  if (typeof exactValue === "string") {
+    return exactValue;
+  }
+
+  const normalizedKey = key.toLowerCase();
+  const actualKey = Object.keys(env).find((candidate) => candidate.toLowerCase() === normalizedKey);
+  const value = actualKey ? env[actualKey] : undefined;
+  return typeof value === "string" ? value : undefined;
 }
 
 async function isExecutableFile(path: string): Promise<boolean> {
   try {
     await access(path, fsConstants.X_OK);
     return true;
+  } catch {
+    return false;
+  }
+}
+
+async function isDirectoryPath(path: string): Promise<boolean> {
+  try {
+    return (await stat(path)).isDirectory();
   } catch {
     return false;
   }

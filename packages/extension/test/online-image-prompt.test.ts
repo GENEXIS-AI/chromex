@@ -6,6 +6,7 @@ import { describe, expect, test } from "vitest";
 import { createOnlineImagePromptExtractionPrompt } from "../src/sidepanel/online-image-prompt.js";
 
 const contentSource = readFileSync(resolve(process.cwd(), "src/content/index.ts"), "utf8");
+const normalizedContentSource = contentSource.replace(/\r\n?/gu, "\n");
 const backgroundSource = readFileSync(resolve(process.cwd(), "src/background/index.ts"), "utf8");
 const sidepanelSource = readFileSync(resolve(process.cwd(), "src/sidepanel/index.ts"), "utf8");
 const manifest = JSON.parse(readFileSync(resolve(process.cwd(), "public/manifest.json"), "utf8")) as {
@@ -124,7 +125,7 @@ describe("online image prompt extraction", () => {
         }),
       ]),
     );
-    expect(contentSource).toContain("\ninstallImagePromptHover();\n");
+    expect(normalizedContentSource).toContain("\ninstallImagePromptHover();\n");
     expect(manifest.permissions).toContain("offscreen");
   });
 

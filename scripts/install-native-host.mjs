@@ -39,6 +39,7 @@ if (!extensionId || !isValidExtensionId(extensionId)) {
 }
 
 const selectedBrowsers = parseSelectedBrowsers(browserArg?.slice("--browser=".length));
+assertSelectedBrowsersSupportedOnPlatform(selectedBrowsers, currentPlatform);
 const appSupportDir = resolveAppSupportDir(currentPlatform);
 const hostInstallDir = resolve(appSupportDir, "native-host");
 const hostSourceDir = resolve(repoRoot, "packages/native-host/dist");
@@ -119,6 +120,18 @@ console.log(`Allowed extension IDs: ${allowedExtensionIds.join(", ")}`);
 if (includeLegacyExtensionIds) {
   console.log("Legacy extension IDs were included because --include-legacy-extension-ids was set.");
 }
+if (currentPlatform === "win32") {
+  console.log("");
+  console.log("Windows checks:");
+  console.log("- Run: codex --version");
+  console.log("- Run: where codex");
+  console.log(`- Run: reg query HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts\\${NATIVE_HOST_NAME}`);
+  if (profileDirArg) {
+    console.log(
+      "- Note: --profile-dir is ignored on Windows because Chrome native messaging uses the current-user registry. If setup is still waiting, rerun with the extension ID and --browser=chrome.",
+    );
+  }
+}
 console.log("No API key was copied during installation. ChatGPT login remains the default auth path.");
 
 function isValidExtensionId(value) {
@@ -139,6 +152,25 @@ function parseSelectedBrowsers(rawValue) {
     throw new Error(`Unsupported browser target(s): ${unsupported.join(", ")}`);
   }
   return browsers.length ? new Set(browsers) : null;
+}
+
+function assertSelectedBrowsersSupportedOnPlatform(selectedBrowsers, platformFamily) {
+  if (platformFamily !== "win32" || !selectedBrowsers) {
+    return;
+  }
+
+  const unsupported = [...selectedBrowsers].filter((browser) => browser === "chrome-for-testing" || browser === "chromium");
+  if (!unsupported.length) {
+    return;
+  }
+
+  throw new Error(
+    [
+      `Windows native messaging registration is only installed for Chrome stable/beta/dev/canary. Unsupported target(s): ${unsupported.join(", ")}`,
+      "Use --browser=chrome for normal Chrome, or load the extension in Chrome stable before installing the local bridge.",
+      "Chrome on Windows discovers native messaging hosts through HKCU registry keys, not profile-folder NativeMessagingHosts directories.",
+    ].join("\n"),
+  );
 }
 
 async function deriveExtensionIdFromManifest(manifestPath) {
@@ -162,14 +194,14 @@ async function deriveExtensionIdFromManifest(manifestPath) {
 
 function resolveAppSupportDir(platformFamily) {
   if (platformFamily === "darwin") {
-    return resolve(homedir(), "Library/Application Support/CodexSidepanel");
+    return resolve(homedir(), "Library", "Application Support", "CodexSidepanel");
   }
 
   if (platformFamily === "win32") {
-    return resolve(process.env.LOCALAPPDATA || resolve(homedir(), "AppData/Local"), "CodexSidepanel");
+    return resolve(readEnvValue(process.env, "LOCALAPPDATA") || resolve(homedir(), "AppData", "Local"), "CodexSidepanel");
   }
 
-  return resolve(process.env.XDG_CONFIG_HOME || resolve(homedir(), ".config"), "codex-sidepanel");
+  return resolve(readEnvValue(process.env, "XDG_CONFIG_HOME") || resolve(homedir(), ".config"), "codex-sidepanel");
 }
 
 function resolveInstallTargets({ platformFamily, homeDir, appSupportDir, selectedBrowsers, profileDir }) {
@@ -181,42 +213,42 @@ function resolveInstallTargets({ platformFamily, homeDir, appSupportDir, selecte
       targets.push({
         kind: "file",
         label: "Google Chrome (user)",
-        manifestDir: resolve(homeDir, "Library/Application Support/Google/Chrome/NativeMessagingHosts"),
+        manifestDir: resolve(homeDir, "Library", "Application Support", "Google", "Chrome", "NativeMessagingHosts"),
       });
     }
     if (include("chrome-beta")) {
       targets.push({
         kind: "file",
         label: "Google Chrome Beta (user)",
-        manifestDir: resolve(homeDir, "Library/Application Support/Google/Chrome Beta/NativeMessagingHosts"),
+        manifestDir: resolve(homeDir, "Library", "Application Support", "Google", "Chrome Beta", "NativeMessagingHosts"),
       });
     }
     if (include("chrome-dev")) {
       targets.push({
         kind: "file",
         label: "Google Chrome Dev (user)",
-        manifestDir: resolve(homeDir, "Library/Application Support/Google/Chrome Dev/NativeMessagingHosts"),
+        manifestDir: resolve(homeDir, "Library", "Application Support", "Google", "Chrome Dev", "NativeMessagingHosts"),
       });
     }
     if (include("chrome-canary")) {
       targets.push({
         kind: "file",
         label: "Google Chrome Canary (user)",
-        manifestDir: resolve(homeDir, "Library/Application Support/Google/Chrome Canary/NativeMessagingHosts"),
+        manifestDir: resolve(homeDir, "Library", "Application Support", "Google", "Chrome Canary", "NativeMessagingHosts"),
       });
     }
     if (include("chrome-for-testing")) {
       targets.push({
         kind: "file",
         label: "Google Chrome for Testing (user)",
-        manifestDir: resolve(homeDir, "Library/Application Support/Google/ChromeForTesting/NativeMessagingHosts"),
+        manifestDir: resolve(homeDir, "Library", "Application Support", "Google", "ChromeForTesting", "NativeMessagingHosts"),
       });
     }
     if (include("chromium")) {
       targets.push({
         kind: "file",
         label: "Chromium (user)",
-        manifestDir: resolve(homeDir, "Library/Application Support/Chromium/NativeMessagingHosts"),
+        manifestDir: resolve(homeDir, "Library", "Application Support", "Chromium", "NativeMessagingHosts"),
       });
     }
   } else if (platformFamily === "linux") {
@@ -260,7 +292,7 @@ function resolveInstallTargets({ platformFamily, homeDir, appSupportDir, selecte
       targets.push({
         kind: "windows-registry",
         label: "Google Chrome (current user)",
-        manifestDir: resolve(appSupportDir, "NativeMessagingHosts/Chrome"),
+        manifestDir: resolve(appSupportDir, "NativeMessagingHosts", "Chrome"),
         registryKey: `HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts\\${NATIVE_HOST_NAME}`,
       });
     }
@@ -268,7 +300,7 @@ function resolveInstallTargets({ platformFamily, homeDir, appSupportDir, selecte
       targets.push({
         kind: "windows-registry",
         label: "Google Chrome Beta (current user)",
-        manifestDir: resolve(appSupportDir, "NativeMessagingHosts/ChromeBeta"),
+        manifestDir: resolve(appSupportDir, "NativeMessagingHosts", "ChromeBeta"),
         registryKey: `HKCU\\Software\\Google\\Chrome Beta\\NativeMessagingHosts\\${NATIVE_HOST_NAME}`,
       });
     }
@@ -276,7 +308,7 @@ function resolveInstallTargets({ platformFamily, homeDir, appSupportDir, selecte
       targets.push({
         kind: "windows-registry",
         label: "Google Chrome Dev (current user)",
-        manifestDir: resolve(appSupportDir, "NativeMessagingHosts/ChromeDev"),
+        manifestDir: resolve(appSupportDir, "NativeMessagingHosts", "ChromeDev"),
         registryKey: `HKCU\\Software\\Google\\Chrome Dev\\NativeMessagingHosts\\${NATIVE_HOST_NAME}`,
       });
     }
@@ -284,7 +316,7 @@ function resolveInstallTargets({ platformFamily, homeDir, appSupportDir, selecte
       targets.push({
         kind: "windows-registry",
         label: "Google Chrome Canary (current user)",
-        manifestDir: resolve(appSupportDir, "NativeMessagingHosts/ChromeCanary"),
+        manifestDir: resolve(appSupportDir, "NativeMessagingHosts", "ChromeCanary"),
         registryKey: `HKCU\\Software\\Google\\Chrome SxS\\NativeMessagingHosts\\${NATIVE_HOST_NAME}`,
       });
     }
@@ -292,7 +324,7 @@ function resolveInstallTargets({ platformFamily, homeDir, appSupportDir, selecte
     throw new Error(`Unsupported platform: ${platformFamily}`);
   }
 
-  if (profileDir) {
+  if (profileDir && platformFamily !== "win32") {
     targets.push({
       kind: "file",
       label: "Custom profile",
@@ -312,8 +344,10 @@ function collectExtensionPathCandidates({ repoRoot, homeDir }) {
     [
       resolve(repoRoot, "packages/extension/dist"),
       resolve(repoRoot, "packages/extension"),
-      resolve(homeDir, "Desktop/chromex-extension"),
-      resolve(homeDir, "Desktop/codex-sidepanel-extension"),
+      resolve(homeDir, "Desktop", "chromex-extension"),
+      resolve(homeDir, "Desktop", "codex-sidepanel-extension"),
+      resolve(homeDir, "Downloads", "chromex-extension"),
+      resolve(homeDir, "Downloads", "codex-sidepanel-extension"),
     ].map((value) => resolve(value)),
   );
 }
@@ -378,13 +412,13 @@ function addPreferenceFileCandidates(files, directory) {
 function resolveProfileRoots(platformFamily, homeDir) {
   if (platformFamily === "darwin") {
     return [
-      resolve(homeDir, "Library/Application Support/Google/Chrome"),
-      resolve(homeDir, "Library/Application Support/Google/Chrome Beta"),
-      resolve(homeDir, "Library/Application Support/Google/Chrome Dev"),
-      resolve(homeDir, "Library/Application Support/Google/Chrome Canary"),
-      resolve(homeDir, "Library/Application Support/Google/Chrome for Testing"),
-      resolve(homeDir, "Library/Application Support/Chromium"),
-      resolve(homeDir, "Library/Application Support/Google/ChromeForTesting"),
+      resolve(homeDir, "Library", "Application Support", "Google", "Chrome"),
+      resolve(homeDir, "Library", "Application Support", "Google", "Chrome Beta"),
+      resolve(homeDir, "Library", "Application Support", "Google", "Chrome Dev"),
+      resolve(homeDir, "Library", "Application Support", "Google", "Chrome Canary"),
+      resolve(homeDir, "Library", "Application Support", "Google", "Chrome for Testing"),
+      resolve(homeDir, "Library", "Application Support", "Chromium"),
+      resolve(homeDir, "Library", "Application Support", "Google", "ChromeForTesting"),
     ];
   }
 
@@ -400,14 +434,14 @@ function resolveProfileRoots(platformFamily, homeDir) {
   }
 
   if (platformFamily === "win32") {
-    const localAppData = process.env.LOCALAPPDATA || resolve(homeDir, "AppData/Local");
+    const localAppData = readEnvValue(process.env, "LOCALAPPDATA") || resolve(homeDir, "AppData", "Local");
     return [
-      resolve(localAppData, "Google/Chrome/User Data"),
-      resolve(localAppData, "Google/Chrome Beta/User Data"),
-      resolve(localAppData, "Google/Chrome Dev/User Data"),
-      resolve(localAppData, "Google/Chrome SxS/User Data"),
-      resolve(localAppData, "Google/Chrome for Testing/User Data"),
-      resolve(localAppData, "Chromium/User Data"),
+      resolve(localAppData, "Google", "Chrome", "User Data"),
+      resolve(localAppData, "Google", "Chrome Beta", "User Data"),
+      resolve(localAppData, "Google", "Chrome Dev", "User Data"),
+      resolve(localAppData, "Google", "Chrome SxS", "User Data"),
+      resolve(localAppData, "Google", "Chrome for Testing", "User Data"),
+      resolve(localAppData, "Chromium", "User Data"),
     ];
   }
 
@@ -470,7 +504,7 @@ async function writeLauncher({
       ? [
           "@echo off",
           `set "BRIDGE_ENTRY=${bridgeEntryPath}"`,
-          `set "PATH=${nodeDir};%PATH%"`,
+          `set "PATH=${nodeDir};%APPDATA%\\npm;%LOCALAPPDATA%\\Programs\\Codex;%USERPROFILE%\\scoop\\shims;%PATH%"`,
           `"${process.execPath}" "${hostPath}" %*`,
           "",
         ].join("\r\n")
@@ -500,4 +534,16 @@ async function assertBuiltAsset(path, label) {
   } catch {
     throw new Error(`Missing ${label}. Run "npm run build" before installing the native host.`);
   }
+}
+
+function readEnvValue(env, key) {
+  const exactValue = env[key];
+  if (typeof exactValue === "string") {
+    return exactValue;
+  }
+
+  const normalizedKey = key.toLowerCase();
+  const actualKey = Object.keys(env).find((candidate) => candidate.toLowerCase() === normalizedKey);
+  const value = actualKey ? env[actualKey] : undefined;
+  return typeof value === "string" ? value : undefined;
 }

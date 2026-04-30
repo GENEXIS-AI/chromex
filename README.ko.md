@@ -46,6 +46,8 @@ Chromex는 Chrome과 Codex를 로컬 네이티브 브리지로 연결하는 Chro
 
 릴리즈 ZIP 파일은 GitHub Release에 첨부되는 파일입니다. 저장소 파일 목록에 직접 커밋하지 않습니다. 직접 다운로드 링크가 열리지 않으면 [최신 릴리즈 페이지](https://github.com/GENEXIS-AI/chromex/releases/latest)의 **Assets**에서 `chromex-unpacked-extension.zip`을 다운로드하세요.
 
+확장 ZIP은 Chrome UI만 설치합니다. 로컬 브리지는 source checkout 또는 `chromex-public-source.zip`에서 한 번 더 설치해야 합니다.
+
 개발자 소스 설치:
 
 ```bash
@@ -61,6 +63,39 @@ node scripts/install-native-host.mjs
 ```text
 packages/extension/dist
 ```
+
+### Windows 로컬 브리지 설치
+
+Windows에서는 Node.js 20 LTS 이상을 설치한 뒤 Codex CLI를 먼저 설치하고 확인하세요.
+
+```powershell
+npm install -g @openai/codex
+codex --version
+```
+
+그다음 `chromex` 소스 폴더에서 **PowerShell**로 실행하세요.
+
+```powershell
+npm install
+npm run build
+node scripts/install-native-host.mjs --browser=chrome
+```
+
+그다음 `chrome://extensions`에서 Chromex의 **업데이트/새로고침** 버튼을 누르고, Chromex 사이드 패널에서 **연결 확인**을 누르세요.
+
+그래도 로컬 브리지 대기 상태가 계속되면:
+
+1. Chromex가 릴리즈의 `chromex-extension` 폴더 또는 `packages/extension/dist`에서 로드됐는지 확인합니다.
+2. `chrome://extensions`의 Chromex 카드에 표시된 확장 프로그램 ID를 복사합니다.
+3. 해당 ID로 설치 명령을 다시 실행합니다.
+
+```powershell
+node scripts/install-native-host.mjs <extension-id> --browser=chrome
+```
+
+공개 릴리즈의 예상 ID는 `menmlhahmendmkiicbjihgjhppkgaeom`입니다. Chrome에 다른 ID가 보이면 Chrome에 표시된 ID를 사용하세요.
+
+로그인할 때 `Failed to start codex app-server`가 나오면 Chromex가 로컬 브리지에는 연결됐지만 Codex CLI를 실행하지 못한 상태입니다. `codex --version`을 다시 확인하세요. Windows에서 Codex를 찾지 못하면 선택 Codex binary 경로를 `%APPDATA%\npm\codex.cmd`로 지정하거나 폴더를 `%APPDATA%\npm`으로 지정하세요. 작업 폴더와 Codex 실행 파일 경로는 다른 설정이므로, Codex binary 입력란에 프로젝트 폴더를 넣지 마세요.
 
 ## 런타임 경계
 
@@ -138,37 +173,13 @@ npm run smoke:install-browser
 packages/extension/dist
 ```
 
-## Chrome Web Store 패키지
-
-업로드 가능한 확장 프로그램 zip을 생성합니다.
-
-```bash
-npm run package:webstore
-```
-
-이 명령은 확장 프로그램을 다시 빌드하고, `packages/extension/dist`를 스테이징한 뒤, Web Store 업로드에 허용되지 않는 `manifest.key`, source map, 로컬 빌드 메타데이터를 제거하고 `output/chrome-web-store/`에 zip을 생성합니다.
-
-## 공개 소스 릴리즈
-
-정제된 공개 릴리즈 아티팩트를 생성합니다.
-
-```bash
-npm run package:public
-```
-
-`output/public-release/` 아래에 두 아티팩트가 생성됩니다.
-
-- `chromex-*-public-source-*.zip`: GitHub 공개용 소스 아카이브
-- `chromex-*-unpacked-extension-*.zip`: Chrome 개발자 모드에서 바로 로드할 수 있는 패키지. 압축 해제 후 **압축해제된 확장 프로그램을 로드합니다**에서 `chromex-extension` 폴더를 선택합니다.
-- `chromex-public-source.zip`, `chromex-unpacked-extension.zip`: GitHub Release 직접 다운로드 링크용 안정적인 asset 이름
-
 ## 릴리즈 관리
 
 Chromex는 `0.1.1`부터 일반 오픈소스 릴리즈 이력을 사용합니다. 버전 정책, pull request 흐름, 릴리즈 체크리스트는 [RELEASE.md](./RELEASE.md)에 정리되어 있습니다.
 
 ## 문제 해결
 
-- **Native host missing or forbidden**: `npm run build` 후 `node scripts/install-native-host.mjs`를 실행하고 `chrome://extensions`에서 확장 프로그램을 다시 로드한 뒤 Chromex 온보딩/시스템 상태를 확인하세요.
+- **Native host missing or forbidden**: `npm run build` 후 `node scripts/install-native-host.mjs --browser=chrome`를 실행하고 `chrome://extensions`에서 확장 프로그램을 다시 로드한 뒤 Chromex 온보딩/시스템 상태를 확인하세요. Chrome에 다른 확장 프로그램 ID가 보이면 `node scripts/install-native-host.mjs <extension-id> --browser=chrome`로 다시 설치하세요.
 - **모델 목록이 로드되지 않음**: native bridge 연결을 먼저 확인한 뒤 app-server 기반 로그인 흐름으로 로그인하세요.
 - **페이지 컨텍스트를 사용할 수 없음**: 대상 탭에서 Chromex를 열거나 워크플로우가 요청하는 Chrome 사이트 권한을 승인하세요.
 - **Chrome에 이전 UI가 계속 보임**: `npm run build`를 실행하고 확장 프로그램 카드를 다시 로드한 뒤 Chrome이 `packages/extension/dist`를 로드하는지 확인하세요.

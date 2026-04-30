@@ -6,6 +6,7 @@ import { PassThrough } from "node:stream";
 
 import { afterEach, describe, expect, test } from "vitest";
 
+import { createCodexSpawnOptions } from "../src/codex-app-server.js";
 import { BridgeHarnessRuntime, CodexAppServerClient, CodexVoicePlane, InMemoryBridgeSecrets } from "../src/index.js";
 import type { BridgeEvent } from "../src/index.js";
 
@@ -104,6 +105,19 @@ describe("InMemoryBridgeSecrets", () => {
 
     expect(secondStore.hasOpenAiApiKey()).toBe(true);
     expect(secondStore.getOpenAiApiKey()).toBe("persisted-test-openai-key");
+  });
+});
+
+describe("Codex app-server startup", () => {
+  test("runs Windows command shims through a shell so npm global codex.cmd can start", () => {
+    expect(createCodexSpawnOptions("C:\\Users\\example\\AppData\\Roaming\\npm\\codex.cmd", "win32")).toEqual({
+      shell: true,
+    });
+    expect(createCodexSpawnOptions("C:\\Users\\example\\AppData\\Roaming\\npm\\codex.bat", "win32")).toEqual({
+      shell: true,
+    });
+    expect(createCodexSpawnOptions("C:\\Tools\\codex.exe", "win32")).toEqual({});
+    expect(createCodexSpawnOptions("/usr/local/bin/codex", "darwin")).toEqual({});
   });
 });
 

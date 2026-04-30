@@ -36,7 +36,7 @@ describe("open-source repository hygiene", () => {
     expect(gitignore).toContain("coverage/");
   });
 
-  test("documents the public packaging flow without exposing internal release rules", () => {
+  test("keeps public readmes user-facing without exposing store packaging commands", () => {
     const publicReleaseScript = readRepoFile("scripts/package-public-release.mjs");
     const readme = readRepoFile("README.md");
     const koreanReadme = readRepoFile("README.ko.md");
@@ -46,12 +46,23 @@ describe("open-source repository hygiene", () => {
 
     expect(publicReleaseScript).toContain("/^docs\\//u");
     for (const publicReadme of publicReadmes) {
-      expect(publicReadme).toContain("npm run package:public");
       expect(publicReadme).toContain("./assets/chromex-hero.png");
       expect(publicReadme).toContain("releases/latest/download/chromex-unpacked-extension.zip");
       expect(publicReadme).toContain("README.ja.md");
       expect(publicReadme).toContain("README.zh-CN.md");
+      expect(publicReadme).toContain("install-native-host.mjs <extension-id> --browser=chrome");
+      expect(publicReadme).toContain("menmlhahmendmkiicbjihgjhppkgaeom");
+      expect(publicReadme).toContain("npm install -g @openai/codex");
+      expect(publicReadme).toContain("codex --version");
+      expect(publicReadme).toContain("%APPDATA%\\npm\\codex.cmd");
+      expect(publicReadme).not.toContain("Chrome Web Store Package");
+      expect(publicReadme).not.toContain("npm run package:webstore");
+      expect(publicReadme).not.toContain("npm run package:public");
+      expect(publicReadme).not.toContain("output/chrome-web-store");
     }
+    expect(publicReleaseScript).toContain("requireManifestKey: true");
+    expect(publicReleaseScript).toContain("must keep manifest.key");
+    expect(publicReleaseScript).not.toContain("delete manifest.key");
     expect(existsSync(resolve(repoRoot, "assets/chromex-hero.png"))).toBe(true);
     expect(readme).not.toContain(["What", "Is", "Not", "Published"].join(" "));
     expect(koreanReadme).not.toContain(["공개하지", "않는", "항목"].join(" "));
@@ -63,6 +74,20 @@ describe("open-source repository hygiene", () => {
       expect(publicReadme).not.toContain("docs/");
       expect(publicReadme).not.toContain(["CONTRIBUTING", "md"].join("."));
     }
+  });
+
+  test("publishes only the public privacy policy through GitHub Pages", () => {
+    const pagesWorkflow = readRepoFile(".github/workflows/pages.yml");
+    const publicIndex = readRepoFile("docs/pages/index.html");
+    const privacyPage = readRepoFile("docs/pages/privacy/index.html");
+
+    expect(pagesWorkflow).toContain("actions/deploy-pages");
+    expect(pagesWorkflow).toContain("path: docs/pages");
+    expect(publicIndex).toContain("./privacy/");
+    expect(privacyPage).toContain("Chromex Privacy Policy");
+    expect(privacyPage).toContain("Chromex does not sell user data.");
+    expect(privacyPage).not.toContain("npm run package:webstore");
+    expect(privacyPage).not.toContain("Chrome Web Store");
   });
 
   test("keeps private maintainer rules out of public-facing documents", () => {
@@ -106,6 +131,12 @@ describe("open-source repository hygiene", () => {
 
     expect(installer).toContain("--include-legacy-extension-ids");
     expect(installer).toContain("includeLegacyExtensionIds ? LEGACY_EXTENSION_IDS : []");
+    expect(installer).toContain("%APPDATA%\\\\npm");
+    expect(installer).toContain("%USERPROFILE%\\\\scoop\\\\shims");
+    expect(installer).toContain('resolve(homeDir, "Downloads", "chromex-extension")');
+    expect(installer).toContain("assertSelectedBrowsersSupportedOnPlatform");
+    expect(installer).toContain('profileDir && platformFamily !== "win32"');
+    expect(installer).toContain("--profile-dir is ignored on Windows");
     expect(installer).not.toContain("[extensionId, ...LEGACY_EXTENSION_IDS, ...discoveredExtensionIds]");
   });
 });

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { AppServerCodexPlane, CodexImagePlane, InMemoryBridgeSecrets, type BridgeEvent, type PromptSendParams } from "../src/index.js";
+import { normalizeLocalImagePath } from "../src/codex-plane.js";
 import { BridgeImageAssetStore, isBridgeImageAssetRef } from "../src/image-assets.js";
 import type { ProfileTemplate } from "@codex-sidepanel/shared";
 
@@ -1108,6 +1109,15 @@ describe("AppServerCodexPlane", () => {
       alt: "Generated image",
     });
     expect(imageEvent?.type === "message.image" && isBridgeImageAssetRef(imageEvent.previewRef)).toBe(true);
+  });
+
+  test("normalizes Windows file URL image paths without POSIX-leading slashes", () => {
+    expect(normalizeLocalImagePath("file:///C:/Users/Alice/AppData/Local/Temp/generated%20image.png")).toBe(
+      "C:\\Users\\Alice\\AppData\\Local\\Temp\\generated image.png",
+    );
+    expect(normalizeLocalImagePath("file://server/share/generated%20image.png")).toBe(
+      "\\\\server\\share\\generated image.png",
+    );
   });
 
   test("retries transient prompt failures and emits reconnect attempts before succeeding", async () => {

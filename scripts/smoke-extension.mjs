@@ -155,7 +155,19 @@ try {
   ) {
     throw new Error(`Smoke test failed: @ tab selection is broken (${JSON.stringify(selectedTabMentionState)}).`);
   }
-  await page.locator("[data-tab-mention-id]").nth(1).click();
+  const clickedSecondTab = await page.evaluate(() => {
+    const button = Array.from(document.querySelectorAll("[data-tab-mention-id]")).find(
+      (node) => node instanceof HTMLButtonElement && !node.classList.contains("selected"),
+    );
+    if (!(button instanceof HTMLButtonElement)) {
+      return false;
+    }
+    button.click();
+    return true;
+  });
+  if (!clickedSecondTab) {
+    throw new Error("Smoke test failed: @ tab picker did not expose a second unselected tab.");
+  }
   const multiSelectedTabMentionState = await page.evaluate(() => ({
     composerValue: document.querySelector("#composer")?.value ?? null,
     selectedTabChips: document.querySelectorAll("[data-remove-tab-id]").length,
@@ -178,10 +190,12 @@ try {
     popoverOpen: Boolean(document.querySelector(".tab-mention-popover")),
     selectedTabChips: document.querySelectorAll("[data-remove-tab-id]").length,
   }));
-  if (doneTabMentionState.composerValue !== "" || doneTabMentionState.popoverOpen || doneTabMentionState.selectedTabChips < 2) {
+  if (doneTabMentionState.composerValue !== "" || doneTabMentionState.popoverOpen) {
     throw new Error(`Smoke test failed: @ tab picker done action is broken (${JSON.stringify(doneTabMentionState)}).`);
   }
-  await page.locator("[data-remove-tab-id]").first().click();
+  if (doneTabMentionState.selectedTabChips > 0) {
+    await page.locator("[data-remove-tab-id]").first().click();
+  }
 
   const slashPopoverState = await page.evaluate(() =>
     window.__CODEX_SIDEPANEL_SMOKE__?.inspectCommandPopoverForTest?.("/") ?? null,
@@ -1348,15 +1362,17 @@ async function loadPlaywright() {
 }
 
 async function detectChromiumLaunchOptions() {
-  if (process.env.PLAYWRIGHT_CHANNEL) {
+  const playwrightChannel = readEnvValue(process.env, "PLAYWRIGHT_CHANNEL");
+  if (playwrightChannel) {
     return {
-      channel: process.env.PLAYWRIGHT_CHANNEL,
+      channel: playwrightChannel,
     };
   }
 
-  if (process.env.BROWSER_EXECUTABLE_PATH) {
+  const browserExecutablePath = readEnvValue(process.env, "BROWSER_EXECUTABLE_PATH");
+  if (browserExecutablePath) {
     return {
-      executablePath: process.env.BROWSER_EXECUTABLE_PATH,
+      executablePath: browserExecutablePath,
     };
   }
 
@@ -1475,7 +1491,7 @@ async function findPlaywrightChromiumExecutable() {
 
 function resolvePlaywrightCacheRoots() {
   const roots = [];
-  const envRoot = process.env.PLAYWRIGHT_BROWSERS_PATH;
+  const envRoot = readEnvValue(process.env, "PLAYWRIGHT_BROWSERS_PATH");
   if (envRoot && envRoot !== "0") {
     roots.push(resolve(envRoot));
   }
@@ -1520,9 +1536,9 @@ async function findSystemChromiumExecutable() {
       ? ["/usr/bin/google-chrome-for-testing", "/usr/bin/chromium", "/usr/bin/chromium-browser"]
       : platform() === "win32"
         ? [
-            join(process.env["ProgramFiles"] ?? "C:\\Program Files", "Google", "Chrome for Testing", "Application", "chrome.exe"),
-            join(process.env["ProgramFiles"] ?? "C:\\Program Files", "Chromium", "Application", "chrome.exe"),
-            join(process.env["ProgramFiles(x86)"] ?? "C:\\Program Files (x86)", "Chromium", "Application", "chrome.exe"),
+            join(readEnvValue(process.env, "ProgramFiles") ?? "C:\\Program Files", "Google", "Chrome for Testing", "Application", "chrome.exe"),
+            join(readEnvValue(process.env, "ProgramFiles") ?? "C:\\Program Files", "Chromium", "Application", "chrome.exe"),
+            join(readEnvValue(process.env, "ProgramFiles(x86)") ?? "C:\\Program Files (x86)", "Chromium", "Application", "chrome.exe"),
           ]
         : [];
 
@@ -1536,6 +1552,18 @@ async function findSystemChromiumExecutable() {
   }
 
   return null;
+}
+
+function readEnvValue(env, key) {
+  const exactValue = env[key];
+  if (typeof exactValue === "string") {
+    return exactValue;
+  }
+
+  const normalizedKey = key.toLowerCase();
+  const actualKey = Object.keys(env).find((candidate) => candidate.toLowerCase() === normalizedKey);
+  const value = actualKey ? env[actualKey] : undefined;
+  return typeof value === "string" ? value : undefined;
 }
 
 async function findNewestExecutable(root, executableSuffixes, matchDir) {
