@@ -253,7 +253,7 @@ const state = {
   lastAutoCompactBucket: null as number | null,
 };
 
-bridge.subscribe(async (event) => {
+bridge.subscribe((event) => {
   const bridgeEvent = event as { type?: string };
   let eventConversationId: string | null = resolveBridgeEventConversationId(event, conversationRuntime);
   if (bridgeEvent.type === "turn.started") {
@@ -269,10 +269,6 @@ bridge.subscribe(async (event) => {
     eventConversationId = conversationRuntime.completeTurn(completed.threadId, completed.turnId) ?? eventConversationId;
     if (eventConversationId) {
       syncCurrentRuntimeState(eventConversationId);
-      const currentConversation = await getCurrentConversation();
-      if (currentConversation) {
-        await persistConversation(currentConversation);
-      }
     } else if (state.activeTurn?.turnId === completed.turnId) {
       state.activeTurn = null;
     }

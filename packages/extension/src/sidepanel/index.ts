@@ -894,6 +894,7 @@ const persistConversationBatch = createDebouncedTask(
   window.setTimeout.bind(window),
   window.clearTimeout.bind(window),
 );
+let conversationPersistFlushQueue = Promise.resolve();
 
 installSmokeHarness();
 installGlobalFloatingSurfaceDismissal();
@@ -1035,6 +1036,7 @@ chrome.runtime.onMessage.addListener((message) => {
       speak(event.text ?? "");
     }
     scheduleConversationPersist();
+    flushConversationPersist();
     shouldRender = state.activeView === "chat";
   }
   if (event.type === "message.image" && event.previewRef) {
@@ -1210,6 +1212,7 @@ chrome.runtime.onMessage.addListener((message) => {
       state.activeTurn = null;
     }
     scheduleConversationPersist();
+    flushConversationPersist();
     shouldRender = true;
   }
   if (event.type === "turn.started" && event.activeTurn) {
@@ -14421,6 +14424,16 @@ async function startNewChat(): Promise<void> {
 
 function scheduleConversationPersist(): void {
   void persistConversationBatch.schedule();
+}
+
+function flushConversationPersist(): void {
+  conversationPersistFlushQueue = conversationPersistFlushQueue
+    .catch(() => undefined)
+    .then(() => persistConversationBatch.flush())
+    .catch((error) => {
+      console.warn("Failed to flush conversation persistence.", error);
+    });
+  void conversationPersistFlushQueue;
 }
 
 async function persistConversation(): Promise<void> {
