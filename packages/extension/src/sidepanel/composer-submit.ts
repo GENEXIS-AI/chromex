@@ -1,6 +1,8 @@
 export interface ComposerSubmitKeyInput {
   key: string;
   shiftKey: boolean;
+  metaKey?: boolean;
+  ctrlKey?: boolean;
   isComposing: boolean;
   keyCode?: number | undefined;
   compositionInProgress: boolean;
@@ -8,11 +10,12 @@ export interface ComposerSubmitKeyInput {
 }
 
 export function shouldSubmitComposerOnKeydown(input: ComposerSubmitKeyInput): boolean {
-  if (!isPlainComposerEnter(input)) {
+  if (!isComposerSubmitTrigger(input)) {
     return false;
   }
 
-  if (input.dropdownOpen) {
+  const forceSubmit = input.metaKey || input.ctrlKey;
+  if (input.dropdownOpen && !forceSubmit) {
     return false;
   }
 
@@ -20,10 +23,19 @@ export function shouldSubmitComposerOnKeydown(input: ComposerSubmitKeyInput): bo
 }
 
 export function shouldInterceptComposerDropdownOnEnter(input: ComposerSubmitKeyInput): boolean {
-  return Boolean(input.dropdownOpen) && isPlainComposerEnter(input);
+  if (!isComposerSubmitTrigger(input)) {
+    return false;
+  }
+
+  const forceSubmit = input.metaKey || input.ctrlKey;
+  if (forceSubmit) {
+    return false;
+  }
+
+  return Boolean(input.dropdownOpen);
 }
 
-function isPlainComposerEnter(input: ComposerSubmitKeyInput): boolean {
+function isComposerSubmitTrigger(input: ComposerSubmitKeyInput): boolean {
   if (input.key !== "Enter") {
     return false;
   }

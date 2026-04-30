@@ -65,6 +65,88 @@ describe("composer submit key handling", () => {
     ).toBe(false);
   });
 
+  test("submits on Cmd+Enter (macOS)", () => {
+    expect(
+      shouldSubmitComposerOnKeydown({
+        key: "Enter",
+        shiftKey: false,
+        metaKey: true,
+        isComposing: false,
+        compositionInProgress: false,
+      }),
+    ).toBe(true);
+  });
+
+  test("submits on Ctrl+Enter (Windows/Linux)", () => {
+    expect(
+      shouldSubmitComposerOnKeydown({
+        key: "Enter",
+        shiftKey: false,
+        ctrlKey: true,
+        isComposing: false,
+        compositionInProgress: false,
+      }),
+    ).toBe(true);
+  });
+
+  test("does not submit on Shift+Enter even with Ctrl held", () => {
+    expect(
+      shouldSubmitComposerOnKeydown({
+        key: "Enter",
+        shiftKey: true,
+        ctrlKey: true,
+        isComposing: false,
+        compositionInProgress: false,
+      }),
+    ).toBe(false);
+  });
+
+  test("submits on Cmd+Enter even when composer dropdown is open", () => {
+    expect(
+      shouldSubmitComposerOnKeydown({
+        key: "Enter",
+        shiftKey: false,
+        metaKey: true,
+        isComposing: false,
+        compositionInProgress: false,
+        dropdownOpen: true,
+      }),
+    ).toBe(true);
+    expect(
+      shouldInterceptComposerDropdownOnEnter({
+        key: "Enter",
+        shiftKey: false,
+        metaKey: true,
+        isComposing: false,
+        compositionInProgress: false,
+        dropdownOpen: true,
+      }),
+    ).toBe(false);
+  });
+
+  test("submits on Ctrl+Enter even when composer dropdown is open", () => {
+    expect(
+      shouldSubmitComposerOnKeydown({
+        key: "Enter",
+        shiftKey: false,
+        ctrlKey: true,
+        isComposing: false,
+        compositionInProgress: false,
+        dropdownOpen: true,
+      }),
+    ).toBe(true);
+    expect(
+      shouldInterceptComposerDropdownOnEnter({
+        key: "Enter",
+        shiftKey: false,
+        ctrlKey: true,
+        isComposing: false,
+        compositionInProgress: false,
+        dropdownOpen: true,
+      }),
+    ).toBe(false);
+  });
+
   test("intercepts plain Enter for open composer dropdowns", () => {
     expect(
       shouldInterceptComposerDropdownOnEnter({

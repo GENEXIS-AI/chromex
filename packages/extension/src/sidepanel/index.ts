@@ -10176,6 +10176,8 @@ function bindEvents(): void {
     const keyInput = {
       key: event.key,
       shiftKey: event.shiftKey,
+      metaKey: event.metaKey,
+      ctrlKey: event.ctrlKey,
       isComposing: event.isComposing,
       keyCode: "keyCode" in event ? Number((event as KeyboardEvent & { keyCode?: number }).keyCode) : undefined,
       compositionInProgress: composerCompositionInProgress,
