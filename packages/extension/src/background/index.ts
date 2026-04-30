@@ -57,6 +57,7 @@ import {
   createConversation,
   clearConversations,
   deleteConversation,
+  getStorageUsage,
   getCurrentConversation,
   getSelectedModel,
   getSelectedProfileId,
@@ -567,6 +568,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           return;
         case "conversation.clear":
           sendResponse(await handleConversationClear());
+          return;
+        case "storage.usage":
+          sendResponse(await getStorageUsage());
           return;
         case "conversation.compact":
           sendResponse(await handleConversationCompact(Boolean(message.waitForCompletion)));
@@ -3882,6 +3886,8 @@ async function handleConversationDelete(conversationId: string) {
 }
 
 async function handleConversationClear() {
+  const conversations = await listConversations();
+  const deletedCount = conversations.length;
   await clearConversations();
   conversationRuntime.clear();
   state.currentConversationId = "";
@@ -3896,6 +3902,7 @@ async function handleConversationClear() {
   return {
     recentChats: [],
     currentConversation: null,
+    deletedCount,
   };
 }
 

@@ -5493,7 +5493,9 @@ function renderWorkspaceView(strings: ReturnType<typeof getUiStrings>): string {
             renderSettingsRow(
               "chat-history",
               strings.labels.recentChats,
-              strings.settingsPanel.chatHistoryDescription,
+              state.recentChats.length
+                ? `${strings.settingsPanel.chatHistoryDescription} (${state.recentChats.length})`
+                : strings.settingsPanel.chatHistoryDescription,
               `<button class="settings-compact-button danger" type="button" data-clear-chat-history="settings" ${
                 state.recentChats.length ? "" : "disabled"
               }>${escapeHtml(strings.actions.clearRecentChats)}</button>`,
@@ -11619,6 +11621,7 @@ async function clearConversationHistoryFromUi(options: { returnToSettings?: bool
   const result = await sendRuntimeMessage<{
     recentChats: ConversationSummary[];
     currentConversation: SavedConversation | null;
+    deletedCount: number;
   }>({
     type: "conversation.clear",
   });
@@ -11626,7 +11629,9 @@ async function clearConversationHistoryFromUi(options: { returnToSettings?: bool
   hydrateConversation(result.currentConversation);
   state.activeView = options.returnToSettings ? "workspace" : "chat";
   state.appMenuOpen = false;
-  state.actionStatus = strings.status.chatHistoryCleared;
+  state.actionStatus = result.deletedCount
+    ? `${strings.status.chatHistoryCleared} (${result.deletedCount})`
+    : strings.status.chatHistoryCleared;
   render();
 }
 
