@@ -22,7 +22,7 @@ describe("error logging for silently swallowed failures", () => {
     const block = sourceBetween(
       backgroundSource,
       "await handleTurnInterrupt(threadId, turnId).catch",
-      ");",
+      "});",
     );
     expect(block).toContain("console.error");
     expect(block).toContain("Failed to interrupt turn:");
@@ -32,7 +32,7 @@ describe("error logging for silently swallowed failures", () => {
     const block = sourceBetween(
       backgroundSource,
       "void installImagePromptHoverForTab(activeTab).catch",
-      ");",
+      "});",
     );
     expect(block).toContain("console.error");
     expect(block).toContain("Failed to install image prompt hover:");
