@@ -1,11 +1,12 @@
-import { mkdir, copyFile, readFile, writeFile } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { constants as fsConstants } from "node:fs";
+import { access, copyFile, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { homedir, platform } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright-core";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const OUT_DIR = resolve(ROOT, "output/chrome-web-store-assets");
-const CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const COLOR_ICON = resolve(ROOT, "packages/extension/public/icons/codex-128.png");
 const LINE_ICON = resolve(ROOT, "packages/extension/public/icons/chromex-line-source.png");
 const COLOR_ICON_DATA_URI = await toDataUri(COLOR_ICON, "image/png");
@@ -109,7 +110,23 @@ const promoAssets = [
 await mkdir(OUT_DIR, { recursive: true });
 await copyFile(COLOR_ICON, resolve(OUT_DIR, "icon-128.png"));
 
-const browser = await chromium.launch({ executablePath: CHROME, headless: true });
+const browserExecutablePath = readEnvValue(process.env, "BROWSER_EXECUTABLE_PATH")?.trim();
+const discoveredBrowserExecutablePath = browserExecutablePath || (await findExistingBrowserExecutable());
+let browser;
+try {
+  browser = await chromium.launch({
+    ...(discoveredBrowserExecutablePath ? { executablePath: discoveredBrowserExecutablePath } : {}),
+    headless: true,
+  });
+} catch (error) {
+  throw new Error(
+    [
+      "Chrome Web Store asset rendering needs a local Chromium/Chrome executable.",
+      "Run `npm run smoke:install-browser` or set BROWSER_EXECUTABLE_PATH to an installed Chrome/Chromium executable, then rerun `npm run store:assets`.",
+      error instanceof Error ? `Original error: ${error.message}` : `Original error: ${String(error)}`,
+    ].join("\n"),
+  );
+}
 try {
   for (const scenario of screenshotScenarios) {
     await renderPng({
@@ -699,6 +716,122 @@ function css() {
 
 async function toDataUri(file, mimeType) {
   return `data:${mimeType};base64,${(await readFile(file)).toString("base64")}`;
+}
+
+function readEnvValue(env, key) {
+  const exactValue = env[key];
+  if (typeof exactValue === "string") {
+    return exactValue;
+  }
+
+  const normalizedKey = key.toLowerCase();
+  const actualKey = Object.keys(env).find((candidate) => candidate.toLowerCase() === normalizedKey);
+  const value = actualKey ? env[actualKey] : undefined;
+  return typeof value === "string" ? value : undefined;
+}
+
+async function findExistingBrowserExecutable() {
+  for (const candidate of browserExecutableCandidates()) {
+    if (await isExecutableFile(candidate)) {
+      return candidate;
+    }
+  }
+
+  for (const root of playwrightBrowserRoots()) {
+    const executable = await findCachedBrowserExecutable(root);
+    if (executable) {
+      return executable;
+    }
+  }
+
+  return null;
+}
+
+function browserExecutableCandidates() {
+  const currentPlatform = platform();
+  if (currentPlatform === "darwin") {
+    return [
+      "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+      "/Applications/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+      "/Applications/Chromium.app/Contents/MacOS/Chromium",
+    ];
+  }
+  if (currentPlatform === "win32") {
+    return [
+      join(readEnvValue(process.env, "ProgramFiles") ?? "C:\\Program Files", "Google", "Chrome", "Application", "chrome.exe"),
+      join(readEnvValue(process.env, "ProgramFiles") ?? "C:\\Program Files", "Google", "Chrome for Testing", "Application", "chrome.exe"),
+      join(readEnvValue(process.env, "ProgramFiles") ?? "C:\\Program Files", "Chromium", "Application", "chrome.exe"),
+      join(readEnvValue(process.env, "ProgramFiles(x86)") ?? "C:\\Program Files (x86)", "Google", "Chrome", "Application", "chrome.exe"),
+      join(readEnvValue(process.env, "ProgramFiles(x86)") ?? "C:\\Program Files (x86)", "Chromium", "Application", "chrome.exe"),
+    ];
+  }
+  return [
+    "/usr/bin/google-chrome",
+    "/usr/bin/google-chrome-stable",
+    "/usr/bin/google-chrome-for-testing",
+    "/usr/bin/chromium",
+    "/usr/bin/chromium-browser",
+  ];
+}
+
+function playwrightBrowserRoots() {
+  const configured = readEnvValue(process.env, "PLAYWRIGHT_BROWSERS_PATH");
+  const roots = [];
+  if (configured && configured !== "0") {
+    roots.push(resolve(configured));
+  }
+
+  const home = homedir();
+  const currentPlatform = platform();
+  if (currentPlatform === "darwin") {
+    roots.push(resolve(home, "Library", "Caches", "ms-playwright"));
+  } else if (currentPlatform === "win32") {
+    roots.push(resolve(readEnvValue(process.env, "LOCALAPPDATA") || resolve(home, "AppData", "Local"), "ms-playwright"));
+  } else {
+    roots.push(resolve(readEnvValue(process.env, "XDG_CACHE_HOME") || resolve(home, ".cache"), "ms-playwright"));
+  }
+
+  return [...new Set(roots)];
+}
+
+async function findCachedBrowserExecutable(root) {
+  const executableNames = platform() === "win32" ? new Set(["chrome.exe", "headless_shell.exe"]) : new Set(["chrome", "Chromium", "chrome-headless-shell"]);
+  return findExecutableByName(root, executableNames, 5);
+}
+
+async function findExecutableByName(directory, executableNames, depth) {
+  if (depth < 0) {
+    return null;
+  }
+
+  const entries = await readdir(directory, { withFileTypes: true }).catch(() => []);
+  for (const entry of entries) {
+    const path = resolve(directory, entry.name);
+    if (entry.isFile() && executableNames.has(entry.name) && (await isExecutableFile(path))) {
+      return path;
+    }
+  }
+
+  for (const entry of entries) {
+    if (!entry.isDirectory()) {
+      continue;
+    }
+    const executable = await findExecutableByName(resolve(directory, entry.name), executableNames, depth - 1);
+    if (executable) {
+      return executable;
+    }
+  }
+
+  return null;
+}
+
+async function isExecutableFile(path) {
+  try {
+    await access(path, platform() === "win32" ? fsConstants.R_OK : fsConstants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function escapeHtml(value) {

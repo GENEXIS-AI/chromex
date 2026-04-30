@@ -19,14 +19,16 @@ export function resolveCodexSidepanelConfigDir(options: PlatformPathOptions = {}
   const env = options.env ?? process.env;
   const homeDirectory = options.homeDirectory ?? homedir();
   const path = getPathApi(platformName);
+  const localAppData = readEnvValue(env, "LOCALAPPDATA");
+  const appData = readEnvValue(env, "APPDATA");
 
   if (platformName === "darwin") {
     return path.resolve(homeDirectory, "Library", "Application Support", "CodexSidepanel");
   }
   if (platformName === "win32") {
-    return path.resolve(env.LOCALAPPDATA || env.APPDATA || path.resolve(homeDirectory, "AppData", "Local"), "CodexSidepanel");
+    return path.resolve(localAppData || appData || path.resolve(homeDirectory, "AppData", "Local"), "CodexSidepanel");
   }
-  return path.resolve(env.XDG_CONFIG_HOME || path.resolve(homeDirectory, ".config"), "codex-sidepanel");
+  return path.resolve(readEnvValue(env, "XDG_CONFIG_HOME") || path.resolve(homeDirectory, ".config"), "codex-sidepanel");
 }
 
 export function resolveCodexSidepanelDataDir(options: PlatformPathOptions = {}): string {
@@ -34,14 +36,16 @@ export function resolveCodexSidepanelDataDir(options: PlatformPathOptions = {}):
   const env = options.env ?? process.env;
   const homeDirectory = options.homeDirectory ?? homedir();
   const path = getPathApi(platformName);
+  const localAppData = readEnvValue(env, "LOCALAPPDATA");
+  const appData = readEnvValue(env, "APPDATA");
 
   if (platformName === "darwin") {
     return resolveCodexSidepanelConfigDir({ platformName, env, homeDirectory });
   }
   if (platformName === "win32") {
-    return path.resolve(env.LOCALAPPDATA || env.APPDATA || path.resolve(homeDirectory, "AppData", "Local"), "CodexSidepanel");
+    return path.resolve(localAppData || appData || path.resolve(homeDirectory, "AppData", "Local"), "CodexSidepanel");
   }
-  return path.resolve(env.XDG_DATA_HOME || path.resolve(homeDirectory, ".local", "share"), "codex-sidepanel");
+  return path.resolve(readEnvValue(env, "XDG_DATA_HOME") || path.resolve(homeDirectory, ".local", "share"), "codex-sidepanel");
 }
 
 export function resolveDefaultSecretStorePath(options: PlatformPathOptions = {}): string {
@@ -78,12 +82,12 @@ export function resolveHookShellCommand(
 
   if (platformName === "win32") {
     return {
-      command: env.ComSpec || win32.join(env.SystemRoot || "C:\\Windows", "System32", "cmd.exe"),
+      command: readEnvValue(env, "ComSpec") || win32.join(readEnvValue(env, "SystemRoot") || "C:\\Windows", "System32", "cmd.exe"),
       args: ["/d", "/s", "/c", commandText],
     };
   }
 
-  const shell = env.SHELL || "/bin/bash";
+  const shell = readEnvValue(env, "SHELL") || "/bin/bash";
   const shellName = basename(shell).toLowerCase();
   return {
     command: shell,
@@ -95,4 +99,16 @@ export function resolveHookShellCommand(
 
 function getPathApi(platformName: RuntimePlatform): typeof posix | typeof win32 {
   return platformName === "win32" ? win32 : posix;
+}
+
+function readEnvValue(env: NodeJS.ProcessEnv, key: string): string | undefined {
+  const exactValue = env[key];
+  if (typeof exactValue === "string") {
+    return exactValue;
+  }
+
+  const normalizedKey = key.toLowerCase();
+  const actualKey = Object.keys(env).find((candidate) => candidate.toLowerCase() === normalizedKey);
+  const value = actualKey ? env[actualKey] : undefined;
+  return typeof value === "string" ? value : undefined;
 }

@@ -92,11 +92,11 @@ await stageUnpackedExtension();
 await createZipFromDirectory(sourceStagingDir, sourceZipPath, "chromex");
 await createZipFromDirectory(unpackedStagingDir, unpackedZipPath, "chromex-extension");
 await validateArchive(sourceZipPath, { expectedManifest: false });
-await validateArchive(unpackedZipPath, { expectedManifest: true });
+await validateArchive(unpackedZipPath, { expectedManifest: true, requireManifestKey: true });
 await copyFile(sourceZipPath, stableSourceZipPath);
 await copyFile(unpackedZipPath, stableUnpackedZipPath);
 await validateArchive(stableSourceZipPath, { expectedManifest: false });
-await validateArchive(stableUnpackedZipPath, { expectedManifest: true });
+await validateArchive(stableUnpackedZipPath, { expectedManifest: true, requireManifestKey: true });
 
 console.log(`Public source archive created: ${sourceZipPath}`);
 console.log(`Unpacked extension archive created: ${unpackedZipPath}`);
@@ -159,7 +159,6 @@ function listPublicSourceFiles() {
 async function stageUnpackedExtension() {
   await rm(unpackedStagingDir, { recursive: true, force: true });
   await cp(distDir, unpackedStagingDir, { recursive: true });
-  await sanitizeManifest(resolve(unpackedStagingDir, "manifest.json"));
   await removeIfExists(resolve(unpackedStagingDir, "build-info.json"));
   await walkFiles(unpackedStagingDir, async (path) => {
     const name = basename(path);
@@ -176,12 +175,6 @@ async function stageUnpackedExtension() {
       }
     }
   });
-}
-
-async function sanitizeManifest(manifestPath) {
-  const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
-  delete manifest.key;
-  await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
 }
 
 function isBlockedUnpackedArtifact(name, extension) {
@@ -223,7 +216,7 @@ async function addDirectoryToZip(zip, directory, baseDirectory, archiveRoot) {
   }
 }
 
-async function validateArchive(zipPath, { expectedManifest }) {
+async function validateArchive(zipPath, { expectedManifest, requireManifestKey = false }) {
   const zip = await JSZip.loadAsync(await readFile(zipPath));
   const listing = Object.keys(zip.files).join("\n");
   const blockedPatterns = [
@@ -251,10 +244,10 @@ async function validateArchive(zipPath, { expectedManifest }) {
   if (expectedManifest && !manifestFile) {
     throw new Error(`${basename(zipPath)} is missing chromex-extension/manifest.json.`);
   }
-  if (manifestFile) {
+  if (manifestFile && requireManifestKey) {
     const manifest = JSON.parse(await manifestFile.async("string"));
-    if ("key" in manifest) {
-      throw new Error(`${basename(zipPath)} contains manifest.key.`);
+    if (typeof manifest.key !== "string" || !manifest.key) {
+      throw new Error(`${basename(zipPath)} must keep manifest.key so Windows native-host installs use a stable extension ID.`);
     }
   }
 }

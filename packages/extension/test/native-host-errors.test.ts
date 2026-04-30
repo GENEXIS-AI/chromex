@@ -6,7 +6,7 @@ describe("native host diagnostics", () => {
   test("explains missing native host installs clearly", () => {
     expect(
       toFriendlyNativeHostErrorMessage("Specified native messaging host not found."),
-    ).toContain("Workspace > Connection");
+    ).toContain("--browser=chrome");
   });
 
   test("explains extension id mismatches clearly", () => {
@@ -15,7 +15,7 @@ describe("native host diagnostics", () => {
     );
 
     expect(message).toContain("different native host registration");
-    expect(message).toContain("Workspace > Connection");
+    expect(message).toContain("current-user registry");
   });
 
   test("keeps unknown disconnects actionable", () => {

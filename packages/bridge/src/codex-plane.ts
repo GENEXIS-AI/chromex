@@ -1,6 +1,7 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
   type CodexAppOption,
@@ -2965,12 +2966,19 @@ function extractImageReferencesFromText(text: string): string[] {
   return Array.from(new Set(references.filter(Boolean)));
 }
 
-function normalizeLocalImagePath(reference: string): string {
+export function normalizeLocalImagePath(reference: string): string {
   const trimmed = stripImageReferencePunctuation(reference);
   if (trimmed.startsWith("file://")) {
     try {
       const url = new URL(trimmed);
-      return decodeURIComponent(url.pathname);
+      const pathname = decodeURIComponent(url.pathname);
+      if (/^\/[a-zA-Z]:\//u.test(pathname)) {
+        return pathname.slice(1).replace(/\//gu, "\\");
+      }
+      if (url.hostname) {
+        return `\\\\${url.hostname}${pathname.replace(/\//gu, "\\")}`;
+      }
+      return fileURLToPath(url);
     } catch {
       return "";
     }

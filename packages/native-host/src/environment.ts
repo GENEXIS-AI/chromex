@@ -52,7 +52,7 @@ export function createBridgeProcessEnv(
   const env: NodeJS.ProcessEnv = {};
 
   for (const key of BASE_ALLOWLIST) {
-    const value = baseEnv[key];
+    const value = readEnvValue(baseEnv, key);
     if (typeof value === "string" && value) {
       env[key] = value;
     }
@@ -62,4 +62,16 @@ export function createBridgeProcessEnv(
     env.CODEX_BIN = overrides.codexBinPath.trim();
   }
   return env;
+}
+
+function readEnvValue(env: NodeJS.ProcessEnv, key: string): string | undefined {
+  const exactValue = env[key];
+  if (typeof exactValue === "string") {
+    return exactValue;
+  }
+
+  const normalizedKey = key.toLowerCase();
+  const actualKey = Object.keys(env).find((candidate) => candidate.toLowerCase() === normalizedKey);
+  const value = actualKey ? env[actualKey] : undefined;
+  return typeof value === "string" ? value : undefined;
 }

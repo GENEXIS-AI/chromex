@@ -139,7 +139,7 @@ async function findChromiumExecutableInRoot(root: string): Promise<string> {
 }
 
 function playwrightBrowserRoots(packageInfo: PlaywrightPackage | null): string[] {
-  const explicit = process.env.PLAYWRIGHT_BROWSERS_PATH?.trim();
+  const explicit = readEnvValue(process.env, "PLAYWRIGHT_BROWSERS_PATH")?.trim();
   if (explicit && explicit !== "0") {
     return [resolve(explicit)];
   }
@@ -152,11 +152,14 @@ function playwrightBrowserRoots(packageInfo: PlaywrightPackage | null): string[]
   const home = homedir();
   switch (platform()) {
     case "darwin":
-      return [...localBrowserRoot, resolve(home, "Library/Caches/ms-playwright")];
+      return [...localBrowserRoot, resolve(home, "Library", "Caches", "ms-playwright")];
     case "win32":
-      return [...localBrowserRoot, resolve(process.env.LOCALAPPDATA || resolve(home, "AppData/Local"), "ms-playwright")];
+      return [
+        ...localBrowserRoot,
+        resolve(readEnvValue(process.env, "LOCALAPPDATA") || resolve(home, "AppData", "Local"), "ms-playwright"),
+      ];
     default:
-      return [...localBrowserRoot, resolve(process.env.XDG_CACHE_HOME || resolve(home, ".cache"), "ms-playwright")];
+      return [...localBrowserRoot, resolve(readEnvValue(process.env, "XDG_CACHE_HOME") || resolve(home, ".cache"), "ms-playwright")];
   }
 }
 
@@ -192,4 +195,16 @@ async function fileExists(path: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+function readEnvValue(env: NodeJS.ProcessEnv, key: string): string | undefined {
+  const exactValue = env[key];
+  if (typeof exactValue === "string") {
+    return exactValue;
+  }
+
+  const normalizedKey = key.toLowerCase();
+  const actualKey = Object.keys(env).find((candidate) => candidate.toLowerCase() === normalizedKey);
+  const value = actualKey ? env[actualKey] : undefined;
+  return typeof value === "string" ? value : undefined;
 }

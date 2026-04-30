@@ -46,6 +46,8 @@ Published by **GenexisAI CHOI**.
 
 Release ZIP 文件会附加在 GitHub Releases 中，不会直接提交到仓库文件树。如果直接下载链接无法打开，请进入 [latest release page](https://github.com/GENEXIS-AI/chromex/releases/latest)，在 **Assets** 中下载 `chromex-unpacked-extension.zip`。
 
+扩展 ZIP 只安装 Chrome UI。本地 bridge 还需要从源码 checkout 或 `chromex-public-source.zip` 中单独安装一次。
+
 开发者源码安装:
 
 ```bash
@@ -61,6 +63,39 @@ node scripts/install-native-host.mjs
 ```text
 packages/extension/dist
 ```
+
+### Windows 本地 Bridge 设置
+
+在 Windows 上，请先安装 Node.js 20 LTS 或更新版本，然后先安装并确认 Codex CLI:
+
+```powershell
+npm install -g @openai/codex
+codex --version
+```
+
+然后在 `chromex` 源码文件夹中用 **PowerShell** 运行:
+
+```powershell
+npm install
+npm run build
+node scripts/install-native-host.mjs --browser=chrome
+```
+
+然后打开 `chrome://extensions`，点击 Chromex 的 **Reload**，再在 Chromex 侧边栏中点击 **Check connection**。
+
+如果侧边栏仍显示正在等待本地 bridge:
+
+1. 确认 Chromex 是从 release 的 `chromex-extension` 文件夹或 `packages/extension/dist` 加载的。
+2. 复制 `chrome://extensions` 中 Chromex 卡片显示的 extension ID。
+3. 用该 ID 重新运行安装器。
+
+```powershell
+node scripts/install-native-host.mjs <extension-id> --browser=chrome
+```
+
+公开 release 的预期 ID 是 `menmlhahmendmkiicbjihgjhppkgaeom`。如果 Chrome 显示不同 ID，请使用 Chrome 中显示的 ID。
+
+如果登录时出现 `Failed to start codex app-server`，说明 Chromex 已连接到本地 bridge，但无法启动 Codex CLI。请再次运行 `codex --version`。如果 Windows 找不到 Codex，请将 optional Codex binary path 设置为 `%APPDATA%\npm\codex.cmd`，或将文件夹设置为 `%APPDATA%\npm`。workspace 文件夹和 Codex executable path 是两个不同设置，不要把项目文件夹填到 Codex binary 字段。
 
 ## 运行时边界
 
@@ -138,37 +173,13 @@ npm run smoke:install-browser
 packages/extension/dist
 ```
 
-## Chrome Web Store 包
-
-创建可上传的扩展 ZIP:
-
-```bash
-npm run package:webstore
-```
-
-该命令会重新构建扩展，暂存 `packages/extension/dist`，移除 unpacked 安装用的 `manifest.key`、source maps 和本地构建元数据，验证 ZIP，并将包写入 `output/chrome-web-store/`。
-
-## 公开源码发布
-
-创建经过清理的公开发布产物:
-
-```bash
-npm run package:public
-```
-
-该命令会在 `output/public-release/` 下写入两个产物:
-
-- `chromex-*-public-source-*.zip`: 用于 GitHub 发布的源码归档
-- `chromex-*-unpacked-extension-*.zip`: 可直接解压并通过 Chrome Developer Mode 加载的包。解压后，在 **Load unpacked** 中选择 `chromex-extension` 文件夹。
-- `chromex-public-source.zip` 和 `chromex-unpacked-extension.zip`: 用于 GitHub Release 直接下载链接的稳定 asset 名称
-
 ## 发布管理
 
 Chromex 从 `0.1.1` 开始使用普通开源发布历史。版本策略、pull request 流程和发布检查清单见 [RELEASE.md](./RELEASE.md)。
 
 ## 故障排查
 
-- **Native host missing or forbidden**: 运行 `npm run build`，然后运行 `node scripts/install-native-host.mjs`，在 `chrome://extensions` 中重新加载扩展，并检查 Chromex onboarding/system status。
+- **Native host missing or forbidden**: 运行 `npm run build`，然后运行 `node scripts/install-native-host.mjs --browser=chrome`，在 `chrome://extensions` 中重新加载扩展，并检查 Chromex onboarding/system status。如果 Chrome 显示不同 extension ID，请运行 `node scripts/install-native-host.mjs <extension-id> --browser=chrome` 重新安装。
 - **模型列表无法加载**: 确认 native bridge 已连接，然后通过 app-server-backed 登录流程登录。
 - **页面上下文不可用**: 从目标标签页打开 Chromex，或批准工作流请求的 Chrome 站点权限。
 - **Chrome 仍显示旧 UI**: 运行 `npm run build`，重新加载扩展卡片，并确认 Chrome 正在加载 `packages/extension/dist`。
