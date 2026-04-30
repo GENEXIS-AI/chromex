@@ -11608,9 +11608,10 @@ async function clearConversationHistoryFromUi(options: { returnToSettings?: bool
   }
 
   const strings = stringsForState();
-  const message = strings.prompts.clearChatHistoryConfirm;
+  const visibleChatCount = state.recentChats.length;
+  const message = `${strings.prompts.clearChatHistoryConfirm}\n\n${strings.labels.recentChats}: ${visibleChatCount}`;
   const approved = await requestNativeConfirmation(message, {
-    title: strings.actions.clearRecentChats,
+    title: `${strings.actions.clearRecentChats} (${visibleChatCount})`,
     confirmLabel: strings.actions.clearRecentChats,
     tone: "danger",
   });

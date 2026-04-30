@@ -312,16 +312,6 @@ export async function clearConversations(): Promise<void> {
   });
 }
 
-export async function getStorageUsage(): Promise<{ bytes: number; count: number }> {
-  const area = await getConversationStorageArea();
-  const [bytes, stored] = await Promise.all([
-    area.getBytesInUse([STORAGE_KEYS.conversations]),
-    area.get(STORAGE_KEYS.conversations),
-  ]);
-  const conversations = stored[STORAGE_KEYS.conversations];
-  return { bytes, count: Array.isArray(conversations) ? conversations.length : 0 };
-}
-
 export async function setCurrentConversationId(conversationId: string | null): Promise<void> {
   const area = await getConversationStorageArea();
   await area.set({ [STORAGE_KEYS.currentConversationId]: conversationId });

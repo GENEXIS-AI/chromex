@@ -5,6 +5,8 @@ import { resolve } from "node:path";
 import { listSettingsSections } from "../src/sidepanel/settings-panel.js";
 
 const sidepanelSource = readFileSync(resolve(process.cwd(), "src/sidepanel/index.ts"), "utf8");
+const backgroundSource = readFileSync(resolve(process.cwd(), "src/background/index.ts"), "utf8");
+const storageSource = readFileSync(resolve(process.cwd(), "src/background/storage.ts"), "utf8");
 const css = readFileSync(resolve(process.cwd(), "public/sidepanel.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
 
 function readFinalDeclaration(selector: string, property: string): string {
@@ -88,9 +90,24 @@ describe("settings panel structure", () => {
 
   test("exposes a clear-all chat history action inside settings", () => {
     expect(sidepanelSource).toContain("strings.settingsPanel.chatHistoryDescription");
+    expect(sidepanelSource).toContain('`${strings.settingsPanel.chatHistoryDescription} (${state.recentChats.length})`');
     expect(sidepanelSource).toContain('data-clear-chat-history="settings"');
     expect(sidepanelSource).toContain('returnToSettings: button.dataset.clearChatHistory === "settings"');
     expect(sidepanelSource).toContain('state.recentChats.length ? "" : "disabled"');
+  });
+
+  test("previews the number of recent chats before clearing history", () => {
+    expect(sidepanelSource).toContain("const visibleChatCount = state.recentChats.length");
+    expect(sidepanelSource).toContain('`${strings.prompts.clearChatHistoryConfirm}\\n\\n${strings.labels.recentChats}: ${visibleChatCount}`');
+    expect(sidepanelSource).toContain('title: `${strings.actions.clearRecentChats} (${visibleChatCount})`');
+    expect(sidepanelSource).toContain("deletedCount: number");
+    expect(sidepanelSource).toContain('`${strings.status.chatHistoryCleared} (${result.deletedCount})`');
+  });
+
+  test("does not add unused storage usage plumbing for chat history counts", () => {
+    expect(sidepanelSource).not.toContain('type: "storage.usage"');
+    expect(backgroundSource).not.toContain('case "storage.usage"');
+    expect(storageSource).not.toContain("getStorageUsage");
   });
 
   test("uses compact typography for settings rows and controls", () => {
