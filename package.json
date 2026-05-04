@@ -24,6 +24,7 @@
     "check:safari:tooling": "node scripts/check-safari-tooling.mjs",
     "create:safari:xcode": "node scripts/create-safari-xcode-project.mjs",
     "build:safari:xcode": "node scripts/build-safari-xcode-app.mjs",
+    "package:safari:dmg": "node scripts/package-safari-dmg.mjs",
     "bridge:safari:http": "node scripts/run-safari-http-bridge.mjs",
     "package:webstore": "npm run build --workspace @codex-sidepanel/extension && node scripts/package-chrome-web-store.mjs",
     "package:public": "npm run build && node scripts/package-public-release.mjs",
