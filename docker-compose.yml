@@ -1,0 +1,54 @@
+services:
+  gateway:
+    build:
+      context: .
+    restart: unless-stopped
+    environment:
+      CHROMEX_GATEWAY_TOKEN: ${CHROMEX_GATEWAY_TOKEN:?set CHROMEX_GATEWAY_TOKEN}
+      CHROMEX_VISION_API_TOKEN: ${CHROMEX_VISION_API_TOKEN:-}
+      CHROMEX_COACH_API_TOKEN: ${CHROMEX_COACH_API_TOKEN:-}
+      HOST: 0.0.0.0
+      PORT: 18787
+      CODEX_HOME: /data/codex-home
+      CODEX_SIDEPANEL_HOME: /data/codex-sidepanel
+      CHROMEX_WORKSPACE_ROOT: /data/workspace
+      CHROMEX_ASSET_DIR: /data/assets
+      CHROMEX_LOG_DIR: /data/logs
+      CHROMEX_VISION_TEMP_DIR: /data/vision-tmp
+      CHROMEX_COACH_TEMP_DIR: /data/coach-tmp
+    volumes:
+      - codex-home:/data/codex-home
+      - codex-sidepanel:/data/codex-sidepanel
+      - workspace:/data/workspace
+      - assets:/data/assets
+      - logs:/data/logs
+      - vision-tmp:/data/vision-tmp
+      - coach-tmp:/data/coach-tmp
+    expose:
+      - "18787"
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - gateway
+    environment:
+      CHROMEX_GATEWAY_DOMAIN: ${CHROMEX_GATEWAY_DOMAIN:?set CHROMEX_GATEWAY_DOMAIN}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  codex-home:
+  codex-sidepanel:
+  workspace:
+  assets:
+  logs:
+  vision-tmp:
+  coach-tmp:
+  caddy-data:
+  caddy-config:

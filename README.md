@@ -102,6 +102,21 @@ The source tree is organized as:
 - `packages/native-host`: Chrome Native Messaging relay
 - `packages/shared`: shared types, policies, profiles, and helpers
 
+## Private Marathon Coach Gateway
+
+The personal gateway build also exposes localhost-only HTTP endpoints for the
+marathon coach project:
+
+- `/api/vision/healthz`, `/api/vision/health-snapshot`, `/api/vision/food-photo`
+- `/api/coach/healthz`, `/api/coach/chat`, `/api/coach/week-proposal`
+
+Configure `CHROMEX_VISION_API_TOKEN` and `CHROMEX_COACH_API_TOKEN` separately.
+The coach endpoints run Codex in `exec` mode with a read-only sandbox,
+`--ask-for-approval never`, prompt-over-stdin, a minimal subprocess environment,
+timeout, limited stdout/stderr, output-size caps, and schema-validated output.
+They are read-only helper layers: plan application and DB writes remain owned by
+the marathon app server.
+
 ## Language Support
 
 Chromex follows the browser language automatically by default. Users can also choose a language in **Settings > General > App UI language**.

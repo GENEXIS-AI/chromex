@@ -19,7 +19,10 @@ AGENTS.md
 GEMINI.md
 MEMORY.md
 *harness*.md
-docs/
+docs/*
+!docs/pages/
+!docs/personal-gateway-plan.md
+!docs/EVOLUTION.md
 codex-sidepanel-backups/
 chromex-backups/
 .codex-backups/

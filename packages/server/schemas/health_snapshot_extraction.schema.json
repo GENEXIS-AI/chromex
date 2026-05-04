@@ -1,0 +1,173 @@
+{
+  "$defs": {
+    "HealthMetric": {
+      "additionalProperties": false,
+      "description": "One visible Garmin/Oura metric extracted from a screenshot.",
+      "properties": {
+        "confidence": {
+          "$ref": "#/$defs/MeasurementConfidence"
+        },
+        "evidence": {
+          "type": "string"
+        },
+        "metric_type": {
+          "type": "string"
+        },
+        "numeric_value": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "unit": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "value_text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "metric_type",
+        "value_text",
+        "numeric_value",
+        "unit",
+        "confidence",
+        "evidence"
+      ],
+      "type": "object"
+    },
+    "HealthSnapshotExtraction": {
+      "additionalProperties": false,
+      "description": "Structured daily Garmin/Oura screenshot extraction.",
+      "properties": {
+        "confidence": {
+          "$ref": "#/$defs/MeasurementConfidence"
+        },
+        "extraction_status": {
+          "$ref": "#/$defs/HealthSnapshotExtractionStatus"
+        },
+        "metric_date": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "metrics": {
+          "items": {
+            "$ref": "#/$defs/HealthMetric"
+          },
+          "type": "array"
+        },
+        "missing_fields": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "screenshot_label_date": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "source": {
+          "$ref": "#/$defs/HealthSnapshotSource"
+        },
+        "source_assumptions": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "source_confidence": {
+          "$ref": "#/$defs/MeasurementConfidence"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "trend_interpretation_allowed": {
+          "type": "boolean"
+        },
+        "upload_date": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "upload_date",
+        "metric_date",
+        "screenshot_label_date",
+        "source",
+        "source_confidence",
+        "confidence",
+        "extraction_status",
+        "metrics",
+        "summary",
+        "missing_fields",
+        "source_assumptions",
+        "trend_interpretation_allowed"
+      ],
+      "type": "object"
+    },
+    "HealthSnapshotExtractionStatus": {
+      "enum": [
+        "extracted",
+        "partial",
+        "no_metrics_visible"
+      ],
+      "type": "string"
+    },
+    "HealthSnapshotSource": {
+      "enum": [
+        "garmin",
+        "oura",
+        "unknown"
+      ],
+      "type": "string"
+    },
+    "MeasurementConfidence": {
+      "enum": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Structured object Codex must write as its final message.",
+  "properties": {
+    "extraction": {
+      "$ref": "#/$defs/HealthSnapshotExtraction"
+    },
+    "schema_version": {
+      "enum": [
+        1
+      ],
+      "type": "integer"
+    }
+  },
+  "required": [
+    "schema_version",
+    "extraction"
+  ],
+  "type": "object"
+}

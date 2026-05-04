@@ -1,0 +1,13 @@
+node_modules
+packages/*/dist
+.git
+.DS_Store
+.env
+.env.*
+npm-debug.log
+coverage
+*.tgz
+codex-sidepanel-backups
+chromex-backups
+.codex-backups
+backups

@@ -1,0 +1,95 @@
+{
+  "$defs": {
+    "FoodPhotoClassification": {
+      "additionalProperties": false,
+      "description": "Coarse, safety-bounded food photo classification.",
+      "properties": {
+        "alcohol_present": {
+          "$ref": "#/$defs/FoodPhotoValue"
+        },
+        "carbs_after_workout": {
+          "$ref": "#/$defs/FoodPhotoValue"
+        },
+        "carbs_before_workout": {
+          "$ref": "#/$defs/FoodPhotoValue"
+        },
+        "confidence": {
+          "$ref": "#/$defs/MeasurementConfidence"
+        },
+        "late_heavy_meal": {
+          "$ref": "#/$defs/FoodPhotoValue"
+        },
+        "missing_fields": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "note": {
+          "maxLength": 1000,
+          "type": "string"
+        },
+        "protein_present": {
+          "$ref": "#/$defs/FoodPhotoValue"
+        },
+        "source_assumptions": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "vegetables_present": {
+          "$ref": "#/$defs/FoodPhotoValue"
+        }
+      },
+      "required": [
+        "protein_present",
+        "carbs_before_workout",
+        "carbs_after_workout",
+        "vegetables_present",
+        "alcohol_present",
+        "late_heavy_meal",
+        "confidence",
+        "note",
+        "missing_fields",
+        "source_assumptions"
+      ],
+      "type": "object"
+    },
+    "FoodPhotoValue": {
+      "enum": [
+        "yes",
+        "no",
+        "unclear",
+        "not_applicable"
+      ],
+      "type": "string"
+    },
+    "MeasurementConfidence": {
+      "enum": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Structured object Codex must write as its final food-photo message.",
+  "properties": {
+    "classification": {
+      "$ref": "#/$defs/FoodPhotoClassification"
+    },
+    "schema_version": {
+      "enum": [
+        1
+      ],
+      "type": "integer"
+    }
+  },
+  "required": [
+    "schema_version",
+    "classification"
+  ],
+  "type": "object"
+}

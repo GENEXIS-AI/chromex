@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "answer_markdown", "suggested_actions", "create_week_proposal"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "answer_markdown": { "type": "string", "minLength": 1, "maxLength": 12000 },
+    "suggested_actions": {
+      "type": "array",
+      "maxItems": 8,
+      "items": { "type": "string", "maxLength": 200 }
+    },
+    "create_week_proposal": { "type": "boolean" },
+    "response_summary": { "type": ["string", "null"], "maxLength": 2000 }
+  }
+}

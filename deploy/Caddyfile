@@ -1,0 +1,14 @@
+{$CHROMEX_GATEWAY_DOMAIN} {
+	encode zstd gzip
+
+	@health path /healthz /readyz
+	handle @health {
+		reverse_proxy gateway:18787
+	}
+
+	handle /rpc {
+		reverse_proxy gateway:18787
+	}
+
+	respond 404
+}
