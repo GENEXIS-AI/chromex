@@ -1,6 +1,15 @@
+import { existsSync, rmSync } from "node:fs";
+import { join } from "node:path";
+
 import { describe, expect, test, vi } from "vitest";
 
 import { InMemoryBridgeSecrets, RealtimeTranslationPlane } from "../src/index.js";
+
+function testSecretPath(name: string): string {
+  const path = join(process.cwd(), `tmp-realtime-translation-${name}.json`);
+  rmSync(path, { force: true });
+  return path;
+}
 
 describe("RealtimeTranslationPlane", () => {
   test("creates short-lived browser secrets for gpt-realtime-translate", async () => {
@@ -15,7 +24,10 @@ describe("RealtimeTranslationPlane", () => {
       );
     });
     const plane = new RealtimeTranslationPlane({
-      secrets: new InMemoryBridgeSecrets({ secretPath: "/tmp/chromex-test-secrets.json", initialOpenAiApiKey: "sk-test" }),
+      secrets: new InMemoryBridgeSecrets({
+        secretPath: testSecretPath("create"),
+        initialOpenAiApiKey: "sk-test",
+      }),
       fetchImpl,
     });
 
@@ -34,6 +46,7 @@ describe("RealtimeTranslationPlane", () => {
         headers: expect.objectContaining({
           Authorization: "Bearer sk-test",
           "Content-Type": "application/json",
+          "OpenAI-Safety-Identifier": expect.stringMatching(/^chromex-[a-f0-9]{64}$/u),
         }),
         body: expect.stringContaining('"model":"gpt-realtime-translate"'),
       }),
@@ -56,7 +69,10 @@ describe("RealtimeTranslationPlane", () => {
 
   test("does not create translation secrets unless an OpenAI API key is configured", async () => {
     const plane = new RealtimeTranslationPlane({
-      secrets: new InMemoryBridgeSecrets({ secretPath: "/tmp/chromex-test-empty-secrets.json", initialOpenAiApiKey: null }),
+      secrets: new InMemoryBridgeSecrets({
+        secretPath: testSecretPath("empty"),
+        initialOpenAiApiKey: null,
+      }),
       fetchImpl: vi.fn(),
     });
 
@@ -64,12 +80,25 @@ describe("RealtimeTranslationPlane", () => {
   });
 
   test("clears the stored OpenAI API key used for realtime translation", async () => {
+    const secretPath = testSecretPath("clear");
+    const fetchImpl = vi.fn(async () => {
+      return new Response(JSON.stringify({ value: "ek_test" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
     const plane = new RealtimeTranslationPlane({
-      secrets: new InMemoryBridgeSecrets({ secretPath: "/tmp/chromex-test-clear-secrets.json", initialOpenAiApiKey: "sk-test" }),
-      fetchImpl: vi.fn(),
+      secrets: new InMemoryBridgeSecrets({
+        secretPath,
+        initialOpenAiApiKey: "sk-test",
+      }),
+      fetchImpl,
     });
 
+    await expect(plane.createClientSecret({ targetLanguage: "ko" })).resolves.toMatchObject({ value: "ek_test" });
+    expect(existsSync(secretPath)).toBe(true);
     await expect(plane.clearApiKey()).resolves.toEqual({ cleared: true });
+    expect(existsSync(secretPath)).toBe(false);
     await expect(plane.createClientSecret({ targetLanguage: "ko" })).rejects.toThrow(/API key/u);
   });
 });

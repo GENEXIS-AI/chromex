@@ -1,9 +1,11 @@
+import { createHash, randomUUID } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { resolveDefaultSecretStorePath } from "./platform.js";
 
 type BridgeSecretFilePayload = {
   openAiApiKey?: string;
+  localSafetyId?: string;
 };
 
 function readPersistedSecrets(secretPath: string): BridgeSecretFilePayload {
@@ -13,7 +15,10 @@ function readPersistedSecrets(secretPath: string): BridgeSecretFilePayload {
 
   try {
     const parsed = JSON.parse(readFileSync(secretPath, "utf8")) as BridgeSecretFilePayload;
-    return typeof parsed.openAiApiKey === "string" ? parsed : {};
+    return {
+      ...(typeof parsed.openAiApiKey === "string" ? { openAiApiKey: parsed.openAiApiKey } : {}),
+      ...(typeof parsed.localSafetyId === "string" ? { localSafetyId: parsed.localSafetyId } : {}),
+    };
   } catch {
     return {};
   }
@@ -22,14 +27,16 @@ function readPersistedSecrets(secretPath: string): BridgeSecretFilePayload {
 export class InMemoryBridgeSecrets {
   readonly #secretPath: string;
   #openAiApiKey: string | null = null;
+  #localSafetyId: string | null = null;
 
   constructor(options?: { secretPath?: string; initialOpenAiApiKey?: string | null }) {
     this.#secretPath = options?.secretPath ?? resolveDefaultSecretStorePath();
-    const persisted = readPersistedSecrets(this.#secretPath).openAiApiKey;
+    const persisted = readPersistedSecrets(this.#secretPath);
     const hasExplicitInitialKey = Boolean(options && "initialOpenAiApiKey" in options);
     this.#openAiApiKey = hasExplicitInitialKey
       ? options?.initialOpenAiApiKey ?? null
-      : persisted ?? null;
+      : persisted.openAiApiKey ?? null;
+    this.#localSafetyId = persisted.localSafetyId ?? null;
   }
 
   setOpenAiApiKey(apiKey: string): void {
@@ -43,11 +50,20 @@ export class InMemoryBridgeSecrets {
 
   clearOpenAiApiKey(): void {
     this.#openAiApiKey = null;
-    this.#clearPersisted();
+    this.#localSafetyId = null;
+    this.#persist();
   }
 
   hasOpenAiApiKey(): boolean {
     return Boolean(this.#openAiApiKey);
+  }
+
+  getOpenAiSafetyIdentifier(): string {
+    if (!this.#localSafetyId) {
+      this.#localSafetyId = randomUUID();
+      this.#persist();
+    }
+    return `chromex-${createHash("sha256").update(this.#localSafetyId).digest("hex")}`;
   }
 
   getSecretPath(): string {
@@ -55,7 +71,7 @@ export class InMemoryBridgeSecrets {
   }
 
   #persist(): void {
-    if (!this.#openAiApiKey) {
+    if (!this.#openAiApiKey && !this.#localSafetyId) {
       this.#clearPersisted();
       return;
     }
@@ -65,7 +81,8 @@ export class InMemoryBridgeSecrets {
       this.#secretPath,
       JSON.stringify(
         {
-          openAiApiKey: this.#openAiApiKey,
+          ...(this.#openAiApiKey ? { openAiApiKey: this.#openAiApiKey } : {}),
+          ...(this.#localSafetyId ? { localSafetyId: this.#localSafetyId } : {}),
         },
         null,
         2,

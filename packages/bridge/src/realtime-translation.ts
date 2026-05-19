@@ -64,11 +64,13 @@ export class RealtimeTranslationPlane implements BridgeRealtimeTranslationPlane 
     const targetLanguage = normalizeTargetLanguage(params.targetLanguage);
     const ttlSeconds = normalizeTtlSeconds(params.ttlSeconds);
     const transcriptionModel = normalizeTranscriptionModel(params.sourceTranscriptionModel);
+    const safetyIdentifier = this.#secrets.getOpenAiSafetyIdentifier();
     const response = await this.#fetch(REALTIME_TRANSLATION_CLIENT_SECRET_URL, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${apiKey}`,
         "Content-Type": "application/json",
+        "OpenAI-Safety-Identifier": safetyIdentifier,
       },
       body: JSON.stringify({
         expires_after: {
