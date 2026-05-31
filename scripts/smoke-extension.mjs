@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { access, cp, mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
 import { homedir, platform, tmpdir } from "node:os";
@@ -39,9 +40,7 @@ try {
     ...launchOptions,
   });
 
-  const serviceWorker = await waitForExtensionServiceWorker(browserContext);
-
-  const extensionId = new URL(serviceWorker.url()).host;
+  const extensionId = await resolveExtensionId(browserContext, stagedExtensionPath);
   const microphonePermissionPage = await browserContext.newPage();
   await microphonePermissionPage.goto(`chrome-extension://${extensionId}/mic-permission.html?locale=ko`, {
     waitUntil: "domcontentloaded",
@@ -1436,8 +1435,22 @@ async function waitForSmokeHarness(page) {
   throw new Error("Smoke test failed: the sidepanel smoke harness never became ready.");
 }
 
-async function waitForExtensionServiceWorker(browserContext) {
-  const deadline = Date.now() + 30_000;
+async function resolveExtensionId(browserContext, extensionRoot) {
+  const serviceWorker = await waitForExtensionServiceWorker(browserContext, 10_000);
+  if (serviceWorker) {
+    return new URL(serviceWorker.url()).host;
+  }
+
+  const manifest = JSON.parse(await readFile(join(extensionRoot, "manifest.json"), "utf8"));
+  if (typeof manifest.key === "string" && manifest.key.trim()) {
+    return extensionIdFromManifestKey(manifest.key);
+  }
+
+  throw new Error("Smoke test failed: the MV3 service worker never became available and manifest key is missing.");
+}
+
+async function waitForExtensionServiceWorker(browserContext, timeoutMs = 30_000) {
+  const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const [serviceWorker] = browserContext.serviceWorkers();
     if (serviceWorker) {
@@ -1445,7 +1458,14 @@ async function waitForExtensionServiceWorker(browserContext) {
     }
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
-  throw new Error("Smoke test failed: the MV3 service worker never became available.");
+  return null;
+}
+
+function extensionIdFromManifestKey(key) {
+  const digest = createHash("sha256").update(Buffer.from(key, "base64")).digest();
+  return Array.from(digest.subarray(0, 16), (byte) => byte.toString(16).padStart(2, "0"))
+    .join("")
+    .replace(/[0-9a-f]/gu, (nibble) => String.fromCharCode("a".charCodeAt(0) + Number.parseInt(nibble, 16)));
 }
 
 async function installPlaywrightChromium() {

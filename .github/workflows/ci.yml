@@ -49,8 +49,8 @@ jobs:
         uses: browser-actions/setup-chrome@v2
         id: setup-chrome
         with:
-          chrome-version: stable
-          install-dependencies: true
+          chrome-version: 147.0.7727.15
+          install-dependencies: ${{ matrix.os == 'ubuntu-latest' }}
 
       - name: Run extension smoke test
         env:
