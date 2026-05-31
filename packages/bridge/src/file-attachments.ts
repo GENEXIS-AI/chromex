@@ -2,7 +2,7 @@ import { extname } from "node:path";
 
 import type { UserFileAttachment } from "@codex-sidepanel/shared";
 import mammoth from "mammoth";
-import { PDFParse } from "pdf-parse";
+import type { PDFParse } from "pdf-parse";
 import readXlsxFile, { readSheetNames, type Row } from "read-excel-file/node";
 
 export interface PreparedUserFileAttachments {
@@ -282,7 +282,38 @@ function decodeTextBuffer(buffer: Buffer): string {
   return normalizeExtractedText(new TextDecoder("utf-8", { fatal: false }).decode(buffer));
 }
 
+// pdfjs-dist (loaded transitively via pdf-parse) touches the browser/canvas
+// globals DOMMatrix, ImageData and Path2D while its display/canvas module is
+// evaluated. In Node those globals are normally supplied by the native
+// @napi-rs/canvas addon, but esbuild cannot inline a native .node binary into
+// the packaged bridge bundle and the published local-bridge archive ships no
+// node_modules, so the addon is absent at runtime and the bridge crashes with
+// "DOMMatrix is not defined" before it can handle any request.
+//
+// Chromex only extracts PDF *text* (getText()) and never rasterizes pages, so
+// these are intentionally inert shims, NOT rendering-capable polyfills: they
+// exist solely to let the pdfjs display/canvas module finish initializing.
+// Any code path that actually renders (NodeCanvasFactory._createCanvas, page
+// rasterization, annotation appearances, thumbnails) is not exercised by text
+// extraction and would still fail with these shims -- which is the correct
+// behavior, since Chromex does not support PDF rendering. The shims are only
+// installed when the host runtime does not already provide the real globals.
+function ensurePdfRenderingGlobals(): void {
+  const globalScope = globalThis as Record<string, unknown>;
+  if (typeof globalScope.DOMMatrix === "undefined") {
+    globalScope.DOMMatrix = class DOMMatrix {};
+  }
+  if (typeof globalScope.ImageData === "undefined") {
+    globalScope.ImageData = class ImageData {};
+  }
+  if (typeof globalScope.Path2D === "undefined") {
+    globalScope.Path2D = class Path2D {};
+  }
+}
+
 async function extractPdfText(buffer: Buffer): Promise<string> {
+  ensurePdfRenderingGlobals();
+  const { PDFParse } = await import("pdf-parse");
   const parser = new PDFParse({ data: new Uint8Array(buffer) });
   try {
     const result = await parser.getText();

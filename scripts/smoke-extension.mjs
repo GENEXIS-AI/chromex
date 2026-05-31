@@ -1099,7 +1099,7 @@ try {
     window.__CODEX_SIDEPANEL_SMOKE__?.getDryRunSubmissions?.() ?? [],
   );
   const quickSystemPrompt = quickSystemSubmissions.at(-1) ?? "";
-  if (!/current|현재/i.test(quickSystemPrompt)) {
+  if (!/current|현재|当前/i.test(quickSystemPrompt)) {
     throw new Error(`Smoke test failed: quick system did not submit current-page prompt (${JSON.stringify(quickSystemSubmissions)}).`);
   }
 
@@ -1418,7 +1418,7 @@ async function detectChromiumLaunchOptions() {
   throw new Error(
     [
       "Smoke tests need Chromium or Chrome for Testing.",
-      "Run `npx -y playwright@1.59.1 install chromium`, set `BROWSER_EXECUTABLE_PATH`, or install Chrome for Testing.",
+      "Run `npm run smoke:install-browser`, set `BROWSER_EXECUTABLE_PATH`, or install Chrome for Testing.",
       "Google Chrome and Microsoft Edge no longer support command-line side-loading for this workflow.",
     ].join(" "),
   );
@@ -1449,12 +1449,10 @@ async function waitForExtensionServiceWorker(browserContext) {
 }
 
 async function installPlaywrightChromium() {
-  const version = await readPlaywrightVersion();
-  const npxCommand = process.platform === "win32" ? "npx.cmd" : "npx";
-  const args = ["-y", `playwright@${version}`, "install", "chromium"];
+  const cliPath = resolve(process.cwd(), "node_modules", "playwright-core", "cli.js");
 
   await new Promise((resolvePromise, rejectPromise) => {
-    const child = spawn(npxCommand, args, {
+    const child = spawn(process.execPath, [cliPath, "install", "chromium"], {
       cwd: process.cwd(),
       env: {
         ...process.env,
@@ -1471,23 +1469,6 @@ async function installPlaywrightChromium() {
       rejectPromise(new Error(`Failed to install Playwright Chromium (exit code ${code ?? "unknown"}).`));
     });
   });
-}
-
-async function readPlaywrightVersion() {
-  const packageJsonPath = resolve(process.cwd(), "package.json");
-  const packageJson = JSON.parse(await readFile(packageJsonPath, "utf8"));
-  const version =
-    packageJson.devDependencies?.playwright ??
-    packageJson.devDependencies?.["playwright-core"] ??
-    packageJson.dependencies?.playwright ??
-    packageJson.dependencies?.["playwright-core"];
-
-  if (typeof version !== "string") {
-    return "1.59.1";
-  }
-
-  const normalized = version.replace(/^[^\d]*/, "");
-  return normalized || "1.59.1";
 }
 
 async function findPlaywrightChromiumExecutable() {
