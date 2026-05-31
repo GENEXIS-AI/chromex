@@ -1,0 +1,42 @@
+{
+  "extensionName": {
+    "message": "Chromex",
+    "description": "Extension name shown in Chrome surfaces."
+  },
+  "extensionDescription": {
+    "message": "由 Codex 驱动的浏览器助手，可处理页面上下文、标签页、语音和图像编辑。",
+    "description": "Short extension description shown in Chrome and the Chrome Web Store."
+  },
+  "actionOpenSidePanel": {
+    "message": "打开 Chromex",
+    "description": "Tooltip for the browser action button."
+  },
+  "commandOpenSidePanel": {
+    "message": "打开 Chromex",
+    "description": "Keyboard shortcut description for opening the side panel."
+  },
+  "commandOpenPopup": {
+    "message": "打开 Chromex 弹出窗口",
+    "description": "Keyboard shortcut description for opening the popup workspace."
+  },
+  "commandStartDictation": {
+    "message": "开始/停止听写",
+    "description": "Chrome command description for voice dictation shortcut."
+  },
+  "contextAskPage": {
+    "message": "向 Chromex 询问此页面",
+    "description": "Context menu item for asking about the current page."
+  },
+  "contextAskSelection": {
+    "message": "Ask AI about selection",
+    "description": "Context menu item for asking about selected text."
+  },
+  "contextEditImage": {
+    "message": "用 Chromex 编辑此图片",
+    "description": "Context menu item for editing an image with Chromex."
+  },
+  "contextSummarizeYoutube": {
+    "message": "总结此 YouTube 视频",
+    "description": "Context menu item for summarizing a YouTube video."
+  }
+}

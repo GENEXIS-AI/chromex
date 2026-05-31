@@ -1,0 +1,78 @@
+{
+  "manifest_version": 3,
+  "name": "__MSG_extensionName__",
+  "version": "0.1.7",
+  "minimum_chrome_version": "116",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAuP+A4d/pFvVoYH/4yByEMq1JknmBMcsBo5hbyjFDRthp9GrAWTnksc0X/dP5kftZ45O+IlfP6rfg5w7ktNDt7tuJ0TpslnQEUvzC9D0CkEWzj6OmuWgY7nCtmnuHHItp1xJR9RsCDMNg9qFf54EiCf6eyTDrkJnn1yeIx/rIZRcbqnFjBLrVsuSz18L21/b+zQ8o+xzPWWhOYGVnuxuQvL57/MiDfSJ5zI0xgnYgMP/OXhdRTKmJeu/0pdEcrk2y1WgAE2LfI0jKjF6VIjKmDHabJRlP3/UZy6siRFHPZs2Q5Eh+Wxb0MtfiXN2r64R9p7MjGOkaw71GH+itEiAxuwIDAQAB",
+  "default_locale": "en",
+  "description": "__MSG_extensionDescription__",
+  "icons": {
+    "16": "icons/codex-16.png",
+    "32": "icons/codex-32.png",
+    "48": "icons/codex-48.png",
+    "128": "icons/codex-128.png"
+  },
+  "permissions": [
+    "offscreen",
+    "sidePanel",
+    "activeTab",
+    "tabs",
+    "scripting",
+    "storage",
+    "contextMenus",
+    "nativeMessaging",
+    "desktopCapture"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "optional_permissions": [
+    "history"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*", "file:///*"],
+      "js": ["content.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ],
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "action": {
+    "default_title": "__MSG_actionOpenSidePanel__",
+    "default_icon": {
+      "16": "icons/codex-16.png",
+      "24": "icons/codex-24.png",
+      "32": "icons/codex-32.png",
+      "48": "icons/codex-48.png",
+      "128": "icons/codex-128.png"
+    }
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["icons/codex-32.png"],
+      "matches": ["<all_urls>"]
+    }
+  ],
+  "commands": {
+    "open-side-panel": {
+      "description": "__MSG_commandOpenSidePanel__"
+    },
+    "open-popup-chat": {
+      "description": "__MSG_commandOpenPopup__"
+    },
+    "start-dictation": {
+      "suggested_key": {
+        "default": "Alt+Shift+D",
+        "mac": "Command+Shift+D"
+      },
+      "description": "__MSG_commandStartDictation__"
+    }
+  }
+}

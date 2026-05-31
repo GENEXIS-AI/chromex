@@ -1,0 +1,42 @@
+{
+  "extensionName": {
+    "message": "Chromex",
+    "description": "Extension name shown in Chrome surfaces."
+  },
+  "extensionDescription": {
+    "message": "페이지 컨텍스트, 탭, 음성, 이미지 편집을 지원하는 Codex 기반 브라우저 어시스턴트입니다.",
+    "description": "Short extension description shown in Chrome and the Chrome Web Store."
+  },
+  "actionOpenSidePanel": {
+    "message": "Chromex 열기",
+    "description": "Tooltip for the browser action button."
+  },
+  "commandOpenSidePanel": {
+    "message": "Chromex 열기",
+    "description": "Keyboard shortcut description for opening the side panel."
+  },
+  "commandOpenPopup": {
+    "message": "Chromex 팝업 열기",
+    "description": "Keyboard shortcut description for opening the popup workspace."
+  },
+  "commandStartDictation": {
+    "message": "받아쓰기 시작/중지",
+    "description": "Chrome command description for voice dictation shortcut."
+  },
+  "contextAskPage": {
+    "message": "이 페이지를 Chromex에 물어보기",
+    "description": "Context menu item for asking about the current page."
+  },
+  "contextAskSelection": {
+    "message": "AI에게 질문하기",
+    "description": "Context menu item for asking about selected text."
+  },
+  "contextEditImage": {
+    "message": "이 이미지를 Chromex로 편집하기",
+    "description": "Context menu item for editing an image with Chromex."
+  },
+  "contextSummarizeYoutube": {
+    "message": "이 YouTube 영상을 요약하기",
+    "description": "Context menu item for summarizing a YouTube video."
+  }
+}

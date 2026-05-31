@@ -1,0 +1,42 @@
+{
+  "extensionName": {
+    "message": "Chromex",
+    "description": "Extension name shown in Chrome surfaces."
+  },
+  "extensionDescription": {
+    "message": "ページのコンテキスト、タブ、音声、画像編集に対応した Codex 搭載ブラウザーアシスタント。",
+    "description": "Short extension description shown in Chrome and the Chrome Web Store."
+  },
+  "actionOpenSidePanel": {
+    "message": "Chromex を開く",
+    "description": "Tooltip for the browser action button."
+  },
+  "commandOpenSidePanel": {
+    "message": "Chromex を開く",
+    "description": "Keyboard shortcut description for opening the side panel."
+  },
+  "commandOpenPopup": {
+    "message": "Chromex ポップアップを開く",
+    "description": "Keyboard shortcut description for opening the popup workspace."
+  },
+  "commandStartDictation": {
+    "message": "ディクテーションを開始/停止",
+    "description": "Chrome command description for voice dictation shortcut."
+  },
+  "contextAskPage": {
+    "message": "このページについて Chromex に質問",
+    "description": "Context menu item for asking about the current page."
+  },
+  "contextAskSelection": {
+    "message": "Ask AI about selection",
+    "description": "Context menu item for asking about selected text."
+  },
+  "contextEditImage": {
+    "message": "この画像を Chromex で編集",
+    "description": "Context menu item for editing an image with Chromex."
+  },
+  "contextSummarizeYoutube": {
+    "message": "この YouTube 動画を要約",
+    "description": "Context menu item for summarizing a YouTube video."
+  }
+}

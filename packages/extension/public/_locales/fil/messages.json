@@ -1,0 +1,42 @@
+{
+  "extensionName": {
+    "message": "Chromex",
+    "description": "Extension name shown in Chrome surfaces."
+  },
+  "extensionDescription": {
+    "message": "Browser assistant na pinapagana ng Codex para sa konteksto ng page, mga tab, boses, at pag-edit ng larawan.",
+    "description": "Short extension description shown in Chrome and the Chrome Web Store."
+  },
+  "actionOpenSidePanel": {
+    "message": "Buksan ang Chromex",
+    "description": "Tooltip for the browser action button."
+  },
+  "commandOpenSidePanel": {
+    "message": "Buksan ang Chromex",
+    "description": "Keyboard shortcut description for opening the side panel."
+  },
+  "commandOpenPopup": {
+    "message": "Buksan ang Chromex popup",
+    "description": "Keyboard shortcut description for opening the popup workspace."
+  },
+  "commandStartDictation": {
+    "message": "Start or stop dictation",
+    "description": "Chrome command description for voice dictation shortcut."
+  },
+  "contextAskPage": {
+    "message": "Tanungin ang Chromex tungkol sa page na ito",
+    "description": "Context menu item for asking about the current page."
+  },
+  "contextAskSelection": {
+    "message": "Ask AI about selection",
+    "description": "Context menu item for asking about selected text."
+  },
+  "contextEditImage": {
+    "message": "I-edit ang larawang ito gamit ang Chromex",
+    "description": "Context menu item for editing an image with Chromex."
+  },
+  "contextSummarizeYoutube": {
+    "message": "Ibuod ang YouTube video na ito",
+    "description": "Context menu item for summarizing a YouTube video."
+  }
+}

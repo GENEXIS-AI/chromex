@@ -1,0 +1,42 @@
+{
+  "extensionName": {
+    "message": "Chromex",
+    "description": "Extension name shown in Chrome surfaces."
+  },
+  "extensionDescription": {
+    "message": "Codex-pohjainen selainavustaja sivukontekstille, välilehdille, äänelle ja kuvien muokkaukselle.",
+    "description": "Short extension description shown in Chrome and the Chrome Web Store."
+  },
+  "actionOpenSidePanel": {
+    "message": "Avaa Chromex",
+    "description": "Tooltip for the browser action button."
+  },
+  "commandOpenSidePanel": {
+    "message": "Avaa Chromex",
+    "description": "Keyboard shortcut description for opening the side panel."
+  },
+  "commandOpenPopup": {
+    "message": "Avaa Chromex-ponnahdusikkuna",
+    "description": "Keyboard shortcut description for opening the popup workspace."
+  },
+  "commandStartDictation": {
+    "message": "Start or stop dictation",
+    "description": "Chrome command description for voice dictation shortcut."
+  },
+  "contextAskPage": {
+    "message": "Kysy Chromexilta tästä sivusta",
+    "description": "Context menu item for asking about the current page."
+  },
+  "contextAskSelection": {
+    "message": "Ask AI about selection",
+    "description": "Context menu item for asking about selected text."
+  },
+  "contextEditImage": {
+    "message": "Muokkaa tätä kuvaa Chromexilla",
+    "description": "Context menu item for editing an image with Chromex."
+  },
+  "contextSummarizeYoutube": {
+    "message": "Tiivistä tämä YouTube-video",
+    "description": "Context menu item for summarizing a YouTube video."
+  }
+}

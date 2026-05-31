@@ -1,0 +1,42 @@
+{
+  "extensionName": {
+    "message": "Chromex",
+    "description": "Extension name shown in Chrome surfaces."
+  },
+  "extensionDescription": {
+    "message": "পৃষ্ঠা প্রসঙ্গ, ট্যাব, ভয়েস এবং ছবি সম্পাদনার জন্য Codex-চালিত ব্রাউজার সহকারী।",
+    "description": "Short extension description shown in Chrome and the Chrome Web Store."
+  },
+  "actionOpenSidePanel": {
+    "message": "Chromex খুলুন",
+    "description": "Tooltip for the browser action button."
+  },
+  "commandOpenSidePanel": {
+    "message": "Chromex খুলুন",
+    "description": "Keyboard shortcut description for opening the side panel."
+  },
+  "commandOpenPopup": {
+    "message": "Chromex পপআপ খুলুন",
+    "description": "Keyboard shortcut description for opening the popup workspace."
+  },
+  "commandStartDictation": {
+    "message": "Start or stop dictation",
+    "description": "Chrome command description for voice dictation shortcut."
+  },
+  "contextAskPage": {
+    "message": "এই পৃষ্ঠা সম্পর্কে Chromex-কে জিজ্ঞাসা করুন",
+    "description": "Context menu item for asking about the current page."
+  },
+  "contextAskSelection": {
+    "message": "Ask AI about selection",
+    "description": "Context menu item for asking about selected text."
+  },
+  "contextEditImage": {
+    "message": "Chromex দিয়ে এই ছবি সম্পাদনা করুন",
+    "description": "Context menu item for editing an image with Chromex."
+  },
+  "contextSummarizeYoutube": {
+    "message": "এই YouTube ভিডিওটি সংক্ষেপ করুন",
+    "description": "Context menu item for summarizing a YouTube video."
+  }
+}

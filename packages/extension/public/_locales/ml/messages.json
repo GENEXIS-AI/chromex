@@ -1,0 +1,42 @@
+{
+  "extensionName": {
+    "message": "Chromex",
+    "description": "Extension name shown in Chrome surfaces."
+  },
+  "extensionDescription": {
+    "message": "പേജ് കോൺടെക്സ്റ്റ്, ടാബുകൾ, ശബ്ദം, ഇമേജ് എഡിറ്റിംഗ് എന്നിവയ്ക്കുള്ള Codex-പ്രേരിത ബ്രൗസർ സഹായി.",
+    "description": "Short extension description shown in Chrome and the Chrome Web Store."
+  },
+  "actionOpenSidePanel": {
+    "message": "Chromex തുറക്കുക",
+    "description": "Tooltip for the browser action button."
+  },
+  "commandOpenSidePanel": {
+    "message": "Chromex തുറക്കുക",
+    "description": "Keyboard shortcut description for opening the side panel."
+  },
+  "commandOpenPopup": {
+    "message": "Chromex പോപ്പപ്പ് തുറക്കുക",
+    "description": "Keyboard shortcut description for opening the popup workspace."
+  },
+  "commandStartDictation": {
+    "message": "Start or stop dictation",
+    "description": "Chrome command description for voice dictation shortcut."
+  },
+  "contextAskPage": {
+    "message": "ഈ പേജിനെക്കുറിച്ച് Chromexനോട് ചോദിക്കുക",
+    "description": "Context menu item for asking about the current page."
+  },
+  "contextAskSelection": {
+    "message": "Ask AI about selection",
+    "description": "Context menu item for asking about selected text."
+  },
+  "contextEditImage": {
+    "message": "ഈ ചിത്രം Chromex ഉപയോഗിച്ച് എഡിറ്റ് ചെയ്യുക",
+    "description": "Context menu item for editing an image with Chromex."
+  },
+  "contextSummarizeYoutube": {
+    "message": "ഈ YouTube വീഡിയോ സംഗ്രഹിക്കുക",
+    "description": "Context menu item for summarizing a YouTube video."
+  }
+}

@@ -1,0 +1,395 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Chromex Store Install Guide</title>
+    <meta name="description" content="Multilingual setup guide for connecting Chromex from Chrome Web Store to the local Codex bridge.">
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #f6f7f9;
+        --surface: #ffffff;
+        --surface-soft: #eef3fb;
+        --text: #171b21;
+        --muted: #5d6675;
+        --line: #dfe4ec;
+        --accent: #2563eb;
+        --accent-soft: #eaf1ff;
+        --ok: #12805c;
+        --warn: #9a5b00;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        color: var(--text);
+        background: var(--bg);
+        font: 16px/1.7 -apple-system, BlinkMacSystemFont, "Segoe UI", "Apple SD Gothic Neo", "Noto Sans KR", "Noto Sans JP", "Noto Sans SC", sans-serif;
+      }
+
+      main {
+        max-width: 980px;
+        margin: 0 auto;
+        padding: 44px 20px 72px;
+      }
+
+      h1, h2, h3 {
+        line-height: 1.25;
+      }
+
+      h1 {
+        margin: 0 0 10px;
+        font-size: clamp(30px, 5vw, 46px);
+      }
+
+      h2 {
+        margin: 0 0 14px;
+        font-size: 24px;
+      }
+
+      h3 {
+        margin: 0 0 8px;
+        font-size: 18px;
+      }
+
+      p {
+        margin: 0 0 12px;
+      }
+
+      a {
+        color: var(--accent);
+      }
+
+      .hero,
+      .card,
+      .step {
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: 18px;
+      }
+
+      .hero {
+        padding: 26px;
+        margin-bottom: 18px;
+      }
+
+      .lead {
+        max-width: 760px;
+        color: var(--muted);
+        font-size: 18px;
+      }
+
+      .language-tabs {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin: 18px 0 0;
+      }
+
+      .language-tabs a {
+        display: inline-flex;
+        align-items: center;
+        min-height: 34px;
+        padding: 0 14px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        background: var(--surface);
+        color: var(--text);
+        font-weight: 650;
+        text-decoration: none;
+      }
+
+      .status {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin: 18px 0 0;
+      }
+
+      .pill {
+        display: inline-flex;
+        align-items: center;
+        min-height: 30px;
+        padding: 0 12px;
+        border-radius: 999px;
+        background: var(--accent-soft);
+        color: #1d4ed8;
+        font-size: 14px;
+        font-weight: 600;
+      }
+
+      .lang-section {
+        display: grid;
+        gap: 16px;
+        margin-top: 18px;
+      }
+
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 14px;
+      }
+
+      .card {
+        padding: 18px;
+      }
+
+      .card strong {
+        display: block;
+        margin-bottom: 6px;
+      }
+
+      .card span,
+      .muted {
+        color: var(--muted);
+      }
+
+      .steps {
+        display: grid;
+        gap: 16px;
+      }
+
+      .step {
+        display: grid;
+        grid-template-columns: 52px minmax(0, 1fr);
+        gap: 16px;
+        padding: 22px;
+      }
+
+      .num {
+        width: 42px;
+        height: 42px;
+        display: inline-grid;
+        place-items: center;
+        border-radius: 50%;
+        background: var(--text);
+        color: #fff;
+        font-weight: 700;
+      }
+
+      .command {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 10px;
+        align-items: center;
+        margin: 12px 0;
+        padding: 12px;
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        background: #111827;
+      }
+
+      code {
+        color: inherit;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      }
+
+      .command code {
+        overflow-x: auto;
+        color: #f8fafc;
+        white-space: nowrap;
+      }
+
+      button.copy {
+        border: 0;
+        border-radius: 999px;
+        background: #ffffff;
+        color: #111827;
+        cursor: pointer;
+        font-weight: 650;
+        padding: 8px 12px;
+      }
+
+      .note,
+      .warning,
+      .success {
+        margin-top: 12px;
+        padding: 12px 14px;
+        border-radius: 14px;
+      }
+
+      .note {
+        background: var(--surface-soft);
+        color: var(--muted);
+      }
+
+      .warning {
+        background: #fff7e8;
+        color: var(--warn);
+      }
+
+      .success {
+        background: #e9f8f2;
+        color: var(--ok);
+      }
+
+      ul {
+        margin: 10px 0 0;
+        padding-left: 22px;
+      }
+
+      li {
+        margin: 7px 0;
+      }
+
+      footer {
+        margin-top: 28px;
+        color: var(--muted);
+        font-size: 14px;
+      }
+
+      @media (max-width: 760px) {
+        main {
+          padding: 28px 14px 56px;
+        }
+
+        .grid {
+          grid-template-columns: 1fr;
+        }
+
+        .step {
+          grid-template-columns: 1fr;
+          padding: 18px;
+        }
+
+        .command {
+          grid-template-columns: 1fr;
+        }
+
+        button.copy {
+          width: 100%;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header class="hero">
+        <h1>Chromex Store Install Guide</h1>
+        <p class="lead">Choose your language and follow the one-time local bridge setup. Chrome Web Store users do not need to build Chromex from source.</p>
+        <nav class="language-tabs" aria-label="Languages">
+          <a href="#en">English</a>
+          <a href="#ko">한국어</a>
+          <a href="#ja">日本語</a>
+          <a href="#zh-cn">简体中文</a>
+        </nav>
+      </header>
+
+      <section id="en" class="lang-section" lang="en">
+        <section class="hero">
+          <h2>English</h2>
+          <p class="lead">Install Node.js, install the official Codex CLI, download the Chromex Local Bridge ZIP, register it once, then restart Chrome.</p>
+          <div class="status" aria-label="Requirements">
+            <span class="pill">About 10 minutes</span>
+            <span class="pill">Windows / macOS</span>
+            <span class="pill">Copy and paste friendly</span>
+          </div>
+        </section>
+
+        <section class="grid" aria-label="Before you start">
+          <div class="card"><strong>Why is this needed?</strong><span>Chrome extensions cannot install local programs by themselves. The local bridge is registered by the user so Chrome can safely start Codex through Native Messaging.</span></div>
+          <div class="card"><strong>No source build required</strong><span>Store users only need Node.js, Codex CLI, and the Chromex Local Bridge ZIP.</span></div>
+          <div class="card"><strong>ChatGPT login is supported</strong><span>After the bridge connects, use ChatGPT login or API key login inside Chromex.</span></div>
+        </section>
+
+        <section class="steps" aria-label="English steps">
+          <article class="step"><div class="num">1</div><div><h2>Install Node.js LTS</h2><p>Open the official Node.js page and install the <strong>LTS</strong> version. Use the Windows Installer on Windows or the macOS Installer on macOS.</p><p><a href="https://nodejs.org/en/download/" target="_blank" rel="noopener noreferrer">Open Node.js download</a></p><div class="note">You can keep the default installer choices. After installation, close your terminal and open a new one.</div></div></article>
+          <article class="step"><div class="num">2</div><div><h2>Install Codex CLI</h2><p>Open <strong>PowerShell</strong> on Windows or <strong>Terminal</strong> on macOS, then run:</p><div class="command"><code>npm install -g @openai/codex</code><button class="copy" type="button" data-copy="npm install -g @openai/codex">Copy</button></div><p>Check that it works:</p><div class="command"><code>codex --version</code><button class="copy" type="button" data-copy="codex --version">Copy</button></div><div class="success">If you see <code>codex-cli</code> and a version number, this step worked.</div><p><a href="https://github.com/openai/codex" target="_blank" rel="noopener noreferrer">Open official Codex CLI guide</a></p></div></article>
+          <article class="step"><div class="num">3</div><div><h2>Download Chromex Local Bridge</h2><p>Download and unzip the bridge package. It usually lands in your Downloads folder.</p><p><a href="https://github.com/GENEXIS-AI/chromex/releases/latest/download/chromex-local-bridge.zip">Download chromex-local-bridge.zip</a></p><div class="warning">After unzipping, the folder should contain <code>scripts</code>, <code>bridge</code>, and <code>native-host</code>.</div></div></article>
+          <article class="step"><div class="num">4</div><div><h2>Register the local bridge</h2><h3>Windows</h3><p>Open the unzipped <strong>chromex-extension</strong> folder, right-click empty space, choose <strong>Open in Terminal</strong> or <strong>Open in PowerShell</strong>, then run:</p><div class="command"><code>node scripts/install-native-host.mjs --browser=chrome</code><button class="copy" type="button" data-copy="node scripts/install-native-host.mjs --browser=chrome">Copy</button></div><h3>macOS</h3><p>Open Terminal, type <code>cd </code>, drag the unzipped <strong>chromex-extension</strong> folder into Terminal, press Enter, then run the same command above.</p><div class="note">The Chrome Web Store extension ID is already allowed by the bridge package, so most users do not need to type an extension ID.</div></div></article>
+          <article class="step"><div class="num">5</div><div><h2>Restart Chrome completely</h2><p>Quit every Chrome window, open Chrome again, then press <strong>Check connection</strong> in Chromex.</p><div class="success">When the bridge connects, the <strong>Continue with ChatGPT</strong> and <strong>Use API key</strong> buttons become available.</div></div></article>
+        </section>
+
+        <section class="card"><h2>Troubleshooting</h2><ul><li>If <code>node</code> or <code>npm</code> is not found, reinstall Node.js and open a new terminal.</li><li>If <code>codex --version</code> fails, run the Codex CLI install command again.</li><li>On Windows, if Codex is not detected, set the optional Codex binary path in Chromex to <code>%APPDATA%\npm\codex.cmd</code>, save, then restart Chrome.</li><li>If Chromex still waits for the local bridge, fully quit Chrome and reopen it before pressing <strong>Check connection</strong>.</li></ul></section>
+      </section>
+
+      <section id="ko" class="lang-section" lang="ko">
+        <section class="hero">
+          <h2>Chromex 설치 가이드</h2>
+          <p class="lead">Node.js 설치, 공식 Codex CLI 설치, Chromex Local Bridge ZIP 다운로드, 로컬 브리지 등록, Chrome 재시작 순서로 진행하세요.</p>
+          <div class="status" aria-label="설치 준비물">
+            <span class="pill">10분 내외</span>
+            <span class="pill">Windows / macOS</span>
+            <span class="pill">복사해서 붙여넣기 중심</span>
+          </div>
+        </section>
+
+        <section class="grid" aria-label="설치 전에 알아둘 점">
+          <div class="card"><strong>왜 추가 설치가 필요한가요?</strong><span>Chrome 확장 프로그램은 보안상 내 컴퓨터 프로그램을 직접 설치할 수 없습니다. 사용자가 로컬 브리지를 한 번 등록해야 Chrome이 Codex를 안전하게 시작할 수 있습니다.</span></div>
+          <div class="card"><strong>소스코드 빌드는 필요 없습니다</strong><span>스토어 사용자는 Node.js, Codex CLI, Chromex Local Bridge ZIP만 준비하면 됩니다.</span></div>
+          <div class="card"><strong>ChatGPT 계정으로 사용 가능</strong><span>로컬 브리지가 연결되면 Chromex에서 ChatGPT 계정 로그인 또는 API 키 로그인을 선택할 수 있습니다.</span></div>
+        </section>
+
+        <section class="steps" aria-label="한국어 설치 순서">
+          <article class="step"><div class="num">1</div><div><h2>Node.js LTS 설치</h2><p>공식 Node.js 페이지에서 <strong>LTS</strong> 버전을 설치합니다. Windows는 <strong>Windows Installer</strong>, macOS는 <strong>macOS Installer</strong>를 받으면 됩니다.</p><p><a href="https://nodejs.org/en/download/" target="_blank" rel="noopener noreferrer">Node.js 공식 다운로드 열기</a></p><div class="note">설치 화면에서는 특별히 바꿀 것 없이 <strong>Next</strong> 또는 <strong>계속</strong>을 눌러 완료하면 됩니다. 설치가 끝나면 열려 있던 터미널을 닫고 새로 여세요.</div></div></article>
+          <article class="step"><div class="num">2</div><div><h2>Codex CLI 설치</h2><p>Windows는 <strong>PowerShell</strong>, macOS는 <strong>터미널</strong>을 열고 아래 명령어를 복사해서 붙여넣습니다.</p><div class="command"><code>npm install -g @openai/codex</code><button class="copy" type="button" data-copy="npm install -g @openai/codex">복사</button></div><p>설치가 끝나면 아래 명령어로 확인합니다.</p><div class="command"><code>codex --version</code><button class="copy" type="button" data-copy="codex --version">복사</button></div><div class="success"><code>codex-cli</code>와 버전 숫자가 보이면 성공입니다.</div><p><a href="https://github.com/openai/codex" target="_blank" rel="noopener noreferrer">OpenAI Codex CLI 공식 안내 열기</a></p></div></article>
+          <article class="step"><div class="num">3</div><div><h2>Chromex Local Bridge ZIP 다운로드</h2><p>아래 파일을 내려받고 압축을 풉니다. 보통 <strong>다운로드</strong> 폴더에 저장됩니다.</p><p><a href="https://github.com/GENEXIS-AI/chromex/releases/latest/download/chromex-local-bridge.zip">chromex-local-bridge.zip 다운로드</a></p><div class="warning">압축을 푼 폴더 안에 <code>scripts</code>, <code>bridge</code>, <code>native-host</code> 폴더가 보여야 합니다.</div></div></article>
+          <article class="step"><div class="num">4</div><div><h2>로컬 브리지 등록</h2><h3>Windows</h3><p>압축을 푼 <strong>chromex-extension</strong> 폴더를 열고, 빈 공간에서 오른쪽 클릭 후 <strong>터미널에서 열기</strong> 또는 <strong>PowerShell에서 열기</strong>를 누릅니다. 그 다음 아래 명령어를 실행합니다.</p><div class="command"><code>node scripts/install-native-host.mjs --browser=chrome</code><button class="copy" type="button" data-copy="node scripts/install-native-host.mjs --browser=chrome">복사</button></div><h3>macOS</h3><p>터미널을 열고 <code>cd </code>를 입력한 뒤, 압축을 푼 <strong>chromex-extension</strong> 폴더를 터미널 창에 끌어다 놓고 Enter를 누릅니다. 그 다음 같은 명령어를 실행합니다.</p><div class="note">스토어 확장 ID는 설치 파일에 자동으로 포함되어 있어서 일반적으로 따로 입력하지 않아도 됩니다.</div></div></article>
+          <article class="step"><div class="num">5</div><div><h2>Chrome 완전히 껐다 켜기</h2><p>모든 Chrome 창을 완전히 닫고 다시 엽니다. Chromex 사이드패널에서 <strong>연결 확인</strong>을 누르면 됩니다.</p><div class="success">로컬 브리지가 연결되면 <strong>ChatGPT 계정으로 계속</strong> 또는 <strong>API 키로 사용</strong> 버튼을 사용할 수 있습니다.</div></div></article>
+        </section>
+
+        <section class="card"><h2>막히는 경우</h2><ul><li><code>node</code> 또는 <code>npm</code>을 찾을 수 없다고 나오면 Node.js 설치 후 터미널을 완전히 닫고 새로 여세요.</li><li><code>codex --version</code>이 안 되면 Codex CLI 설치가 끝나지 않은 상태입니다. 2단계 명령어를 다시 실행하세요.</li><li>Windows에서 Codex 실행 파일을 못 찾으면 Chromex 설정에서 Codex 경로를 <code>%APPDATA%\npm\codex.cmd</code>로 지정한 뒤 Chrome을 다시 여세요.</li><li>계속 로컬 브리지를 기다린다고 나오면 Chrome을 완전히 종료한 뒤 다시 열고, Chromex에서 <strong>연결 확인</strong>을 누르세요.</li></ul></section>
+      </section>
+
+      <section id="ja" class="lang-section" lang="ja">
+        <section class="hero"><h2>日本語</h2><p class="lead">Node.js、公式 Codex CLI、Chromex Local Bridge ZIP を準備し、ローカルブリッジを一度だけ登録して Chrome を再起動します。</p><div class="status" aria-label="必要なもの"><span class="pill">約 10 分</span><span class="pill">Windows / macOS</span><span class="pill">コピー＆ペースト中心</span></div></section>
+        <section class="grid" aria-label="開始前の確認"><div class="card"><strong>なぜ必要ですか?</strong><span>Chrome 拡張機能はローカルプログラムを自動インストールできません。ユーザーがブリッジを登録することで、Chrome が Native Messaging 経由で Codex を安全に起動できます。</span></div><div class="card"><strong>ソースビルドは不要</strong><span>ストア版のユーザーに必要なのは Node.js、Codex CLI、Chromex Local Bridge ZIP だけです。</span></div><div class="card"><strong>ChatGPT ログイン対応</strong><span>ブリッジ接続後、Chromex で ChatGPT ログインまたは API キーログインを選択できます。</span></div></section>
+        <section class="steps" aria-label="日本語手順">
+          <article class="step"><div class="num">1</div><div><h2>Node.js LTS をインストール</h2><p>公式 Node.js ページから <strong>LTS</strong> をインストールしてください。Windows は <strong>Windows Installer</strong>、macOS は <strong>macOS Installer</strong> を選びます。</p><p><a href="https://nodejs.org/en/download/" target="_blank" rel="noopener noreferrer">Node.js ダウンロードを開く</a></p><div class="note">インストーラーは基本的に既定値のままで進めて問題ありません。完了後、ターミナルを閉じて開き直してください。</div></div></article>
+          <article class="step"><div class="num">2</div><div><h2>Codex CLI をインストール</h2><p>Windows では <strong>PowerShell</strong>、macOS では <strong>Terminal</strong> を開いて実行します。</p><div class="command"><code>npm install -g @openai/codex</code><button class="copy" type="button" data-copy="npm install -g @openai/codex">Copy</button></div><p>動作確認:</p><div class="command"><code>codex --version</code><button class="copy" type="button" data-copy="codex --version">Copy</button></div><div class="success"><code>codex-cli</code> とバージョン番号が表示されれば成功です。</div><p><a href="https://github.com/openai/codex" target="_blank" rel="noopener noreferrer">公式 Codex CLI ガイドを開く</a></p></div></article>
+          <article class="step"><div class="num">3</div><div><h2>Chromex Local Bridge ZIP をダウンロード</h2><p>以下のファイルをダウンロードして展開します。通常は Downloads フォルダに保存されます。</p><p><a href="https://github.com/GENEXIS-AI/chromex/releases/latest/download/chromex-local-bridge.zip">chromex-local-bridge.zip をダウンロード</a></p><div class="warning">展開後、<code>scripts</code>、<code>bridge</code>、<code>native-host</code> フォルダがあることを確認してください。</div></div></article>
+          <article class="step"><div class="num">4</div><div><h2>ローカルブリッジを登録</h2><h3>Windows</h3><p>展開した <strong>chromex-extension</strong> フォルダを開き、空白部分を右クリックして <strong>Open in Terminal</strong> または <strong>Open in PowerShell</strong> を選び、次を実行します。</p><div class="command"><code>node scripts/install-native-host.mjs --browser=chrome</code><button class="copy" type="button" data-copy="node scripts/install-native-host.mjs --browser=chrome">Copy</button></div><h3>macOS</h3><p>Terminal で <code>cd </code> と入力し、展開した <strong>chromex-extension</strong> フォルダを Terminal にドラッグして Enter を押します。その後、同じコマンドを実行します。</p><div class="note">ストア版の拡張 ID はブリッジパッケージで許可済みのため、通常は ID を入力する必要はありません。</div></div></article>
+          <article class="step"><div class="num">5</div><div><h2>Chrome を完全に再起動</h2><p>すべての Chrome ウィンドウを閉じて開き直し、Chromex の <strong>Check connection</strong> を押します。</p><div class="success">接続できると、<strong>Continue with ChatGPT</strong> または <strong>Use API key</strong> が使えるようになります。</div></div></article>
+        </section>
+        <section class="card"><h2>困ったとき</h2><ul><li><code>node</code> や <code>npm</code> が見つからない場合は、Node.js をインストールし直して新しいターミナルを開いてください。</li><li><code>codex --version</code> が失敗する場合は、Codex CLI のインストールをもう一度実行してください。</li><li>Windows で Codex が検出されない場合は、Chromex の optional Codex binary path に <code>%APPDATA%\npm\codex.cmd</code> を設定して Chrome を再起動してください。</li></ul></section>
+      </section>
+
+      <section id="zh-cn" class="lang-section" lang="zh-CN">
+        <section class="hero"><h2>简体中文</h2><p class="lead">安装 Node.js、安装官方 Codex CLI、下载 Chromex Local Bridge ZIP、注册一次本地 bridge，然后重启 Chrome。</p><div class="status" aria-label="准备事项"><span class="pill">约 10 分钟</span><span class="pill">Windows / macOS</span><span class="pill">适合复制粘贴</span></div></section>
+        <section class="grid" aria-label="开始前"><div class="card"><strong>为什么需要这一步?</strong><span>Chrome 扩展出于安全限制不能自行安装本地程序。用户注册本地 bridge 后，Chrome 才能通过 Native Messaging 安全启动 Codex。</span></div><div class="card"><strong>不需要源码构建</strong><span>商店版用户只需要 Node.js、Codex CLI 和 Chromex Local Bridge ZIP。</span></div><div class="card"><strong>支持 ChatGPT 登录</strong><span>bridge 连接后，可以在 Chromex 中选择 ChatGPT 登录或 API key 登录。</span></div></section>
+        <section class="steps" aria-label="简体中文步骤">
+          <article class="step"><div class="num">1</div><div><h2>安装 Node.js LTS</h2><p>打开 Node.js 官方页面并安装 <strong>LTS</strong> 版本。Windows 选择 <strong>Windows Installer</strong>，macOS 选择 <strong>macOS Installer</strong>。</p><p><a href="https://nodejs.org/en/download/" target="_blank" rel="noopener noreferrer">打开 Node.js 下载页</a></p><div class="note">安装时保持默认选项即可。完成后关闭终端，再打开一个新的终端。</div></div></article>
+          <article class="step"><div class="num">2</div><div><h2>安装 Codex CLI</h2><p>Windows 打开 <strong>PowerShell</strong>，macOS 打开 <strong>Terminal</strong>，然后运行:</p><div class="command"><code>npm install -g @openai/codex</code><button class="copy" type="button" data-copy="npm install -g @openai/codex">复制</button></div><p>确认安装成功:</p><div class="command"><code>codex --version</code><button class="copy" type="button" data-copy="codex --version">复制</button></div><div class="success">如果看到 <code>codex-cli</code> 和版本号，说明成功。</div><p><a href="https://github.com/openai/codex" target="_blank" rel="noopener noreferrer">打开官方 Codex CLI 指南</a></p></div></article>
+          <article class="step"><div class="num">3</div><div><h2>下载 Chromex Local Bridge ZIP</h2><p>下载并解压下面的文件。通常会保存在 Downloads 文件夹。</p><p><a href="https://github.com/GENEXIS-AI/chromex/releases/latest/download/chromex-local-bridge.zip">下载 chromex-local-bridge.zip</a></p><div class="warning">解压后应能看到 <code>scripts</code>、<code>bridge</code>、<code>native-host</code> 文件夹。</div></div></article>
+          <article class="step"><div class="num">4</div><div><h2>注册本地 bridge</h2><h3>Windows</h3><p>打开解压后的 <strong>chromex-extension</strong> 文件夹，在空白处右键，选择 <strong>Open in Terminal</strong> 或 <strong>Open in PowerShell</strong>，然后运行:</p><div class="command"><code>node scripts/install-native-host.mjs --browser=chrome</code><button class="copy" type="button" data-copy="node scripts/install-native-host.mjs --browser=chrome">复制</button></div><h3>macOS</h3><p>打开 Terminal，输入 <code>cd </code>，把解压后的 <strong>chromex-extension</strong> 文件夹拖入 Terminal，按 Enter，然后运行同一个命令。</p><div class="note">商店版扩展 ID 已在 bridge 包中允许，大多数用户不需要手动输入扩展 ID。</div></div></article>
+          <article class="step"><div class="num">5</div><div><h2>完全重启 Chrome</h2><p>关闭所有 Chrome 窗口并重新打开，然后在 Chromex 中点击 <strong>Check connection</strong>。</p><div class="success">连接成功后，<strong>Continue with ChatGPT</strong> 和 <strong>Use API key</strong> 按钮会可用。</div></div></article>
+        </section>
+        <section class="card"><h2>排查问题</h2><ul><li>如果找不到 <code>node</code> 或 <code>npm</code>，请重新安装 Node.js，并打开新的终端。</li><li>如果 <code>codex --version</code> 失败，请重新运行 Codex CLI 安装命令。</li><li>Windows 上如果检测不到 Codex，请在 Chromex 设置中把 optional Codex binary path 设置为 <code>%APPDATA%\npm\codex.cmd</code>，保存后重启 Chrome。</li></ul></section>
+      </section>
+
+      <footer>
+        <p>Chromex does not bypass Chrome security policies. This public guide helps Chrome Web Store users register the local bridge that Chrome requires for native messaging.</p>
+        <p><a href="../privacy/">Privacy Policy</a> · <a href="https://github.com/GENEXIS-AI/chromex/issues">GitHub Issues</a></p>
+      </footer>
+    </main>
+    <script>
+      const copyLabels = new Map([
+        ["en", ["Copy", "Copied"]],
+        ["ko", ["복사", "복사됨"]],
+        ["ja", ["Copy", "Copied"]],
+        ["zh-CN", ["复制", "已复制"]],
+      ]);
+
+      for (const button of document.querySelectorAll("[data-copy]")) {
+        button.addEventListener("click", async () => {
+          const text = button.getAttribute("data-copy") || "";
+          const language = button.closest("[lang]")?.getAttribute("lang") || "en";
+          const [idleLabel, copiedLabel] = copyLabels.get(language) || copyLabels.get("en");
+          try {
+            await navigator.clipboard.writeText(text);
+            button.textContent = copiedLabel;
+            window.setTimeout(() => {
+              button.textContent = idleLabel;
+            }, 1400);
+          } catch {
+            button.textContent = idleLabel;
+          }
+        });
+      }
+    </script>
+  </body>
+</html>

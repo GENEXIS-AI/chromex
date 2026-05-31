@@ -1,0 +1,21 @@
+{
+  "name": "@codex-sidepanel/bridge",
+  "version": "0.1.7",
+  "license": "MIT",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@codex-sidepanel/shared": "0.1.7",
+    "duplexer2": "^0.1.4",
+    "mammoth": "^1.12.0",
+    "pdf-parse": "^2.4.5",
+    "playwright-core": "^1.59.1",
+    "read-excel-file": "^6.0.1"
+  }
+}

@@ -1,0 +1,127 @@
+:root {
+  color-scheme: light dark;
+  --bg: #111214;
+  --panel: #1f2023;
+  --text: #f4f5f6;
+  --muted: #a9adb5;
+  --line: rgba(255, 255, 255, 0.12);
+  --accent: #a9c2ff;
+  --accent-ink: #111214;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  min-height: 100vh;
+  margin: 0;
+  display: grid;
+  place-items: center;
+  padding: 22px;
+  background:
+    radial-gradient(circle at top left, rgba(169, 194, 255, 0.16), transparent 30%),
+    var(--bg);
+  color: var(--text);
+  font-family: "IBM Plex Sans", "Pretendard", sans-serif;
+}
+
+.mic-shell {
+  width: min(100%, 380px);
+  display: grid;
+  gap: 14px;
+  padding: 28px;
+  border: 1px solid var(--line);
+  border-radius: 28px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.04), transparent), var(--panel);
+  box-shadow: 0 22px 60px rgba(0, 0, 0, 0.36);
+}
+
+.mic-mark {
+  width: 42px;
+  height: 42px;
+  border-radius: 16px;
+  background:
+    linear-gradient(135deg, rgba(169, 194, 255, 0.9), rgba(142, 245, 198, 0.9)),
+    #2a2d34;
+}
+
+.mic-eyebrow,
+.mic-copy,
+.mic-status {
+  margin: 0;
+  color: var(--muted);
+}
+
+.mic-eyebrow {
+  font-size: 13px;
+  line-height: 18px;
+  font-weight: 700;
+}
+
+h1 {
+  margin: 0;
+  font-size: 30px;
+  line-height: 36px;
+  letter-spacing: -0.04em;
+}
+
+.mic-copy {
+  font-size: 15px;
+  line-height: 24px;
+}
+
+.mic-button {
+  min-height: 52px;
+  margin-top: 10px;
+  border: 0;
+  border-radius: 18px;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font: inherit;
+  font-size: 16px;
+  font-weight: 750;
+  cursor: pointer;
+}
+
+.mic-button:disabled {
+  opacity: 0.62;
+  cursor: progress;
+}
+
+.mic-status {
+  min-height: 44px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.035);
+  font-size: 14px;
+  line-height: 20px;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #f7f8fb;
+    --panel: #ffffff;
+    --text: #17191f;
+    --muted: #697386;
+    --line: rgba(21, 30, 48, 0.12);
+    --accent: #2563eb;
+    --accent-ink: #ffffff;
+  }
+
+  body {
+    background:
+      radial-gradient(circle at top left, rgba(37, 99, 235, 0.12), transparent 30%),
+      var(--bg);
+  }
+
+  .mic-shell {
+    background: linear-gradient(180deg, rgba(37, 99, 235, 0.04), transparent), var(--panel);
+    box-shadow: 0 18px 44px rgba(15, 23, 42, 0.12);
+  }
+
+  .mic-status {
+    background: rgba(15, 23, 42, 0.04);
+  }
+}

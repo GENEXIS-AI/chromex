@@ -1,0 +1,15 @@
+{
+  "name": "@codex-sidepanel/extension",
+  "version": "0.1.7",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "build": "node ../../scripts/build-extension.mjs",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@codex-sidepanel/shared": "0.1.7",
+    "lucide": "^1.11.0"
+  }
+}

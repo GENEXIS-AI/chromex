@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Codex microphone access</title>
+    <link rel="stylesheet" href="mic-permission.css" />
+  </head>
+  <body>
+    <main class="mic-shell">
+      <span class="mic-mark" aria-hidden="true"></span>
+      <p class="mic-eyebrow" data-i18n="eyebrow">Codex Live Voice</p>
+      <h1 data-i18n="title">Allow microphone access</h1>
+      <p class="mic-copy" data-i18n="copy">
+        Chrome needs microphone access before Codex can start a live voice conversation.
+      </p>
+      <button id="allow-microphone" class="mic-button" type="button" data-i18n="button">Allow microphone</button>
+      <p id="microphone-status" class="mic-status" role="status" data-i18n="idle">
+        Click the button, then choose Allow in the Chrome permission prompt.
+      </p>
+    </main>
+    <script type="module" src="mic-permission.js"></script>
+  </body>
+</html>

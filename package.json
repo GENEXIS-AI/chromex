@@ -1,0 +1,40 @@
+{
+  "name": "chromex",
+  "version": "0.1.7",
+  "private": true,
+  "license": "MIT",
+  "author": "GenexisAI CHOI",
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "prepare:workspace": "npm run build --workspace @codex-sidepanel/shared",
+    "build": "npm run build --workspace @codex-sidepanel/shared && npm run build --workspace @codex-sidepanel/bridge && npm run build --workspace @codex-sidepanel/native-host && npm run build --workspace @codex-sidepanel/extension",
+    "test": "npm run prepare:workspace && npm run test --workspace @codex-sidepanel/shared && npm run test --workspace @codex-sidepanel/bridge && npm run test --workspace @codex-sidepanel/native-host && npm run test --workspace @codex-sidepanel/extension",
+    "typecheck": "npm run prepare:workspace && npm run typecheck --workspace @codex-sidepanel/bridge && npm run typecheck --workspace @codex-sidepanel/native-host && npm run typecheck --workspace @codex-sidepanel/extension",
+    "lint": "npm run lint --workspaces --if-present",
+    "i18n:generate": "node scripts/generate-extension-locales.mjs",
+    "i18n:generate:sidepanel": "node scripts/generate-sidepanel-i18n-translations.mjs",
+    "smoke": "node scripts/smoke-extension.mjs",
+    "smoke:install-browser": "npx -y playwright@1.59.1 install chromium",
+    "diagnose:extension": "node scripts/diagnose-extension-load.mjs",
+    "sync:extension": "npm run build && node scripts/diagnose-extension-load.mjs --sync",
+    "package:webstore": "npm run build --workspace @codex-sidepanel/extension && node scripts/package-chrome-web-store.mjs",
+    "package:local-bridge": "npm run build --workspace @codex-sidepanel/shared && npm run build --workspace @codex-sidepanel/bridge && npm run build --workspace @codex-sidepanel/native-host && node scripts/package-local-bridge.mjs",
+    "package:public": "npm run build && node scripts/package-public-release.mjs && node scripts/package-local-bridge.mjs",
+    "store:assets": "node scripts/generate-webstore-assets.mjs",
+    "release:audit": "node scripts/release-audit.mjs",
+    "release:audit:history": "node scripts/audit-git-history.mjs",
+    "audit": "npm audit --audit-level=high --omit=dev"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.1.30",
+    "@types/node": "^24.6.0",
+    "esbuild": "^0.25.4",
+    "jszip": "^3.10.1",
+    "playwright-core": "^1.59.1",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4"
+  }
+}
