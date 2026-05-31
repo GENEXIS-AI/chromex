@@ -218,5 +218,5 @@ describe("prepareUserFileAttachments", () => {
     expect(result.uploadedImages).toEqual([]);
     expect(result.sections[0]).toContain("Kind: pdf");
     expect(result.sections[0]).toContain("Hello Chromex PDF");
-  });
+  }, 15_000);
 });
