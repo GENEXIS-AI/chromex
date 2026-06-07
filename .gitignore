@@ -1,6 +1,7 @@
 node_modules/
 packages/*/node_modules/
 output/
+.audit/
 
 packages/*/dist/
 coverage/

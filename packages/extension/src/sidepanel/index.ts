@@ -12562,14 +12562,14 @@ function rememberCompletedImageWorkflowMessage(clientRequestId: string, messageI
 
 async function resolvePreviewRefForUi(previewRef: string): Promise<string> {
   return resolveImagePreviewRefForUi(previewRef, (message) =>
-    sendRuntimeMessage(message as unknown as Record<string, unknown>) as Promise<{
+    sendRuntimeMessage<{
       dataBase64: string;
       mimeType: string;
       sizeBytes: number;
       offset: number;
       nextOffset: number;
       done: boolean;
-    }>,
+    }>(message),
   );
 }
 
