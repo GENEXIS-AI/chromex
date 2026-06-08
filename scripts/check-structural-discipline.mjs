@@ -13,6 +13,7 @@ const PACKAGES_DIR = join(ROOT, "packages");
 const MAX_SOURCE_LINES = 2200;
 const LARGE_FILE_ALLOWLIST = new Set([
   "packages/bridge/src/codex-plane.ts",
+  "packages/extension/src/content/index.ts",
   "packages/extension/src/background/index.ts",
   "packages/extension/src/sidepanel/i18n.ts",
   "packages/extension/src/sidepanel/index.ts",

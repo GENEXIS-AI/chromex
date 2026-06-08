@@ -20246,7 +20246,7 @@ function createDesktopCaptureMediaConstraints(streamId: string): MediaStreamCons
         chromeMediaSourceId: streamId,
       },
     },
-  } as unknown as MediaStreamConstraints;
+  } as MediaStreamConstraints;
 }
 
 function prepareComputerAudioStreamForDictation(
