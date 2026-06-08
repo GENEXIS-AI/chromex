@@ -11,14 +11,14 @@ const chatgptAccount: UiInitPayload["accountStatus"] = {
 };
 
 describe("OAuth usage fallback", () => {
-  test("offers API-key fallback when a ChatGPT OAuth account exhausts usage", () => {
+  test("does not offer API-key fallback when a ChatGPT OAuth account exhausts usage", () => {
     expect(
       shouldOfferApiKeyFallbackForError({
         error: new Error("usage limit reached for this account"),
         accountStatus: chatgptAccount,
         rateLimits: null,
       }),
-    ).toBe(true);
+    ).toBe(false);
   });
 
   test("does not offer fallback for non-quota errors or non-OAuth accounts", () => {
@@ -38,7 +38,7 @@ describe("OAuth usage fallback", () => {
     ).toBe(false);
   });
 
-  test("uses rate-limit snapshots as a fallback signal when the error is generic", () => {
+  test("does not use rate-limit snapshots to trigger API-key fallback", () => {
     expect(
       shouldOfferApiKeyFallbackForError({
         error: new Error("request failed"),
@@ -58,6 +58,6 @@ describe("OAuth usage fallback", () => {
           buckets: [],
         },
       }),
-    ).toBe(true);
+    ).toBe(false);
   });
 });

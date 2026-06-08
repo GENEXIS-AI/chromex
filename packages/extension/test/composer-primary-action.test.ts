@@ -6,14 +6,26 @@ import {
 } from "../src/sidepanel/composer-primary-action.js";
 
 describe("composer primary action", () => {
-  test("starts live mode when the composer is empty", () => {
+  test("starts live mode when the composer is empty and realtime voice is available", () => {
     expect(
       resolveComposerPrimaryAction({
         composerDraft: "   ",
         currentWorkActive: false,
         liveActive: false,
+        liveAvailable: true,
       }),
     ).toBe("start-live");
+  });
+
+  test("keeps the empty composer on send when realtime voice is unavailable", () => {
+    expect(
+      resolveComposerPrimaryAction({
+        composerDraft: "   ",
+        currentWorkActive: false,
+        liveActive: false,
+        liveAvailable: false,
+      }),
+    ).toBe("send");
   });
 
   test("sends a message when the composer has text", () => {
@@ -22,6 +34,7 @@ describe("composer primary action", () => {
         composerDraft: "현재 페이지 설명해줘",
         currentWorkActive: false,
         liveActive: false,
+        liveAvailable: false,
       }),
     ).toBe("send");
   });
@@ -32,6 +45,7 @@ describe("composer primary action", () => {
         composerDraft: "",
         currentWorkActive: false,
         liveActive: true,
+        liveAvailable: false,
       }),
     ).toBe("stop-live");
   });
@@ -42,6 +56,7 @@ describe("composer primary action", () => {
         composerDraft: "   ",
         currentWorkActive: true,
         liveActive: true,
+        liveAvailable: false,
       }),
     ).toBe("stop-turn");
   });
@@ -52,6 +67,7 @@ describe("composer primary action", () => {
         composerDraft: "방금 답변은 더 짧게 정리해줘",
         currentWorkActive: true,
         liveActive: true,
+        liveAvailable: false,
       }),
     ).toBe("send");
   });
@@ -63,6 +79,19 @@ describe("composer primary action", () => {
         nextComposerDraft: "현재 페이지 설명해줘",
         currentWorkActive: false,
         liveActive: false,
+        liveAvailable: true,
+      }),
+    ).toBe(true);
+  });
+
+  test("marks the composer for re-render when empty disabled send becomes enabled send", () => {
+    expect(
+      didComposerPrimaryActionChangeForDraftInput({
+        previousComposerDraft: "",
+        nextComposerDraft: "현재 페이지 설명해줘",
+        currentWorkActive: false,
+        liveActive: false,
+        liveAvailable: false,
       }),
     ).toBe(true);
   });
@@ -74,6 +103,7 @@ describe("composer primary action", () => {
         nextComposerDraft: "현재 페이지 설명해줘",
         currentWorkActive: false,
         liveActive: false,
+        liveAvailable: false,
       }),
     ).toBe(false);
   });
@@ -85,6 +115,7 @@ describe("composer primary action", () => {
         nextComposerDraft: "ㅇ",
         currentWorkActive: false,
         liveActive: false,
+        liveAvailable: false,
         compositionInProgress: true,
       }),
     ).toBe(false);

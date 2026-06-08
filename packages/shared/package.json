@@ -1,6 +1,6 @@
 {
   "name": "@codex-sidepanel/shared",
-  "version": "0.1.2",
+  "version": "0.1.7",
   "license": "MIT",
   "type": "module",
   "main": "dist/index.js",

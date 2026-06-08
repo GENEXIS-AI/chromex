@@ -29,7 +29,7 @@ export class InMemoryBridgeSecrets {
     const hasExplicitInitialKey = Boolean(options && "initialOpenAiApiKey" in options);
     this.#openAiApiKey = hasExplicitInitialKey
       ? options?.initialOpenAiApiKey ?? null
-      : process.env.OPENAI_API_KEY ?? persisted ?? null;
+      : persisted ?? null;
   }
 
   setOpenAiApiKey(apiKey: string): void {

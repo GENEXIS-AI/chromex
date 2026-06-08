@@ -23,6 +23,15 @@ describe("conversation message attachment snapshots", () => {
         base64: "pdf-base64-should-not-preview",
         kind: "pdf",
       },
+      {
+        id: "file-3",
+        name: "voice-note.mp3",
+        mimeType: "audio/mpeg",
+        sizeBytes: 3600,
+        lastModified: 3,
+        base64: "audio-base64-should-not-preview",
+        kind: "audio",
+      },
     ]);
 
     expect(attachments).toMatchObject([
@@ -34,8 +43,14 @@ describe("conversation message attachment snapshots", () => {
         id: "file-2",
         kind: "pdf",
       },
+      {
+        id: "file-3",
+        kind: "audio",
+        name: "voice-note.mp3",
+      },
     ]);
     expect(attachments[1]?.previewSrc).toBeUndefined();
+    expect(attachments[2]?.previewSrc).toBeUndefined();
   });
 
   test("marks generated follow-up image as target and new uploads as references", () => {

@@ -228,11 +228,11 @@ try {
   if (
     !slashNoMatchState ||
     slashNoMatchState.slashQuery !== "definitelynomatch" ||
-    slashNoMatchState.slashSuggestionCount !== 0 ||
+    slashNoMatchState.slashSuggestionCount !== 1 ||
     slashNoMatchState.suggestionCount !== 1 ||
-    !/no commands|결과 없음/i.test(slashNoMatchState.popoverText)
+    !/create manually|직접 만들기/i.test(slashNoMatchState.popoverText)
   ) {
-    throw new Error(`Smoke test failed: / command no-result state did not stay open (${JSON.stringify(slashNoMatchState)}).`);
+    throw new Error(`Smoke test failed: / command no-match state did not keep direct profile creation (${JSON.stringify(slashNoMatchState)}).`);
   }
   await page.evaluate(() => window.__CODEX_SIDEPANEL_SMOKE__?.enableDryRunSubmit?.());
   const slashNoMatchEnterState = await page.evaluate(() =>
@@ -242,12 +242,14 @@ try {
     !slashNoMatchEnterState ||
     slashNoMatchEnterState.submissionCount !== 0 ||
     slashNoMatchEnterState.commandPills !== 0 ||
-    slashNoMatchEnterState.composerValue !== "/definitelynomatch"
+    slashNoMatchEnterState.composerValue !== ""
   ) {
     throw new Error(
-      `Smoke test failed: Enter submitted while / command search had no results (${JSON.stringify(slashNoMatchEnterState)}).`,
+      `Smoke test failed: Enter did not apply direct profile creation for an unmatched / command (${JSON.stringify(slashNoMatchEnterState)}).`,
     );
   }
+  await page.locator("#cancel-profile-editor").click({ timeout: 2_000 }).catch(() => undefined);
+  await page.locator('[data-view="chat"]').click({ timeout: 2_000 }).catch(() => undefined);
   const slashEnterState = await page.evaluate(() =>
     window.__CODEX_SIDEPANEL_SMOKE__?.submitWithEnter?.("/research") ?? null,
   );
@@ -266,14 +268,17 @@ try {
       option.getAttribute("data-slash-option-id"),
     ),
     skillOptions: Array.from(document.querySelectorAll("[data-slash-option-id]")).filter(
-      (option) => !String(option.getAttribute("data-slash-option-id") ?? "").startsWith("profile:"),
+      (option) => {
+        const optionId = String(option.getAttribute("data-slash-option-id") ?? "");
+        return !optionId.startsWith("profile:") && optionId !== "create-profile";
+      },
     ).length,
   }));
   if (
     selectedSlashCommandState.slashOptions.length < 1 ||
     selectedSlashCommandState.skillOptions !== 0
   ) {
-    throw new Error(`Smoke test failed: / command should list profiles only (${JSON.stringify(selectedSlashCommandState)}).`);
+    throw new Error(`Smoke test failed: / command should list profiles plus direct creation only (${JSON.stringify(selectedSlashCommandState)}).`);
   }
 
   await page.locator("#composer").fill("/");
@@ -542,7 +547,6 @@ try {
   ]);
 
   const composerPlaceholder = await page.locator("#composer").getAttribute("placeholder");
-  const micButtonVisible = await page.locator("#voice-input-toggle").isVisible();
 
   if (!chipLabels.some((label) => label.includes("brief.txt"))) {
     throw new Error("Smoke test failed: text attachment chip did not render.");
@@ -552,9 +556,6 @@ try {
   }
   if (!composerPlaceholder) {
     throw new Error("Smoke test failed: composer placeholder is missing.");
-  }
-  if (!micButtonVisible) {
-    throw new Error("Smoke test failed: composer microphone button is missing.");
   }
   await page.waitForSelector("[data-composer-file-group]", { timeout: 2_000 });
   const composerAttachmentLayout = await page.evaluate(() => {
@@ -718,7 +719,6 @@ try {
     composerControls.permissionPill ||
     composerControls.shieldIcon ||
     !composerControls.modelReasoningGroup ||
-    !composerControls.microphone ||
     (!composerControls.sendButton && !composerControls.liveButton)
   ) {
     throw new Error(`Smoke test failed: composer control bar is incomplete (${JSON.stringify(composerControls)}).`);
@@ -855,6 +855,7 @@ try {
     browserActionsSwitch: Boolean(document.querySelector("#setting-browser-actions")),
     voiceSwitch: Boolean(document.querySelector("#setting-live-captions")),
     voiceOptions: Array.from(document.querySelectorAll("#voice-select option")).map((option) => option.value),
+    voiceSelectPresent: Boolean(document.querySelector("#voice-select")),
     generatedImages: Boolean(document.querySelector("#refresh-image-folder")) && Boolean(document.querySelector("#open-image-folder")),
     workspaceRulesVisible: Array.from(document.querySelectorAll(".settings-row")).some((row) =>
       /Workspace rules|워크스페이스 규칙/i.test(row.textContent ?? ""),
@@ -864,15 +865,15 @@ try {
     ),
   }));
   if (
-    settingsControls.settingsCards !== 4 ||
+    settingsControls.settingsCards !== 3 ||
     settingsControls.navItems !== 0 ||
     !settingsControls.backButton ||
     !settingsControls.profileSelect ||
     !settingsControls.createProfile ||
-    !settingsControls.modelSelect ||
+    settingsControls.modelSelect ||
     settingsControls.browserActionsSwitch ||
     !settingsControls.voiceSwitch ||
-    !settingsControls.voiceOptions.includes("sage") ||
+    (settingsControls.voiceSelectPresent && !settingsControls.voiceOptions.includes("sage")) ||
     settingsControls.voiceOptions.some((value) => /samantha|google|microsoft/i.test(value)) ||
     !settingsControls.generatedImages ||
     settingsControls.workspaceRulesVisible ||
@@ -886,23 +887,20 @@ try {
   await page.locator("#save-profile-editor").click();
   await page.waitForFunction(
     () => {
-      const select = document.querySelector("#profile-select");
-      return Array.from(select?.options ?? []).some((option) => option.textContent === "Smoke Profile");
+      const label = document.querySelector('[data-settings-select-root="profile-select"] .settings-select-value');
+      return label?.textContent === "Smoke Profile";
     },
     undefined,
     { timeout: 5_000 },
   );
   const createdProfileState = await page.evaluate(() => {
-    const select = document.querySelector("#profile-select");
-    const selectedOption = select?.selectedOptions?.[0] ?? null;
+    const label = document.querySelector('[data-settings-select-root="profile-select"] .settings-select-value');
     return {
-      selectedValue: select?.value ?? "",
-      selectedLabel: selectedOption?.textContent ?? "",
-      hasSmokeProfile: Array.from(select?.options ?? []).some((option) => option.textContent === "Smoke Profile"),
+      selectedLabel: label?.textContent ?? "",
+      hasSmokeProfile: label?.textContent === "Smoke Profile",
     };
   });
   if (
-    !createdProfileState.selectedValue.startsWith("custom-smoke-profile") ||
     createdProfileState.selectedLabel !== "Smoke Profile" ||
     !createdProfileState.hasSmokeProfile
   ) {
@@ -1179,13 +1177,14 @@ async function assertComposerControlsInsideFrame(page, label) {
     const sendButton = document.querySelector("#send-prompt, #stop-turn, #live-toggle")?.getBoundingClientRect();
     const modelTrigger = document.querySelector("#composer-model-menu-trigger")?.getBoundingClientRect();
     const voiceButton = document.querySelector("#voice-input-toggle")?.getBoundingClientRect();
+    const modelGapTarget = voiceButton ?? sendButton;
     return {
       frameRight: Math.round(frame?.right ?? 0),
       controlBarRight: Math.round(controlBar?.right ?? 0),
       sendButtonRight: Math.round(sendButton?.right ?? 0),
       modelTriggerRight: Math.round(modelTrigger?.right ?? 0),
       voiceButtonLeft: Math.round(voiceButton?.left ?? 0),
-      modelToVoiceGap: Math.round((voiceButton?.left ?? 0) - (modelTrigger?.right ?? 0)),
+      modelToVoiceGap: Math.round((modelGapTarget?.left ?? 0) - (modelTrigger?.right ?? 0)),
       sendRightInset: Math.round((frame?.right ?? 0) - (sendButton?.right ?? 0)),
     };
   });

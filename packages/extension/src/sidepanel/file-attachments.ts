@@ -5,7 +5,8 @@ import {
 
 export const MAX_FILE_ATTACHMENTS = 6;
 export const MAX_FILE_ATTACHMENT_BYTES = 6 * 1024 * 1024;
-export const MAX_TOTAL_FILE_ATTACHMENT_BYTES = 16 * 1024 * 1024;
+export const MAX_AUDIO_FILE_ATTACHMENT_BYTES = 32 * 1024 * 1024;
+export const MAX_TOTAL_FILE_ATTACHMENT_BYTES = 64 * 1024 * 1024;
 
 export interface PendingAttachmentMeta {
   name: string;
@@ -36,11 +37,13 @@ export function planAttachmentSelection(
 
   for (const candidate of incoming) {
     const fingerprint = createAttachmentFingerprint(candidate);
+    const kind = inferUserFileAttachmentKind(candidate.name, candidate.mimeType);
+    const maxFileBytes = getMaxFileAttachmentBytes(kind);
     if (existingIds.has(fingerprint)) {
       rejected.push(`duplicate:${candidate.name}`);
       continue;
     }
-    if (candidate.sizeBytes > MAX_FILE_ATTACHMENT_BYTES) {
+    if (candidate.sizeBytes > maxFileBytes) {
       rejected.push(`file-too-large:${candidate.name}`);
       continue;
     }
@@ -55,7 +58,7 @@ export function planAttachmentSelection(
 
     accepted.push({
       ...candidate,
-      kind: inferUserFileAttachmentKind(candidate.name, candidate.mimeType),
+      kind,
     });
     nextCount += 1;
     nextTotalBytes += candidate.sizeBytes;
@@ -63,6 +66,10 @@ export function planAttachmentSelection(
   }
 
   return { accepted, rejected };
+}
+
+function getMaxFileAttachmentBytes(kind: UserFileAttachment["kind"]): number {
+  return kind === "audio" ? MAX_AUDIO_FILE_ATTACHMENT_BYTES : MAX_FILE_ATTACHMENT_BYTES;
 }
 
 export function createAttachmentFingerprint(input: Pick<UserFileAttachment, "name" | "sizeBytes" | "lastModified">): string {
@@ -76,6 +83,8 @@ export function createFileChipLabel(attachment: Pick<UserFileAttachment, "name" 
   const prefix =
     attachment.kind === "image"
       ? "image"
+      : attachment.kind === "audio"
+        ? "audio"
       : attachment.kind === "pdf"
         ? "pdf"
         : attachment.kind === "docx"

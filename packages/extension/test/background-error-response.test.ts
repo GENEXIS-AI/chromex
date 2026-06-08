@@ -66,6 +66,8 @@ describe("background error responses", () => {
     expect(shouldLogBackgroundMessageError(new Error("Codex temporarily lost its connection to this tab. Try the action once more."))).toBe(
       false,
     );
+    expect(shouldLogBackgroundMessageError(new Error("No tab with id: 355471561"))).toBe(false);
+    expect(shouldLogBackgroundMessageError(new Error("Could not load file: 'content.js'."))).toBe(false);
   });
 
   test("keeps expired OAuth sessions out of noisy background failure logs", () => {
@@ -78,8 +80,42 @@ describe("background error responses", () => {
     ).toBe(false);
   });
 
+  test("keeps expected user/account request failures out of noisy background logs", () => {
+    expect(
+      shouldLogBackgroundMessageError(
+        new Error(
+          "unexpected status 401 Unauthorized: Incorrect API key provided: sk-proj-abc123, auth error code: invalid_api_key",
+        ),
+      ),
+    ).toBe(false);
+    expect(shouldLogBackgroundMessageError(new Error("You've hit your usage limit. Try again later."))).toBe(false);
+    expect(
+      shouldLogBackgroundMessageError(
+        new Error("Invalid image in your last message. Please remove it and try again."),
+      ),
+    ).toBe(false);
+    expect(
+      shouldLogBackgroundMessageError(
+        new Error("failed to load configuration: No such file or directory (os error 2)"),
+      ),
+    ).toBe(false);
+  });
+
   test("keeps Chrome extensions gallery script restrictions out of noisy background logs", () => {
     expect(shouldLogBackgroundMessageError(new Error("The extensions gallery cannot be scripted."))).toBe(false);
+  });
+
+  test("keeps expected protected-page and local-file access guidance out of noisy background logs", () => {
+    expect(
+      shouldLogBackgroundMessageError(
+        new Error("Chrome blocks extensions from reading or modifying this protected browser page."),
+      ),
+    ).toBe(false);
+    expect(
+      shouldLogBackgroundMessageError(
+        new Error("Local file pages require Chrome's Allow access to file URLs setting for Chromex."),
+      ),
+    ).toBe(false);
   });
 
   test("keeps unexpected errors visible in diagnostics", () => {

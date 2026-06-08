@@ -8,10 +8,9 @@ export function assertApiKeyLoginExplicitlyConfirmed(input: {
   }
 
   const hasInlineApiKey = typeof input.apiKey === "string" && input.apiKey.trim().length > 0;
-  const confirmed = input.confirmed === true;
-  if (hasInlineApiKey || confirmed) {
+  if (hasInlineApiKey) {
     return;
   }
 
-  throw new Error("API-key mode requires explicit user confirmation before reusing a stored API key.");
+  throw new Error("API-key mode requires entering an API key for this login attempt.");
 }

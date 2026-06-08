@@ -4,11 +4,13 @@ import { access, readdir } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { homedir, platform } from "node:os";
 import { dirname, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 
 import type { PlaywrightRuntimeCapability } from "@codex-sidepanel/shared";
 
 const PLAYWRIGHT_INSTALL_ARGS = ["install", "chromium"];
 const PLAYWRIGHT_INSTALL_TIMEOUT_MS = 10 * 60 * 1000;
+const PLAYWRIGHT_RUNTIME_REQUIRE = createRequire(resolveCurrentModuleUrl(import.meta.url));
 
 type PlaywrightPackage = {
   name: "playwright" | "playwright-core";
@@ -18,7 +20,7 @@ type PlaywrightPackage = {
 };
 
 export class PlaywrightRuntimeManager {
-  readonly #require = createRequire(import.meta.url);
+  readonly #require = PLAYWRIGHT_RUNTIME_REQUIRE;
 
   async readStatus(): Promise<PlaywrightRuntimeCapability> {
     const packageInfo = await this.#resolvePackage();
@@ -53,6 +55,16 @@ export class PlaywrightRuntimeManager {
   async #resolvePackage(): Promise<PlaywrightPackage | null> {
     return resolvePlaywrightPackage(this.#require, "playwright") ?? resolvePlaywrightPackage(this.#require, "playwright-core");
   }
+}
+
+function resolveCurrentModuleUrl(moduleUrl: string | undefined): string {
+  if (moduleUrl) {
+    return moduleUrl;
+  }
+  if (typeof __filename === "string") {
+    return pathToFileURL(__filename).href;
+  }
+  return pathToFileURL(process.argv[1] ?? process.cwd()).href;
 }
 
 function resolvePlaywrightPackage(
@@ -171,6 +183,7 @@ export function chromiumExecutableCandidates(platformName: NodeJS.Platform = pla
         "chrome-mac/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
         "chrome-mac-arm64/Chromium.app/Contents/MacOS/Chromium",
         "chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+        "chrome-mac-x64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
       ];
     case "win32":
       return [

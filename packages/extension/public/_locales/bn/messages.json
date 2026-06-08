@@ -19,9 +19,17 @@
     "message": "Chromex পপআপ খুলুন",
     "description": "Keyboard shortcut description for opening the popup workspace."
   },
+  "commandStartDictation": {
+    "message": "Start or stop dictation",
+    "description": "Chrome command description for voice dictation shortcut."
+  },
   "contextAskPage": {
     "message": "এই পৃষ্ঠা সম্পর্কে Chromex-কে জিজ্ঞাসা করুন",
     "description": "Context menu item for asking about the current page."
+  },
+  "contextAskSelection": {
+    "message": "Ask AI about selection",
+    "description": "Context menu item for asking about selected text."
   },
   "contextEditImage": {
     "message": "Chromex দিয়ে এই ছবি সম্পাদনা করুন",

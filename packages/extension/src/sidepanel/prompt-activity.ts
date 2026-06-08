@@ -77,7 +77,11 @@ export function getPromptActivitySteps(phase: PromptActivityPhase, locale: UiLoc
   const activeIndex = Math.max(order.indexOf(phase), 0);
   return order.map((id, index) => ({
     id,
-    label: stepLabels[id],
+    label: getPromptActivityStepLabel(id, locale),
     state: index < activeIndex ? "done" : index === activeIndex ? "active" : "pending",
   }));
+}
+
+function getPromptActivityStepLabel(phase: PromptActivityPhase, locale: UiLocale): string {
+  return getUiStrings(locale).promptActivity.steps[phase];
 }

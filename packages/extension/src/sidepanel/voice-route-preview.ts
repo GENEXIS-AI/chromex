@@ -11,6 +11,7 @@ type VoiceRoutePreviewPayloadInput = {
   selectedServiceTier?: string;
   readStrategyOverride: PromptRequestPayload["readStrategyOverride"];
   attachments: PromptRequestPayload["attachments"];
+  selectedTextContext?: PromptRequestPayload["selectedTextContext"];
   fileAttachments: UserFileAttachment[];
   structuredInputs: PromptRequestPayload["structuredInputs"];
   selectedTabIds: number[];
@@ -30,6 +31,7 @@ export function createVoiceRoutePreviewPayload(input: VoiceRoutePreviewPayloadIn
     ...(input.selectedServiceTier ? { serviceTier: input.selectedServiceTier } : {}),
     ...(input.readStrategyOverride ? { readStrategyOverride: input.readStrategyOverride } : {}),
     attachments: input.attachments,
+    ...(input.selectedTextContext ? { selectedTextContext: input.selectedTextContext } : {}),
     fileAttachments: sanitizeVoiceRoutePreviewFileAttachments(input.fileAttachments),
     ...(input.structuredInputs ? { structuredInputs: input.structuredInputs } : {}),
     selectedTabIds: input.selectedTabIds,

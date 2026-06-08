@@ -72,6 +72,18 @@ export type BridgeEvent =
     }
   | { type: "turn.started"; activeTurn: CodexActiveTurn }
   | { type: "turn.completed"; threadId: string; turnId: string }
+  | { type: "turn.failed"; threadId: string; turnId: string; message: string; clientRequestId?: string | null }
+  | { type: "goal.updated"; threadId: string; goal: ThreadGoal }
+  | { type: "goal.cleared"; threadId: string }
+  | {
+      type: "plan.user_input.requested";
+      requestId: string;
+      threadId: string;
+      turnId: string;
+      itemId: string;
+      questions: PlanUserInputQuestion[];
+    }
+  | { type: "plan.user_input.resolved"; requestId: string; threadId: string }
   | { type: "context.compaction.started"; threadId: string; turnId: string; itemId: string }
   | { type: "context.compaction.completed"; threadId: string; turnId: string; itemId: string }
   | { type: "turn.plan.updated"; plan: CodexTurnPlan }
@@ -92,13 +104,13 @@ export type BridgeEvent =
       sessionId: string | null;
       transport: "webrtc" | "websocket";
     }
-  | { type: "voice.session.stopped"; threadId: string; reason: string | null }
+  | { type: "voice.session.stopped"; threadId: string; sessionId: string | null; reason: string | null }
   | { type: "voice.sdp"; threadId: string; sdp: string }
   | { type: "voice.transcript.delta"; threadId: string; role: string; delta: string }
   | { type: "voice.transcript.done"; threadId: string; role: string; text: string }
   | { type: "voice.item_added"; threadId: string; item: Record<string, unknown> }
   | { type: "voice.output_audio.delta"; threadId: string; audio: Record<string, unknown> }
-  | { type: "voice.error"; threadId: string; message: string };
+  | { type: "voice.error"; threadId: string; sessionId: string | null; message: string; errorCode?: string };
 
 export interface BridgeRuntimeConfig {
   workspaceRoot: string;
@@ -131,6 +143,7 @@ export interface PromptSendParams {
   clientRequestId?: string;
   profile: ProfileTemplate;
   message: string;
+  conversationContext?: string;
   contexts: PageContextEnvelope[];
   fileAttachments?: UserFileAttachment[];
   routePlan?: PromptRoutingPlan;
@@ -140,6 +153,60 @@ export interface PromptSendParams {
   model?: string;
   reasoningEffort?: string;
   serviceTier?: string;
+  planMode?: boolean;
+  useGoal?: boolean;
+  goalObjective?: string;
+}
+
+export interface ThreadGoal {
+  threadId: string;
+  objective: string;
+  status: string;
+  tokenBudget?: number | null;
+  tokensUsed?: number | null;
+  timeUsedSeconds?: number | null;
+  budgetLimited?: boolean | null;
+  createdAt?: number | null;
+  updatedAt?: number | null;
+}
+
+export interface GoalSetParams {
+  threadId: string;
+  objective?: string;
+  status?: string;
+  tokenBudget?: number | null;
+  budgetLimited?: boolean | null;
+}
+
+export interface GoalSetResult {
+  goal: ThreadGoal;
+}
+
+export interface GoalGetResult {
+  goal: ThreadGoal | null;
+}
+
+export interface GoalClearResult {
+  cleared: boolean;
+}
+
+export interface PlanUserInputOption {
+  label: string;
+  description: string;
+}
+
+export interface PlanUserInputQuestion {
+  id: string;
+  header: string;
+  question: string;
+  isOther: boolean;
+  isSecret: boolean;
+  options: PlanUserInputOption[];
+}
+
+export interface PlanUserInputResponseParams {
+  requestId: string;
+  answers: Record<string, { answers: string[] }>;
 }
 
 export interface ThreadCompactParams {
@@ -218,6 +285,7 @@ export interface VoiceStartParams {
   outputModality?: "audio" | "text";
   prompt?: string;
   sessionId?: string;
+  realtimeSessionId?: string;
   voice?: string;
 }
 
@@ -240,6 +308,20 @@ export interface VoiceAppendAudioParams {
     samplesPerChannel?: number;
     itemId?: string;
   };
+}
+
+export interface RealtimeTranslationClientSecretParams {
+  targetLanguage?: string;
+  sourceTranscriptionModel?: string;
+  ttlSeconds?: number;
+}
+
+export interface RealtimeTranslationClientSecretResult {
+  value: string;
+  expiresAt: number | null;
+  sessionId: string | null;
+  model: "gpt-realtime-translate";
+  targetLanguage: string;
 }
 
 export interface BridgeCodexPlane {
@@ -265,6 +347,10 @@ export interface BridgeCodexPlane {
   }): Promise<{ content: unknown[]; structuredContent?: unknown; isError?: boolean; meta?: unknown }>;
   reloadMcpServers(): Promise<{ ok: true }>;
   readRateLimits(): Promise<CodexRateLimits | null>;
+  setGoal(params: GoalSetParams): Promise<GoalSetResult>;
+  getGoal(params: { threadId: string }): Promise<GoalGetResult>;
+  clearGoal(params: { threadId: string }): Promise<GoalClearResult>;
+  respondToUserInputRequest(params: PlanUserInputResponseParams): Promise<{ ok: true }>;
   openSession(params: SessionParams): Promise<{ threadId: string }>;
   resumeSession(params: { threadId: string }): Promise<{ threadId: string }>;
   sendPrompt(
@@ -307,6 +393,18 @@ export interface BridgeImagePlane {
   openAssetFolder(params?: { folder?: string | null }): Promise<{ opened: true; folder: string }>;
 }
 
+export interface BridgeLocalFilePlane {
+  reveal(params: { path: string }): Promise<{ opened: true; path: string; folder: string }>;
+}
+
+export interface BridgeRealtimeTranslationPlane {
+  saveApiKey(params: { apiKey: string }): Promise<{ stored: true }>;
+  clearApiKey(): Promise<{ cleared: true }>;
+  createClientSecret(
+    params?: RealtimeTranslationClientSecretParams,
+  ): Promise<RealtimeTranslationClientSecretResult>;
+}
+
 export interface BridgeRoutePlane {
   plan(params: AgenticRouteInput, emit: (event: BridgeEvent) => void): Promise<AgenticRoutePlan>;
 }
@@ -321,7 +419,9 @@ export interface BridgeBrowserActionPlane {
 export interface BridgeDependencies {
   codex: BridgeCodexPlane;
   voice: BridgeVoicePlane;
+  translation: BridgeRealtimeTranslationPlane;
   image: BridgeImagePlane;
+  localFiles: BridgeLocalFilePlane;
   route: BridgeRoutePlane;
   browserAction: BridgeBrowserActionPlane;
   workspace: BridgeWorkspacePlane;

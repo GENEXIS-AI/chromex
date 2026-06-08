@@ -4,6 +4,7 @@ import { collectPdfAdapterPayload, isLikelyPdfUrl } from "../adapters/pdf.js";
 import { collectYouTubeAdapterPayload, collectYouTubePlaybackState, isYouTubeUrl } from "../adapters/youtube.js";
 import { collectBodyText } from "./dom-text.js";
 import { extractCssImageUrls, sortEditablePageImageCandidates, type EditablePageImageCandidate } from "../page-image-target.js";
+import { createSelectedTextContextExcerpt } from "../page-selection-context.js";
 import { resolveImagePreviewRefForUi } from "../sidepanel/image-preview-assets.js";
 import { createSitePayload } from "../site-payload.js";
 import type { VoiceNavigationCommand } from "../sidepanel/voice-commands.js";
@@ -23,12 +24,20 @@ type ImagePromptHoverTarget = {
   image?: HTMLImageElement;
 };
 
+type PageSelectionContextSnapshot = {
+  text: string;
+  contextText?: string;
+};
+
 let overlayNode: HTMLDivElement | null = null;
 let aiControlOverlayNode: HTMLDivElement | null = null;
 let aiControlOverlayTimer: number | null = null;
 let aiControlOverlayWatchdogTimer: number | null = null;
 let aiControlCancelled = false;
 let imagePromptHoverInstalled = false;
+let imagePromptHoverEnabled = true;
+let imagePromptHoverAbortController: AbortController | null = null;
+let imagePromptHoverStorageListenerRegistered = false;
 let imagePromptHoverButton: HTMLButtonElement | null = null;
 let imagePromptHoverTarget: ImagePromptHoverTarget | null = null;
 let imagePromptHoverTargetRect: DOMRect | null = null;
@@ -36,6 +45,9 @@ let imagePromptHoverButtonRect: DOMRect | null = null;
 let imagePromptHoverButtonRemoveTimer: number | null = null;
 let imagePromptHoverScrollFrame: number | null = null;
 let imagePromptHoverLastPointer: { clientX: number; clientY: number } | null = null;
+let pageSelectionContextTimer: number | null = null;
+let lastPageSelectionContextSignature = "";
+let lastDictationEditableTarget: HTMLElement | HTMLInputElement | HTMLTextAreaElement | null = null;
 let chromexRuntimeWatchdogTimer: number | null = null;
 let chromexRuntimeMessageListenerRegistered = false;
 const CHROMEX_CONTENT_INSTANCE_KEY = "__chromexContentScriptInstanceId";
@@ -43,12 +55,16 @@ const CHROMEX_CONTENT_CLEANUP_KEY = "__chromexContentScriptCleanup";
 const chromexContentScriptInstanceId = `${Date.now()}:${Math.random().toString(36).slice(2)}`;
 const chromexContentGlobal = globalThis as typeof globalThis & Record<string, unknown>;
 const chromexContentScriptAbortController = new AbortController();
+const SETTINGS_STORAGE_KEY = "codex.sidepanel.settings";
 const IMAGE_PROMPT_HOVER_BUTTON_CLASS = "chromex-image-prompt-button";
 const IMAGE_PROMPT_HOVER_BUTTON_SELECTOR = `.${IMAGE_PROMPT_HOVER_BUTTON_CLASS}`;
 const IMAGE_PROMPT_HOVER_SURFACE_PADDING_PX = 8;
 const IMAGE_PROMPT_HOVER_BUTTON_SIZE_PX = 34;
 const IMAGE_PROMPT_HOVER_BUTTON_INSET_PX = 8;
 const IMAGE_PROMPT_HOVER_FADE_MS = 140;
+const PAGE_SELECTION_CONTEXT_MAX_CHARS = 12_000;
+const PAGE_SELECTION_CONTEXT_MIN_CHARS = 2;
+const PAGE_SELECTION_CONTEXT_DEBOUNCE_MS = 140;
 const IMAGE_PROMPT_HOVER_ICON_DATA_URL =
   "data:image/png;base64,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";
 const highlightedElements = new Set<HTMLElement>();
@@ -85,7 +101,9 @@ chromexContentGlobal[CHROMEX_CONTENT_CLEANUP_KEY] = cleanupContentScriptInstance
 
 registerChromexRuntimeMessageListener();
 startContentScriptRuntimeWatchdog();
-installImagePromptHover();
+initializeImagePromptHoverSetting();
+installPageSelectionContextBridge();
+installDictationFocusBridge();
 
 function getSafeChromeRuntime(): typeof chrome.runtime | null {
   try {
@@ -93,6 +111,17 @@ function getSafeChromeRuntime(): typeof chrome.runtime | null {
       return null;
     }
     return chrome.runtime;
+  } catch {
+    return null;
+  }
+}
+
+function getSafeChromeStorage(): typeof chrome.storage | null {
+  try {
+    if (typeof chrome === "undefined" || !chrome.runtime?.id || !chrome.storage?.local) {
+      return null;
+    }
+    return chrome.storage;
   } catch {
     return null;
   }
@@ -236,6 +265,16 @@ function chromexRuntimeMessageListener(
     return true;
   }
 
+  if (message.type === "page.dictation.insert") {
+    sendResponse(insertDictationTextIntoFocusedEditable(String(message.text ?? "")));
+    return true;
+  }
+
+  if (message.type === "page.selection.snapshot") {
+    sendResponse(getSelectedPageContextSnapshot());
+    return true;
+  }
+
   if (message.type === "youtube.seek") {
     const video = document.querySelector("video");
     if (video) {
@@ -270,6 +309,8 @@ function cleanupPreviousContentScriptInstance(): void {
 }
 
 function cleanupContentScriptInstance(): void {
+  removeImagePromptHoverStorageListener();
+  uninstallImagePromptHover();
   chromexContentScriptAbortController.abort();
   stopContentScriptRuntimeWatchdog();
   if (chromexRuntimeMessageListenerRegistered) {
@@ -281,8 +322,174 @@ function cleanupContentScriptInstance(): void {
     }
     chromexRuntimeMessageListenerRegistered = false;
   }
-  imagePromptHoverInstalled = false;
-  hideImagePromptHoverButton({ immediate: true });
+  clearPageSelectionContextTimer();
+}
+
+function installPageSelectionContextBridge(): void {
+  document.addEventListener("selectionchange", schedulePageSelectionContextUpdate, {
+    signal: chromexContentScriptAbortController.signal,
+  });
+  document.addEventListener("pointerup", schedulePageSelectionContextUpdate, {
+    signal: chromexContentScriptAbortController.signal,
+  });
+  document.addEventListener(
+    "keyup",
+    (event) => {
+      const key = typeof event.key === "string" ? event.key : "";
+      if (key.startsWith("Arrow") || key === "Shift" || key === "Home" || key === "End") {
+        schedulePageSelectionContextUpdate();
+      }
+    },
+    { signal: chromexContentScriptAbortController.signal },
+  );
+}
+
+function installDictationFocusBridge(): void {
+  const rememberEditableTarget = (event: Event) => {
+    const target = resolveDictationEditableTarget(event.target);
+    if (target) {
+      lastDictationEditableTarget = target;
+    }
+  };
+
+  document.addEventListener("focusin", rememberEditableTarget, {
+    capture: true,
+    signal: chromexContentScriptAbortController.signal,
+  });
+  document.addEventListener("pointerdown", rememberEditableTarget, {
+    capture: true,
+    signal: chromexContentScriptAbortController.signal,
+  });
+}
+
+function schedulePageSelectionContextUpdate(): void {
+  clearPageSelectionContextTimer();
+  pageSelectionContextTimer = window.setTimeout(() => {
+    pageSelectionContextTimer = null;
+    sendPageSelectionContextUpdate();
+  }, PAGE_SELECTION_CONTEXT_DEBOUNCE_MS);
+}
+
+function clearPageSelectionContextTimer(): void {
+  if (pageSelectionContextTimer === null) {
+    return;
+  }
+  window.clearTimeout(pageSelectionContextTimer);
+  pageSelectionContextTimer = null;
+}
+
+function sendPageSelectionContextUpdate(): void {
+  if (!isActiveContentScriptInstance()) {
+    return;
+  }
+  const snapshot = getSelectedPageContextSnapshot();
+  const text = snapshot.text;
+  if (text.length < PAGE_SELECTION_CONTEXT_MIN_CHARS) {
+    sendPageSelectionContextClear();
+    return;
+  }
+  const signature = `${window.location.href}\n${text}\n${snapshot.contextText ?? ""}`;
+  if (signature === lastPageSelectionContextSignature) {
+    return;
+  }
+  lastPageSelectionContextSignature = signature;
+  const runtime = getSafeChromeRuntime();
+  if (!runtime) {
+    cleanupContentScriptInstance();
+    return;
+  }
+  void runtime
+    .sendMessage({
+      type: "ui.page-selection.changed",
+      selection: {
+        text,
+        ...(snapshot.contextText ? { contextText: snapshot.contextText } : {}),
+        url: window.location.href,
+        title: document.title,
+        domain: window.location.hostname,
+      },
+    })
+    .catch(() => {
+      // The side panel may be closed, or Chrome may be reloading the unpacked extension.
+    });
+}
+
+function sendPageSelectionContextClear(): void {
+  if (!lastPageSelectionContextSignature) {
+    return;
+  }
+  lastPageSelectionContextSignature = "";
+  const runtime = getSafeChromeRuntime();
+  if (!runtime) {
+    cleanupContentScriptInstance();
+    return;
+  }
+  void runtime
+    .sendMessage({
+      type: "ui.page-selection.changed",
+      cleared: true,
+      selection: null,
+      url: window.location.href,
+    })
+    .catch(() => {
+      // The side panel may be closed, or Chrome may be reloading the unpacked extension.
+    });
+}
+
+function getSelectedPageContextSnapshot(): PageSelectionContextSnapshot {
+  const selection = window.getSelection?.();
+  if (!selection || selection.rangeCount === 0 || selection.isCollapsed) {
+    return { text: "" };
+  }
+  const range = selection.getRangeAt(0);
+  if (isSelectionInsideEditableSurface(range)) {
+    return { text: "" };
+  }
+  const text = normalizePageSelectionContextText(selection.toString());
+  const contextText = createPageSelectionContextText(range, text);
+  return {
+    text,
+    ...(contextText ? { contextText } : {}),
+  };
+}
+
+function isSelectionInsideEditableSurface(range: Range): boolean {
+  const container = range.commonAncestorContainer;
+  const element =
+    container.nodeType === Node.ELEMENT_NODE
+      ? (container as Element)
+      : container.parentElement;
+  return Boolean(element?.closest(EDITOR_LIKE_SELECTOR));
+}
+
+function normalizePageSelectionContextText(value: string): string {
+  return value.replace(/\s+/gu, " ").trim().slice(0, PAGE_SELECTION_CONTEXT_MAX_CHARS);
+}
+
+function createPageSelectionContextText(range: Range, selectedText: string): string {
+  const root = document.body ?? document.documentElement;
+  if (!root || !selectedText || !root.contains(range.commonAncestorContainer)) {
+    return "";
+  }
+  const beforeRange = document.createRange();
+  const afterRange = document.createRange();
+  try {
+    beforeRange.selectNodeContents(root);
+    beforeRange.setEnd(range.startContainer, range.startOffset);
+    afterRange.selectNodeContents(root);
+    afterRange.setStart(range.endContainer, range.endOffset);
+    return createSelectedTextContextExcerpt({
+      beforeText: beforeRange.toString(),
+      selectedText,
+      afterText: afterRange.toString(),
+      maxChars: PAGE_SELECTION_CONTEXT_MAX_CHARS,
+    });
+  } catch {
+    return "";
+  } finally {
+    beforeRange.detach();
+    afterRange.detach();
+  }
 }
 
 async function collectPageProbe() {
@@ -645,22 +852,113 @@ function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max);
 }
 
+function initializeImagePromptHoverSetting(): void {
+  registerImagePromptHoverStorageListener();
+  void readImagePromptHoverButtonEnabled()
+    .then((enabled) => setImagePromptHoverButtonEnabled(enabled))
+    .catch((error) => {
+      if (!handleImagePromptRuntimeError(error)) {
+        installImagePromptHover();
+      }
+    });
+}
+
+function registerImagePromptHoverStorageListener(): void {
+  const storage = getSafeChromeStorage();
+  if (!storage || imagePromptHoverStorageListenerRegistered) {
+    return;
+  }
+  storage.onChanged.addListener(handleImagePromptHoverStorageChanged);
+  imagePromptHoverStorageListenerRegistered = true;
+}
+
+function removeImagePromptHoverStorageListener(): void {
+  if (!imagePromptHoverStorageListenerRegistered) {
+    return;
+  }
+  try {
+    getSafeChromeStorage()?.onChanged.removeListener(handleImagePromptHoverStorageChanged);
+  } catch {
+    // The runtime can already be unavailable during extension reload cleanup.
+  }
+  imagePromptHoverStorageListenerRegistered = false;
+}
+
+function handleImagePromptHoverStorageChanged(
+  changes: Record<string, chrome.storage.StorageChange>,
+  areaName: string,
+): void {
+  if (areaName !== "local" || !Object.hasOwn(changes, SETTINGS_STORAGE_KEY)) {
+    return;
+  }
+  const settings = changes[SETTINGS_STORAGE_KEY]?.newValue;
+  setImagePromptHoverButtonEnabled(readImagePromptHoverButtonEnabledFromSettings(settings));
+}
+
+async function readImagePromptHoverButtonEnabled(): Promise<boolean> {
+  const storage = getSafeChromeStorage();
+  if (!storage) {
+    return true;
+  }
+  const result = await storage.local.get(SETTINGS_STORAGE_KEY);
+  return readImagePromptHoverButtonEnabledFromSettings(result[SETTINGS_STORAGE_KEY]);
+}
+
+function readImagePromptHoverButtonEnabledFromSettings(settings: unknown): boolean {
+  if (!settings || typeof settings !== "object") {
+    return true;
+  }
+  return (settings as { imagePromptHoverButtonEnabled?: unknown }).imagePromptHoverButtonEnabled !== false;
+}
+
+function setImagePromptHoverButtonEnabled(enabled: boolean): void {
+  if (enabled === imagePromptHoverEnabled) {
+    if (enabled && !imagePromptHoverInstalled) {
+      installImagePromptHover();
+    } else if (!enabled && imagePromptHoverInstalled) {
+      uninstallImagePromptHover();
+    }
+    return;
+  }
+  imagePromptHoverEnabled = enabled;
+  if (enabled) {
+    installImagePromptHover();
+    return;
+  }
+  uninstallImagePromptHover();
+}
+
 function installImagePromptHover(): void {
+  if (!imagePromptHoverEnabled) {
+    hideImagePromptHoverButton({ immediate: true });
+    return;
+  }
   if (imagePromptHoverInstalled) {
     removeImagePromptHoverButtons(imagePromptHoverButton);
+    if (imagePromptHoverButton?.isConnected && imagePromptHoverTargetRect) {
+      positionImagePromptHoverButton(imagePromptHoverTargetRect, imagePromptHoverButton);
+    }
     return;
   }
   imagePromptHoverInstalled = true;
+  imagePromptHoverAbortController = new AbortController();
   removeImagePromptHoverButtons();
   const listenerOptions: AddEventListenerOptions = {
     capture: true,
-    signal: chromexContentScriptAbortController.signal,
+    signal: imagePromptHoverAbortController.signal,
   };
   document.addEventListener("pointerover", handleImagePromptPointerOver, listenerOptions);
   document.addEventListener("click", handleImagePromptButtonClick, listenerOptions);
   document.addEventListener("scroll", handleImagePromptScroll, listenerOptions);
   document.addEventListener("visibilitychange", handleImagePromptVisibilityChange, listenerOptions);
   window.addEventListener("blur", handleImagePromptForceHide, listenerOptions);
+}
+
+function uninstallImagePromptHover(): void {
+  imagePromptHoverAbortController?.abort();
+  imagePromptHoverAbortController = null;
+  imagePromptHoverInstalled = false;
+  hideImagePromptHoverButton({ immediate: true });
 }
 
 function handleImagePromptForceHide(): void {
@@ -680,6 +978,9 @@ function handleImagePromptPointerOver(event: MouseEvent): void {
       return;
     }
     rememberImagePromptPointer(event);
+    if (isImagePromptHoverButtonEventTarget(event.target)) {
+      return;
+    }
     if (isPointerInsideImagePromptHoverSurface(event.clientX, event.clientY)) {
       return;
     }
@@ -1103,6 +1404,10 @@ function isPointerInsideImagePromptHoverSurface(clientX: number, clientY: number
   );
 }
 
+function isImagePromptHoverButtonEventTarget(target: EventTarget | null): boolean {
+  return target instanceof Node && Boolean(imagePromptHoverButton?.contains(target));
+}
+
 function isPointInsideRect(rect: DOMRect | null | undefined, clientX: number, clientY: number, padding = 0): boolean {
   if (!rect) {
     return false;
@@ -1239,15 +1544,19 @@ function positionImagePromptHoverButton(rect: DOMRect, button: HTMLButtonElement
 
 function handleImagePromptButtonClick(event: MouseEvent): void {
   try {
-    if (!isActiveContentScriptInstance() || !isPointInsideRect(imagePromptHoverButtonRect, event.clientX, event.clientY)) {
+    const isButtonTarget = isImagePromptHoverButtonEventTarget(event.target);
+    if (
+      !isActiveContentScriptInstance() ||
+      (!isButtonTarget && !isPointInsideRect(imagePromptHoverButtonRect, event.clientX, event.clientY))
+    ) {
       return;
     }
     event.preventDefault();
     event.stopPropagation();
     event.stopImmediatePropagation();
-    void extractPromptFromHoveredImage().catch((error: unknown) => {
+    void attachHoveredImageToComposer().catch((error: unknown) => {
       if (!handleImagePromptRuntimeError(error)) {
-        console.warn("[Chromex] Failed to extract an image prompt.", error);
+        console.warn("[Chromex] Failed to attach the hovered image.", error);
       }
     });
   } catch (error) {
@@ -1332,6 +1641,41 @@ async function extractPromptFromHoveredImage(): Promise<void> {
     const attachment = await createImagePromptAttachmentForHoveredTarget(target, imageUrl);
     await runtime.sendMessage({
       type: "page.image-prompt.extract",
+      imageUrl,
+      imageCandidate,
+      ...(attachment ? { attachment } : {}),
+    });
+  } catch (error) {
+    if (handleImagePromptRuntimeError(error)) {
+      return;
+    }
+    throw error;
+  }
+}
+
+async function attachHoveredImageToComposer(): Promise<void> {
+  if (!isActiveContentScriptInstance()) {
+    return;
+  }
+  const target = imagePromptHoverTarget;
+  if (!target) {
+    return;
+  }
+  const imageUrl = target.url;
+  if (!isSupportedImagePromptSource(imageUrl)) {
+    return;
+  }
+  const imageCandidate = target.candidate;
+  hideImagePromptHoverButton();
+  const runtime = getSafeChromeRuntime();
+  if (!runtime) {
+    cleanupContentScriptInstance();
+    return;
+  }
+  try {
+    const attachment = await createImagePromptAttachmentForHoveredTarget(target, imageUrl);
+    await runtime.sendMessage({
+      type: "page.image-attachment.add",
       imageUrl,
       imageCandidate,
       ...(attachment ? { attachment } : {}),
@@ -1794,6 +2138,104 @@ function findNewEditableTarget(
 function collectVisibleEditableTargets(): Array<HTMLElement | HTMLInputElement | HTMLTextAreaElement> {
   return Array.from(document.querySelectorAll<HTMLElement | HTMLInputElement | HTMLTextAreaElement>(EDITOR_LIKE_SELECTOR))
     .filter((candidate) => isTextEntryCandidate(candidate) && isDomActionElementVisible(candidate));
+}
+
+function insertDictationTextIntoFocusedEditable(text: string): { ok: boolean; error?: string; summary?: string } {
+  const value = text.trim();
+  if (!value) {
+    return { ok: false, error: "No dictation text was provided." };
+  }
+
+  const target = resolveCurrentDictationEditableTarget();
+  if (!target) {
+    return { ok: false, error: "No focused editable field was found on this page." };
+  }
+
+  insertTextIntoEditableTarget(target, value);
+  lastDictationEditableTarget = target;
+  return { ok: true, summary: "Inserted dictation text into the focused field." };
+}
+
+function resolveCurrentDictationEditableTarget(): HTMLElement | HTMLInputElement | HTMLTextAreaElement | null {
+  const activeTarget = resolveDictationEditableTarget(document.activeElement);
+  if (activeTarget) {
+    return activeTarget;
+  }
+
+  if (
+    lastDictationEditableTarget &&
+    document.contains(lastDictationEditableTarget) &&
+    isTextEntryCandidate(lastDictationEditableTarget) &&
+    isDomActionElementVisible(lastDictationEditableTarget)
+  ) {
+    return lastDictationEditableTarget;
+  }
+  return null;
+}
+
+function resolveDictationEditableTarget(
+  target: EventTarget | Element | null,
+): HTMLElement | HTMLInputElement | HTMLTextAreaElement | null {
+  if (!(target instanceof Element)) {
+    return null;
+  }
+  const element = target instanceof HTMLElement ? target : target.closest<HTMLElement>(EDITOR_LIKE_SELECTOR);
+  if (element && isTextEntryCandidate(element) && isDomActionElementVisible(element)) {
+    return element;
+  }
+  const closest = target.closest<HTMLElement>(EDITOR_LIKE_SELECTOR);
+  if (closest && isTextEntryCandidate(closest) && isDomActionElementVisible(closest)) {
+    return closest;
+  }
+  return null;
+}
+
+function insertTextIntoEditableTarget(element: HTMLElement | HTMLInputElement | HTMLTextAreaElement, value: string): void {
+  if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
+    element.focus();
+    const start = typeof element.selectionStart === "number" ? element.selectionStart : element.value.length;
+    const end = typeof element.selectionEnd === "number" ? element.selectionEnd : start;
+    const nextValue = `${element.value.slice(0, start)}${value}${element.value.slice(end)}`;
+    setNativeTextControlValue(element, nextValue);
+    const caret = start + value.length;
+    element.setSelectionRange(caret, caret);
+    element.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: value }));
+    element.dispatchEvent(new Event("change", { bubbles: true }));
+    return;
+  }
+
+  element.focus();
+  if (element.isContentEditable) {
+    const selection = window.getSelection();
+    const hasSelectionInTarget = Boolean(
+      selection?.rangeCount &&
+        selection.anchorNode &&
+        selection.focusNode &&
+        element.contains(selection.anchorNode) &&
+        element.contains(selection.focusNode),
+    );
+    if (!hasSelectionInTarget) {
+      const range = document.createRange();
+      range.selectNodeContents(element);
+      range.collapse(false);
+      selection?.removeAllRanges();
+      selection?.addRange(range);
+    }
+    if (!document.execCommand("insertText", false, value)) {
+      const range = selection?.rangeCount ? selection.getRangeAt(0) : document.createRange();
+      range.deleteContents();
+      const textNode = document.createTextNode(value);
+      range.insertNode(textNode);
+      range.setStartAfter(textNode);
+      range.setEndAfter(textNode);
+      selection?.removeAllRanges();
+      selection?.addRange(range);
+    }
+  } else {
+    element.textContent = `${element.textContent ?? ""}${value}`;
+  }
+  element.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: value }));
+  element.dispatchEvent(new Event("change", { bubbles: true }));
 }
 
 function setEditableTargetValue(element: HTMLElement | HTMLInputElement | HTMLTextAreaElement, value: string): void {

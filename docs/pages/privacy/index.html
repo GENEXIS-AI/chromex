@@ -4,66 +4,130 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Chromex Privacy Policy</title>
-    <meta name="description" content="Privacy policy for the Chromex Chrome extension.">
+    <meta name="description" content="Multilingual privacy policy for the Chromex Chrome extension.">
     <style>
+      :root {
+        color-scheme: light;
+        --bg: #f8fafc;
+        --surface: #ffffff;
+        --text: #111827;
+        --muted: #6b7280;
+        --line: #e5e7eb;
+        --accent: #2457d6;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
       body {
         margin: 0;
-        color: #1f2937;
-        background: #f8fafc;
-        font: 16px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        color: var(--text);
+        background: var(--bg);
+        font: 16px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", "Apple SD Gothic Neo", "Noto Sans KR", "Noto Sans JP", "Noto Sans SC", sans-serif;
       }
+
       main {
-        max-width: 860px;
+        max-width: 940px;
         margin: 0 auto;
         padding: 56px 24px 72px;
       }
-      article {
-        background: #fff;
-        border: 1px solid #e5e7eb;
-        border-radius: 12px;
-        padding: 32px;
+
+      article,
+      .intro {
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        padding: 30px;
       }
+
+      article {
+        margin-top: 18px;
+      }
+
       h1, h2 {
-        color: #111827;
+        color: var(--text);
         line-height: 1.25;
       }
+
       h1 {
-        margin-top: 0;
+        margin: 0 0 8px;
       }
+
+      h2 {
+        margin-top: 28px;
+      }
+
+      p {
+        margin: 0 0 12px;
+      }
+
       a {
-        color: #2457d6;
+        color: var(--accent);
       }
+
       li {
         margin: 8px 0;
       }
-      .effective-date {
-        color: #6b7280;
+
+      .effective-date,
+      .muted {
+        color: var(--muted);
+      }
+
+      .language-tabs {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-top: 18px;
+      }
+
+      .language-tabs a {
+        display: inline-flex;
+        align-items: center;
+        min-height: 34px;
+        padding: 0 14px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        background: var(--surface);
+        color: var(--text);
+        font-weight: 650;
+        text-decoration: none;
       }
     </style>
   </head>
   <body>
     <main>
-      <article>
+      <section class="intro">
         <h1>Chromex Privacy Policy</h1>
-        <p class="effective-date">Effective date: April 27, 2026</p>
+        <p class="muted">This policy is provided in English, Korean, Japanese, and Simplified Chinese for Chrome Web Store users.</p>
+        <nav class="language-tabs" aria-label="Languages">
+          <a href="#en">English</a>
+          <a href="#ko">한국어</a>
+          <a href="#ja">日本語</a>
+          <a href="#zh-cn">简体中文</a>
+        </nav>
+      </section>
+
+      <article id="en" lang="en">
+        <h1>Chromex Privacy Policy</h1>
+        <p class="effective-date">Effective date: April 28, 2026</p>
         <p>Chromex is a Chrome side-panel assistant that helps users work with webpages, selected tabs, uploaded files, voice input, images, and browser workflows through a local Codex bridge.</p>
-        <p>This Privacy Policy explains what data Chromex may process, why it is processed, and how the extension is designed to limit access to the user-requested task.</p>
+        <p>This Privacy Policy explains what data Chromex may process, why it is processed, and how the extension is designed to limit access to user-requested tasks.</p>
 
         <h2>What Chromex Does</h2>
-        <p>Chromex provides an AI assistant inside Chrome. Depending on the feature used, Chromex can summarize webpages, compare selected tabs, answer questions about page content, draft text, process uploaded files, work with images, use voice input, search browser history when requested, and help with browser workflows.</p>
+        <p>Chromex can summarize webpages, compare selected tabs, answer questions about page content, draft text, process uploaded files, work with images, use voice input, search browser history when requested, and help with browser workflows.</p>
         <p>Chromex is designed around user-controlled context. Page content, tab data, screenshots, history, files, images, audio, and browser actions are used only when a user requests a feature that needs that information.</p>
 
         <h2>Data Chromex May Process</h2>
-        <p>Chromex may process the following categories of data when the user requests related features:</p>
         <ul>
-          <li>Website content: page text, selected text, DOM-derived content, images, videos, links, screenshots, and other visible or readable content from the current page.</li>
-          <li>Tab information: tab titles, URLs, favicons, and user-selected open tabs for comparison or multi-tab context.</li>
-          <li>Uploaded files and images: files, screenshots, and images that the user attaches or selects for analysis, editing, or generation workflows.</li>
-          <li>Voice audio and transcripts: microphone audio and transcription text when the user uses voice input or live voice features.</li>
-          <li>Browser history: visited page titles, URLs, and visit times only when the user asks history-based questions and grants the required Chrome permission.</li>
-          <li>User activity: browser action state needed to complete user-requested workflows, such as page interaction planning, clicks, scrolling, or DOM-assisted actions.</li>
-          <li>Personal communications: email, chat, document, or collaboration content only when such content is present on a page and the user asks Chromex to process that page.</li>
-          <li>Personally identifiable information: names, email addresses, account names, or similar information may be processed if it appears in user-selected page content, uploaded files, communications, or browser history.</li>
+          <li>Website content, including page text, selected text, DOM-derived content, images, videos, links, screenshots, and visible or readable content from the current page.</li>
+          <li>Tab information, including titles, URLs, favicons, and user-selected open tabs.</li>
+          <li>Uploaded files and images selected by the user.</li>
+          <li>Voice audio and transcripts when the user uses voice input or live voice features.</li>
+          <li>Browser history only when the user asks history-based questions and grants the required Chrome permission.</li>
+          <li>User activity needed for requested browser workflows, such as clicks, scrolling, DOM-assisted actions, and visible page interaction planning.</li>
+          <li>Personal communications or personally identifiable information only when such data appears in user-selected content, uploaded files, communications, or browser history.</li>
         </ul>
         <p>Chromex does not intentionally collect health information, financial or payment information, precise location data, or authentication secrets as part of its single purpose.</p>
 
@@ -71,43 +135,139 @@
         <p>Chromex uses a local native bridge to communicate with the user's configured Codex/OpenAI runtime.</p>
         <p>The Chrome extension does not store raw OpenAI API keys, OAuth tokens, or ChatGPT session tokens in Chrome extension storage. Authentication handoff, API-key fallback, generated-image files, diagnostics, and runtime-heavy operations are handled by the local bridge installed on the user's computer.</p>
 
-        <h2>How Data Is Used</h2>
-        <p>Chromex uses data only to provide the feature requested by the user, such as answering a question, summarizing a page, comparing tabs, transcribing voice input, editing an image, generating an infographic, or performing a browser workflow.</p>
-        <p>Data may be sent through the local bridge to the user's configured Codex/OpenAI service when needed to complete the requested task. Model responses are treated as data and are not executed as extension code.</p>
-
-        <h2>Data Sharing</h2>
+        <h2>Use, Sharing, and Storage</h2>
+        <p>Chromex uses data only to provide the feature requested by the user. Data may be sent through the local bridge to the user's configured Codex/OpenAI service when needed to complete that task.</p>
         <p>Chromex does not sell user data.</p>
-        <p>Chromex does not use user data for advertising.</p>
-        <p>Chromex does not use user data to determine creditworthiness or for lending purposes.</p>
-        <p>Chromex does not transfer user data for purposes unrelated to the extension's single purpose. Data is processed only as needed to provide user-requested assistant features or as required to operate the local bridge and configured AI service.</p>
+        <p>Chromex does not use user data for advertising and does not use user data to determine creditworthiness or for lending purposes.</p>
+        <p>Chromex may store local extension preferences such as theme, language, selected model, profile templates, enabled skills, onboarding state, and lightweight conversation metadata. Large generated assets, temporary files, and diagnostics are handled by the local bridge rather than Chrome extension storage.</p>
 
-        <h2>Storage</h2>
-        <p>Chromex may store local extension preferences such as theme, language, selected model, profile templates, enabled skills, onboarding state, and lightweight conversation metadata.</p>
-        <p>Large generated image assets, temporary files, and diagnostics are stored by the local bridge rather than Chrome extension storage. Users can remove generated assets from the local output folder.</p>
-
-        <h2>Permissions</h2>
-        <p>Chromex requests baseline permissions needed for the side-panel assistant and requests optional permissions only when a feature needs them.</p>
-        <ul>
-          <li><code>sidePanel</code> displays the assistant UI in Chrome's side panel.</li>
-          <li><code>activeTab</code> allows user-triggered access to the current tab.</li>
-          <li><code>scripting</code> injects content scripts for user-requested page context and browser helpers.</li>
-          <li><code>storage</code> stores local preferences and lightweight state.</li>
-          <li><code>contextMenus</code> adds user-triggered right-click actions.</li>
-          <li><code>nativeMessaging</code> connects to the local Chromex bridge.</li>
-          <li>Optional <code>history</code> is used only for user-requested history search.</li>
-          <li>Optional <code>tabs</code> is used for user-selected open-tab workflows.</li>
-          <li>Optional host permissions are requested for site-specific page reading, capture, or browser actions.</li>
-        </ul>
+        <h2>Permissions and User Control</h2>
+        <p>Chromex requests baseline permissions for the side-panel assistant and requests optional permissions only when a feature needs them. Users control when Chromex receives page context, selected tabs, uploaded files, images, voice input, browser history, and browser action permissions. Users can disable optional features, revoke Chrome permissions, clear local settings, and remove generated files.</p>
 
         <h2>Remote Code</h2>
         <p>Chromex does not execute remotely hosted JavaScript or remotely supplied extension code. Extension code is packaged with the MV3 extension.</p>
 
-        <h2>User Control</h2>
-        <p>Users control when Chromex receives page context, selected tabs, uploaded files, images, voice input, browser history, and browser action permissions. Users can disable optional features, revoke Chrome permissions, clear local settings, and remove generated image files.</p>
-
         <h2>Contact</h2>
-        <p>For privacy or support questions, contact <a href="mailto:support@genexis.ai">support@genexis.ai</a>.</p>
-        <p>If this address is not yet active, use the <a href="https://github.com/GENEXIS-AI/chromex/issues">GitHub repository issue tracker</a>.</p>
+        <p>For privacy or support questions, contact <a href="mailto:support@genexis.ai">support@genexis.ai</a>. If this address is not yet active, use the <a href="https://github.com/GENEXIS-AI/chromex/issues">GitHub issue tracker</a>.</p>
+      </article>
+
+      <article id="ko" lang="ko">
+        <h1>Chromex 개인정보 처리방침</h1>
+        <p class="effective-date">시행일: 2026년 4월 28일</p>
+        <p>Chromex는 로컬 Codex 브리지를 통해 웹페이지, 선택한 탭, 업로드 파일, 음성 입력, 이미지, 브라우저 작업을 처리하는 Chrome 사이드패널 어시스턴트입니다.</p>
+        <p>이 방침은 Chromex가 어떤 데이터를 처리할 수 있는지, 왜 처리하는지, 그리고 사용자가 요청한 작업 범위로 접근을 제한하기 위해 어떻게 설계되었는지 설명합니다.</p>
+
+        <h2>Chromex가 하는 일</h2>
+        <p>Chromex는 웹페이지 요약, 선택 탭 비교, 페이지 내용 질문 답변, 글 초안 작성, 업로드 파일 처리, 이미지 작업, 음성 입력, 사용자가 요청한 브라우저 기록 검색, 브라우저 작업 보조를 수행할 수 있습니다.</p>
+        <p>Chromex는 사용자가 선택한 문맥을 중심으로 작동합니다. 페이지 내용, 탭 정보, 스크린샷, 기록, 파일, 이미지, 오디오, 브라우저 동작은 해당 기능을 사용자가 요청한 경우에만 사용됩니다.</p>
+
+        <h2>처리될 수 있는 데이터</h2>
+        <ul>
+          <li>현재 페이지의 텍스트, 선택 텍스트, DOM 기반 내용, 이미지, 영상, 링크, 스크린샷 등 웹사이트 내용</li>
+          <li>탭 제목, URL, favicon, 사용자가 선택한 열린 탭 정보</li>
+          <li>사용자가 업로드하거나 선택한 파일과 이미지</li>
+          <li>음성 입력 또는 라이브 음성 기능 사용 시 마이크 오디오와 전사 텍스트</li>
+          <li>사용자가 브라우저 기록 기반 질문을 요청하고 권한을 허용한 경우의 방문 기록</li>
+          <li>클릭, 스크롤, DOM 보조 작업, 페이지 상호작용 계획 등 사용자가 요청한 브라우저 작업에 필요한 활동 정보</li>
+          <li>사용자가 선택한 콘텐츠, 업로드 파일, 커뮤니케이션, 브라우저 기록 안에 포함된 경우의 개인 식별 정보 또는 개인 커뮤니케이션 내용</li>
+        </ul>
+        <p>Chromex는 단일 목적 수행을 위해 건강 정보, 금융 또는 결제 정보, 정밀 위치 정보, 인증 비밀을 의도적으로 수집하지 않습니다.</p>
+
+        <h2>인증과 로컬 브리지</h2>
+        <p>Chromex는 사용자가 설정한 Codex/OpenAI 런타임과 통신하기 위해 로컬 네이티브 브리지를 사용합니다.</p>
+        <p>Chrome 확장 프로그램 저장소에는 원본 OpenAI API 키, OAuth 토큰, ChatGPT 세션 토큰을 저장하지 않습니다. 인증 전달, API 키 폴백, 생성 이미지 파일, 진단, 무거운 런타임 작업은 사용자의 컴퓨터에 설치된 로컬 브리지가 처리합니다.</p>
+
+        <h2>사용, 공유, 저장</h2>
+        <p>Chromex는 사용자가 요청한 기능을 제공하기 위해서만 데이터를 사용합니다. 작업 수행에 필요한 경우 로컬 브리지를 통해 사용자가 설정한 Codex/OpenAI 서비스로 데이터가 전송될 수 있습니다.</p>
+        <p>Chromex는 사용자 데이터를 판매하지 않고, 광고에 사용하지 않으며, 신용 평가나 대출 목적으로 사용하지 않습니다.</p>
+        <p>Chromex는 테마, 언어, 선택 모델, 프로필 템플릿, 활성화된 스킬, 온보딩 상태, 가벼운 대화 메타데이터 같은 로컬 설정을 저장할 수 있습니다. 큰 생성 자산, 임시 파일, 진단 정보는 Chrome 확장 프로그램 저장소가 아니라 로컬 브리지가 처리합니다.</p>
+
+        <h2>권한과 사용자 제어</h2>
+        <p>Chromex는 사이드패널 어시스턴트에 필요한 기본 권한을 요청하고, 특정 기능에 필요할 때만 선택 권한을 요청합니다. 사용자는 페이지 문맥, 선택한 탭, 업로드 파일, 이미지, 음성 입력, 브라우저 기록, 브라우저 작업 권한 제공 시점을 제어할 수 있습니다.</p>
+
+        <h2>원격 코드</h2>
+        <p>Chromex는 원격 호스팅 JavaScript 또는 원격에서 제공된 확장 코드를 실행하지 않습니다. 확장 코드는 MV3 확장 패키지에 포함되어 배포됩니다.</p>
+
+        <h2>문의</h2>
+        <p>개인정보 또는 지원 문의는 <a href="mailto:support@genexis.ai">support@genexis.ai</a>로 보내 주세요. 해당 주소를 사용할 수 없는 경우 <a href="https://github.com/GENEXIS-AI/chromex/issues">GitHub issue tracker</a>를 사용할 수 있습니다.</p>
+      </article>
+
+      <article id="ja" lang="ja">
+        <h1>Chromex プライバシーポリシー</h1>
+        <p class="effective-date">施行日: 2026 年 4 月 28 日</p>
+        <p>Chromex は、ローカル Codex ブリッジを通じて、ウェブページ、選択したタブ、アップロードファイル、音声入力、画像、ブラウザ操作を扱う Chrome サイドパネルアシスタントです。</p>
+        <p>このポリシーは、Chromex が処理する可能性のあるデータ、その目的、そしてユーザーが要求した作業にアクセスを限定する設計を説明します。</p>
+
+        <h2>Chromex の機能</h2>
+        <p>Chromex は、ページ要約、タブ比較、ページ内容への質問回答、文章作成、アップロードファイル処理、画像作業、音声入力、ユーザーが求めたブラウザ履歴検索、ブラウザ操作支援を行えます。</p>
+
+        <h2>処理される可能性のあるデータ</h2>
+        <ul>
+          <li>ページ本文、選択テキスト、DOM 由来の内容、画像、動画、リンク、スクリーンショットなどのウェブサイト内容</li>
+          <li>タブのタイトル、URL、favicon、ユーザーが選択した開いているタブ</li>
+          <li>ユーザーがアップロードまたは選択したファイルと画像</li>
+          <li>音声入力やライブ音声機能を使う場合の音声と文字起こし</li>
+          <li>ユーザーが履歴検索を求め、Chrome 権限を許可した場合のブラウザ履歴</li>
+          <li>クリック、スクロール、DOM 補助操作など、ユーザーが要求したブラウザワークフローに必要な操作情報</li>
+          <li>選択された内容やアップロードファイルに含まれる場合の個人情報やコミュニケーション内容</li>
+        </ul>
+        <p>Chromex は、単一目的の一部として健康情報、金融・支払い情報、正確な位置情報、認証秘密を意図的に収集しません。</p>
+
+        <h2>認証とローカルブリッジ</h2>
+        <p>Chromex は、ユーザーが設定した Codex/OpenAI ランタイムと通信するためにローカルネイティブブリッジを使用します。Chrome 拡張機能ストレージには、生の OpenAI API キー、OAuth トークン、ChatGPT セッショントークンを保存しません。</p>
+
+        <h2>利用、共有、保存</h2>
+        <p>Chromex は、ユーザーが要求した機能を提供するためだけにデータを使用します。必要な場合、ローカルブリッジを通じてユーザーが設定した Codex/OpenAI サービスにデータが送信されることがあります。</p>
+        <p>Chromex はユーザーデータを販売せず、広告に使用せず、信用判断や融資目的にも使用しません。</p>
+        <p>Chromex はテーマ、言語、選択モデル、プロファイルテンプレート、有効なスキル、オンボーディング状態、軽量な会話メタデータなどのローカル設定を保存することがあります。</p>
+
+        <h2>権限とユーザー制御</h2>
+        <p>Chromex はサイドパネルアシスタントに必要な基本権限を要求し、機能が必要とする場合だけ任意権限を要求します。ユーザーは、ページ文脈、選択タブ、アップロードファイル、画像、音声入力、履歴、ブラウザ操作権限をいつ渡すか制御できます。</p>
+
+        <h2>リモートコード</h2>
+        <p>Chromex はリモートでホストされた JavaScript や、リモートから供給された拡張コードを実行しません。拡張コードは MV3 拡張パッケージに含まれます。</p>
+
+        <h2>連絡先</h2>
+        <p>プライバシーまたはサポートに関する質問は <a href="mailto:support@genexis.ai">support@genexis.ai</a> までご連絡ください。このアドレスが利用できない場合は <a href="https://github.com/GENEXIS-AI/chromex/issues">GitHub issue tracker</a> を利用できます。</p>
+      </article>
+
+      <article id="zh-cn" lang="zh-CN">
+        <h1>Chromex 隐私政策</h1>
+        <p class="effective-date">生效日期: 2026 年 4 月 28 日</p>
+        <p>Chromex 是一个 Chrome 侧边栏助手，通过本地 Codex bridge 帮助用户处理网页、选中的标签页、上传文件、语音输入、图片和浏览器工作流。</p>
+        <p>本政策说明 Chromex 可能处理哪些数据、处理原因，以及如何把访问范围限制在用户请求的任务内。</p>
+
+        <h2>Chromex 的功能</h2>
+        <p>Chromex 可以总结网页、比较选中的标签页、回答页面内容问题、起草文本、处理上传文件、处理图片、使用语音输入、在用户请求时搜索浏览器历史，并帮助完成浏览器工作流。</p>
+
+        <h2>可能处理的数据</h2>
+        <ul>
+          <li>网页文本、选中文本、DOM 提取内容、图片、视频、链接、截图等网站内容</li>
+          <li>标签页标题、URL、favicon 和用户选择的打开标签页</li>
+          <li>用户上传或选择的文件和图片</li>
+          <li>用户使用语音输入或实时语音功能时的音频和转写文本</li>
+          <li>用户请求基于历史记录的问题并授予 Chrome 权限时的浏览器历史</li>
+          <li>完成用户请求的浏览器工作流所需的点击、滚动、DOM 辅助操作和页面交互信息</li>
+          <li>当用户选择的内容、上传文件、通信内容或浏览器历史中包含时的个人信息或个人通信内容</li>
+        </ul>
+        <p>Chromex 不会为了其单一用途而有意收集健康信息、金融或支付信息、精确位置数据或认证密钥。</p>
+
+        <h2>认证与本地 Bridge</h2>
+        <p>Chromex 使用本地 native bridge 与用户配置的 Codex/OpenAI 运行时通信。Chrome 扩展存储不会保存原始 OpenAI API key、OAuth token 或 ChatGPT session token。</p>
+
+        <h2>使用、共享与存储</h2>
+        <p>Chromex 仅为提供用户请求的功能而使用数据。必要时，数据可能通过本地 bridge 发送到用户配置的 Codex/OpenAI 服务。</p>
+        <p>Chromex 不出售用户数据，不将用户数据用于广告，也不用于信用评估或贷款目的。</p>
+        <p>Chromex 可能保存主题、语言、所选模型、配置文件模板、启用的 skills、引导状态和轻量会话元数据等本地偏好设置。</p>
+
+        <h2>权限与用户控制</h2>
+        <p>Chromex 请求侧边栏助手所需的基础权限，并仅在功能需要时请求可选权限。用户可以控制何时提供页面上下文、标签页、上传文件、图片、语音输入、浏览器历史和浏览器操作权限。</p>
+
+        <h2>远程代码</h2>
+        <p>Chromex 不执行远程托管的 JavaScript，也不执行远程提供的扩展代码。扩展代码随 MV3 扩展包一起发布。</p>
+
+        <h2>联系</h2>
+        <p>隐私或支持问题请联系 <a href="mailto:support@genexis.ai">support@genexis.ai</a>。如果该地址暂不可用，也可以使用 <a href="https://github.com/GENEXIS-AI/chromex/issues">GitHub issue tracker</a>。</p>
       </article>
     </main>
   </body>

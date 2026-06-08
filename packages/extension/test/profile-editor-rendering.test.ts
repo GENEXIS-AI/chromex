@@ -34,6 +34,7 @@ function readFinalDeclaration(selector: string, property: string): string {
 describe("profile editor rendering", () => {
   test("opens color, icon, and image controls from the visual preview trigger", () => {
     expect(sidepanelSource).toContain("visualPickerOpen: false");
+    expect(sidepanelSource).toContain('profile-editor-modal ${editor.visualPickerOpen ? "has-visual-picker" : ""}');
     expect(sidepanelSource).toContain("id=\"profile-visual-trigger\"");
     expect(sidepanelSource).toContain("renderProfileVisualPicker(editor, strings)");
     expect(sidepanelSource).toContain("#close-profile-visual-picker");
@@ -54,8 +55,13 @@ describe("profile editor rendering", () => {
   test("styles the visual picker as an anchored dropdown", () => {
     expect(readFinalDeclaration(".profile-editor-visual-anchor", "position")).toBe("relative");
     expect(readFinalDeclaration(".profile-editor-preview-trigger", "border")).toBe("0");
+    expect(readFinalDeclaration(".profile-editor-modal.has-visual-picker", "overflow")).toBe("visible");
     expect(readFinalDeclaration(".profile-visual-picker", "position")).toBe("absolute");
     expect(readFinalDeclaration(".profile-visual-picker", "z-index")).toBe("3");
+    expect(readFinalDeclaration(".profile-visual-picker", "overflow-y")).toBe("auto");
+    expect(readFinalDeclaration(".profile-visual-picker", "overscroll-behavior")).toBe("contain");
+    expect(readFinalDeclaration(".profile-visual-picker-close", "position")).toBe("sticky");
+    expect(readFinalDeclaration(".profile-visual-picker-close", "bottom")).toBe("0");
     expect(readFinalDeclaration(".profile-visual-picker-divider", "height")).toBe("1px");
   });
 });

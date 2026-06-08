@@ -68,7 +68,9 @@ const REQUIRED_CHROME_MESSAGE_KEYS = [
   "actionOpenSidePanel",
   "commandOpenSidePanel",
   "commandOpenPopup",
+  "commandStartDictation",
   "contextAskPage",
+  "contextAskSelection",
   "contextEditImage",
   "contextSummarizeYoutube",
 ] as const;
@@ -87,6 +89,10 @@ describe("extension manifest", () => {
       permissions?: string[];
       optional_permissions?: string[];
       host_permissions?: string[];
+      content_scripts?: Array<{
+        matches?: string[];
+        js?: string[];
+      }>;
       web_accessible_resources?: unknown[];
     };
 
@@ -96,9 +102,18 @@ describe("extension manifest", () => {
     expect(manifest.action?.default_icon?.["32"]).toBe("icons/codex-32.png");
     expect(manifest.key).toBe("MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAuP+A4d/pFvVoYH/4yByEMq1JknmBMcsBo5hbyjFDRthp9GrAWTnksc0X/dP5kftZ45O+IlfP6rfg5w7ktNDt7tuJ0TpslnQEUvzC9D0CkEWzj6OmuWgY7nCtmnuHHItp1xJR9RsCDMNg9qFf54EiCf6eyTDrkJnn1yeIx/rIZRcbqnFjBLrVsuSz18L21/b+zQ8o+xzPWWhOYGVnuxuQvL57/MiDfSJ5zI0xgnYgMP/OXhdRTKmJeu/0pdEcrk2y1WgAE2LfI0jKjF6VIjKmDHabJRlP3/UZy6siRFHPZs2Q5Eh+Wxb0MtfiXN2r64R9p7MjGOkaw71GH+itEiAxuwIDAQAB");
     expect(manifest.permissions ?? []).toContain("tabs");
+    expect(manifest.permissions ?? []).toContain("desktopCapture");
     expect(manifest.host_permissions ?? []).toContain("<all_urls>");
     expect(manifest.optional_permissions ?? []).not.toContain("tabs");
     expect(manifest.optional_permissions ?? []).not.toContain("tabCapture");
+    expect(manifest.content_scripts ?? []).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          matches: expect.arrayContaining(["file:///*"]),
+          js: ["content.js"],
+        }),
+      ]),
+    );
     expect(manifest.web_accessible_resources).toEqual([
       {
         resources: ["icons/codex-32.png"],
@@ -141,6 +156,18 @@ describe("extension manifest", () => {
       for (const key of REQUIRED_CHROME_MESSAGE_KEYS) {
         expect(messages[key]?.message?.trim(), `${locale}:${key}`).toBeTruthy();
       }
+    }
+  });
+
+  test("generates every localized message referenced by the manifest", async () => {
+    const manifestPath = resolve(dirname(fileURLToPath(import.meta.url)), "../public/manifest.json");
+    const manifestSource = readFileSync(manifestPath, "utf8");
+    const referencedKeys = Array.from(manifestSource.matchAll(/__MSG_([A-Za-z0-9_]+)__/gu), (match) => match[1]);
+    const { buildChromeLocaleMessages } = await import("../../../scripts/extension-locales.mjs");
+    const generatedMessages = buildChromeLocaleMessages("en") as Record<string, { message?: string }>;
+
+    for (const key of referencedKeys) {
+      expect(generatedMessages[key]?.message?.trim(), key).toBeTruthy();
     }
   });
 });

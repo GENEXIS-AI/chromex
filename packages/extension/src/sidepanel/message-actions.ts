@@ -1,9 +1,11 @@
 import type { ConversationMessage } from "../types.js";
+import { DEFAULT_PROFILE_ID } from "./profile-selection.js";
 
 export interface MessageReplayPlan {
   prompt: string;
   messagesBeforePrompt: ConversationMessage[];
   userMessageId: string;
+  profileId: string;
 }
 
 export function prepareMessageReplay(
@@ -35,6 +37,7 @@ export function prepareMessageReplay(
     prompt,
     messagesBeforePrompt: messages.slice(0, userIndex),
     userMessageId: userMessage.id,
+    profileId: userMessage.profile?.id ?? DEFAULT_PROFILE_ID,
   };
 }
 

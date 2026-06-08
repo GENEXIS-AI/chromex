@@ -1,4 +1,4 @@
-import { escapeHtml } from "./html-escape.js";
+import { escapeAttribute, escapeHtml } from "./html-escape.js";
 import { renderUiIcon } from "./ui-icons.js";
 
 const TIMESTAMP_PATTERN = /(^|[^\d:])(\d{1,2}:\d{2}(?::\d{2})?)(?![\d:])/gu;
@@ -80,34 +80,83 @@ function renderEscapedTextWithTimestamps(value: string, options: RenderMessageCo
 }
 
 function isSafeMarkdownLinkUrl(value: string): boolean {
-  const normalized = value.trim();
-  return /^(?:https?:\/\/|mailto:)/iu.test(normalized) || isSafeLocalPdfPath(normalized);
+  const normalized = normalizeMarkdownLinkUrl(value);
+  return /^(?:https?:\/\/|mailto:)/iu.test(normalized) || getSafeLocalFilePath(normalized) !== null;
 }
 
 function formatSafeMarkdownLinkHref(value: string): string {
-  const normalized = value.trim();
-  if (isSafeLocalPdfPath(normalized)) {
-    return localPdfPathToFileUrl(normalized);
+  const normalized = normalizeMarkdownLinkUrl(value);
+  const localFilePath = getSafeLocalFilePath(normalized);
+  if (localFilePath) {
+    return localFilePathToFileUrl(localFilePath);
   }
   return normalized;
 }
 
-function isSafeLocalPdfPath(value: string): boolean {
-  return (
-    /^file:\/\/\/.+\.pdf$/iu.test(value) ||
-    /^\/.+\.pdf$/iu.test(value) ||
-    /^[a-zA-Z]:\\.+\.pdf$/iu.test(value)
-  );
+function normalizeMarkdownLinkUrl(value: string): string {
+  let normalized = value.trim();
+  while (
+    normalized.length >= 2 &&
+    ((normalized.startsWith("<") && normalized.endsWith(">")) ||
+      (normalized.startsWith("\"") && normalized.endsWith("\"")) ||
+      (normalized.startsWith("'") && normalized.endsWith("'")))
+  ) {
+    normalized = normalized.slice(1, -1).trim();
+  }
+  return normalized;
 }
 
-function localPdfPathToFileUrl(value: string): string {
-  if (value.startsWith("file:///")) {
-    return encodeURI(value);
+function getSafeLocalFilePath(value: string): string | null {
+  const normalized = normalizeMarkdownLinkUrl(value);
+  const localPath = /^file:\/\//iu.test(normalized) ? fileUrlToLocalFilePath(normalized) : normalized;
+  if (!localPath || /[\u0000-\u001f\u007f]/u.test(localPath)) {
+    return null;
   }
+  if (/^\/.+/u.test(localPath) || /^[a-zA-Z]:\\.+/u.test(localPath) || /^\\\\[^\\]+\\[^\\]+/u.test(localPath)) {
+    return localPath;
+  }
+  return null;
+}
+
+function fileUrlToLocalFilePath(value: string): string | null {
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "file:") {
+      return null;
+    }
+    const decodedPath = decodeURIComponent(url.pathname);
+    if (/^\/[a-zA-Z]:\//u.test(decodedPath)) {
+      return decodedPath.slice(1).replaceAll("/", "\\");
+    }
+    if (url.hostname) {
+      return `\\\\${url.hostname}${decodedPath.replaceAll("/", "\\")}`;
+    }
+    return decodedPath;
+  } catch {
+    return null;
+  }
+}
+
+function localFilePathToFileUrl(value: string): string {
   if (/^[a-zA-Z]:\\/u.test(value)) {
     return encodeURI(`file:///${value.replaceAll("\\", "/")}`);
   }
+  if (/^\\\\/u.test(value)) {
+    return encodeURI(`file://${value.slice(2).replaceAll("\\", "/")}`);
+  }
   return encodeURI(`file://${value}`);
+}
+
+function renderMarkdownLink(rawUrl: string, label: string, options: RenderMessageContentOptions): string {
+  const href = formatSafeMarkdownLinkHref(rawUrl);
+  const localFilePath = getSafeLocalFilePath(rawUrl);
+  const localFileAttributes = localFilePath
+    ? ` data-local-file-path="${escapeAttribute(localFilePath)}" data-local-file-action="reveal"`
+    : "";
+  return `<a href="${escapeAttribute(href)}"${localFileAttributes} target="_blank" rel="noreferrer noopener">${renderInlineMarkdown(
+    label,
+    options,
+  )}</a>`;
 }
 
 function trimPlainUrl(value: string): { url: string; trailing: string } {
@@ -200,14 +249,8 @@ function renderInlineMarkdown(value: string, options: RenderMessageContentOption
         const urlEndIndex = value.indexOf(")", urlStartIndex + 1);
         const rawUrl = urlEndIndex > urlStartIndex ? value.slice(urlStartIndex + 1, urlEndIndex).trim() : "";
         if (rawUrl && isSafeMarkdownLinkUrl(rawUrl)) {
-          const href = formatSafeMarkdownLinkHref(rawUrl);
           flushPlain();
-          parts.push(
-            `<a href="${escapeHtml(href)}" target="_blank" rel="noreferrer noopener">${renderInlineMarkdown(
-              value.slice(index + 1, labelEndIndex),
-              options,
-            )}</a>`,
-          );
+          parts.push(renderMarkdownLink(rawUrl, value.slice(index + 1, labelEndIndex), options));
           index = urlEndIndex + 1;
           continue;
         }

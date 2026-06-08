@@ -11,6 +11,35 @@ import {
 } from "../src/sidepanel/image-annotation.js";
 
 const sidepanelSource = readFileSync(resolve(process.cwd(), "src/sidepanel/index.ts"), "utf8");
+const sidepanelCss = readFileSync(resolve(process.cwd(), "public/sidepanel.css"), "utf8").replace(
+  /\/\*[\s\S]*?\*\//g,
+  "",
+);
+
+function readFinalDeclaration(selector: string, property: string): string {
+  const blockPattern = /([^{}]+)\{([^{}]*)\}/g;
+  let match: RegExpExecArray | null;
+  let value = "";
+
+  while ((match = blockPattern.exec(sidepanelCss))) {
+    const selectorList = (match[1] ?? "")
+      .split(",")
+      .map((item) => item.trim());
+    if (!selectorList.includes(selector)) {
+      continue;
+    }
+
+    const declarations = match[2] ?? "";
+    for (const declaration of declarations.split(";")) {
+      const [name, ...rawValue] = declaration.split(":");
+      if (name?.trim() === property) {
+        value = rawValue.join(":").trim();
+      }
+    }
+  }
+
+  return value;
+}
 
 describe("image annotation attachments", () => {
   const attachment = {
@@ -94,5 +123,22 @@ describe("image annotation attachments", () => {
     expect(sidepanelSource).toContain("ingestImageAnnotationReferenceFiles");
     expect(sidepanelSource).toContain("data-remove-image-annotation-reference-id");
     expect(sidepanelSource).not.toContain('root.querySelector<HTMLInputElement>("#image-annotation-reference-input")?.addEventListener("change", async (event) => {\n    const input = event.currentTarget as HTMLInputElement;\n    if (!input.files?.length) {\n      return;\n    }\n    await ingestSelectedFiles(input.files);');
+  });
+
+  test("keeps annotation color swatches visible on light image-edit surfaces", () => {
+    expect(readFinalDeclaration(".annotation-color", "background")).toBe("var(--annotation-color)");
+    expect(readFinalDeclaration(".annotation-color", "forced-color-adjust")).toBe("none");
+    expect(readFinalDeclaration(':root[data-theme="light"] .annotation-color', "border-color")).toBe(
+      "rgba(17, 24, 39, 0.32)",
+    );
+    expect(readFinalDeclaration(':root[data-theme="light"] .annotation-color', "box-shadow")).toContain(
+      "rgba(17, 24, 39, 0.04)",
+    );
+    expect(
+      readFinalDeclaration(':root[data-theme="light"] .annotation-color[data-annotation-color="#ffffff"]', "box-shadow"),
+    ).toContain("rgba(17, 24, 39, 0.18)");
+    expect(readFinalDeclaration(':root[data-theme="light"] .annotation-color.selected', "box-shadow")).toContain(
+      "0 0 0 4px #111318",
+    );
   });
 });

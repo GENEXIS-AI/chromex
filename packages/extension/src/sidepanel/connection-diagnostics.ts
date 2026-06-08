@@ -32,6 +32,9 @@ const NATIVE_HOST_SETUP_PATTERNS = [
 const NATIVE_HOST_RECONNECT_PATTERNS = [
   "native host disconnected",
   "native host has exited",
+  "found but exited immediately",
+  "exited immediately",
+  "failed to start native messaging host",
 ];
 
 export function getNativeHostHealth(input: {
@@ -84,6 +87,22 @@ export function getCodexBinaryHealth(input: {
   }
 
   if (input.runtimeConfig.codexBinSource === "missing") {
+    if (input.modelCatalogState === "ready" || input.modelCatalogState === "empty") {
+      return {
+        status: "automatic",
+        tone: "ok",
+        detailSource: "detected",
+      };
+    }
+
+    if (input.modelCatalogState === "loading") {
+      return {
+        status: "pending",
+        tone: "neutral",
+        detailSource: "waiting-for-host",
+      };
+    }
+
     return {
       status: "not-detected",
       tone: "warn",

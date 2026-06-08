@@ -29,7 +29,7 @@ export function requiresPluginCompanionAppConnection(
 ): boolean {
   return (
     input.type === "mention" &&
-    input.path.startsWith("plugin://") &&
+    getStructuredInputPath(input).startsWith("plugin://") &&
     getPluginConnectionState(input, apps) === "connection-required"
   );
 }
@@ -60,9 +60,9 @@ function createPluginMatchTokens(
       plugin.id,
       plugin.name,
       plugin.token,
-      plugin.path,
-      pluginSlugFromPath(plugin.path),
-      plugin.id.split("@")[0] ?? "",
+      getStructuredInputPath(plugin),
+      pluginSlugFromPath(getStructuredInputPath(plugin)),
+      normalizeStructuredInputString(plugin.id).split("@")[0] ?? "",
     ]
       .map(normalizeStructuredInputMatchValue)
       .filter(Boolean),
@@ -74,9 +74,13 @@ function pluginSlugFromPath(path: string): string {
   return match?.[1] ?? "";
 }
 
-function normalizeStructuredInputMatchValue(value: string): string {
+function getStructuredInputPath(input: { path?: unknown }): string {
+  return normalizeStructuredInputString(input.path);
+}
+
+function normalizeStructuredInputMatchValue(value: unknown): string {
   return (
-    value
+    normalizeStructuredInputString(value)
       .trim()
       .replace(/^\$/u, "")
       .replace(/^app:\/\//iu, "")
@@ -86,4 +90,8 @@ function normalizeStructuredInputMatchValue(value: string): string {
       .replace(/[\s_-]+/gu, "")
       .toLowerCase() ?? ""
   );
+}
+
+function normalizeStructuredInputString(value: unknown): string {
+  return typeof value === "string" ? value : "";
 }

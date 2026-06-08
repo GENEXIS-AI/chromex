@@ -3,6 +3,7 @@ import { getUiStrings } from "./i18n.js";
 
 export type AttachmentMenuAction =
   | "add-files"
+  | "toggle-plan-mode"
   | "attach-tabs"
   | "attach-screenshot"
   | "saved-prompts";
@@ -10,9 +11,10 @@ export type AttachmentMenuAction =
 export interface AttachmentMenuItem {
   action: AttachmentMenuAction;
   label: string;
-  icon: "paperclip" | "video" | "scan" | "bookmark";
+  icon: "paperclip" | "list-checks" | "video" | "scan" | "bookmark";
   section: "primary";
   enabled: boolean;
+  kind?: "button" | "toggle";
   hasSubmenu?: boolean;
 }
 
@@ -25,6 +27,14 @@ export function listAttachmentMenuItems(locale: UiLocale): AttachmentMenuItem[] 
       icon: "paperclip",
       section: "primary",
       enabled: true,
+    },
+    {
+      action: "toggle-plan-mode",
+      label: locale === "ko" ? "플랜 모드" : "Plan mode",
+      icon: "list-checks",
+      section: "primary",
+      enabled: true,
+      kind: "toggle",
     },
     {
       action: "attach-tabs",

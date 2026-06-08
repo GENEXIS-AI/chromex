@@ -7,6 +7,8 @@ describe("inferUserFileAttachmentKind", () => {
     expect(inferUserFileAttachmentKind("mockup.png", "image/png")).toBe("image");
     expect(inferUserFileAttachmentKind("brief.md", "text/markdown")).toBe("text");
     expect(inferUserFileAttachmentKind("report.pdf", "application/pdf")).toBe("pdf");
+    expect(inferUserFileAttachmentKind("voice-note.mp3", "application/octet-stream")).toBe("audio");
+    expect(inferUserFileAttachmentKind("recording.wav", "")).toBe("audio");
     expect(
       inferUserFileAttachmentKind(
         "report.docx",

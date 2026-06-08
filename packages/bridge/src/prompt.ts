@@ -33,6 +33,7 @@ export function createCodexTurnInput(
       "When YouTube adapter data includes currentTimeSeconds, treat it as the exact playback position for current scene, current timestamp, or this moment requests.",
       "When attached visual evidence is present, inspect it as the visible screen or page image. Do not ask the user to upload a screenshot unless no page or visual context was provided.",
       "When the user asks to convert attached images into a PDF, create an actual local PDF file from the attached images in order, then answer with the PDF path and a renderable preview or markdown link when possible. Do not say the image files are unavailable when they are attached.",
+      "When the user asks to fact-check, verify, corroborate, search, or check whether a claim is true, use available web/search/read-only tools when current external evidence is needed. If no search-capable tool is exposed, say that plainly instead of silently returning no answer.",
       "If both open-tab context and current-page context are present, prefer current-page context for singular phrases like current page or visible screen. Use open tabs only when the user asks about multiple tabs.",
       "Use independent web searches, read-only lookups, and safe stateless tool calls in parallel when the Codex runtime supports it. Do not parallelize image edits, ordered browser actions, writes, or reference-dependent steps.",
       "If context is insufficient, say exactly what is missing in one concise sentence, then give the best answer possible from available context.",
@@ -105,6 +106,16 @@ export function createCodexTurnInput(
       `Selected Profile: ${params.routePlan.selectedProfileId}`,
       `Selected Model: ${params.routePlan.selectedModel || "(default)"}`,
       `Notes: ${params.routePlan.notes.length ? params.routePlan.notes.join(" ") : "(none)"}`,
+    );
+  }
+
+  const conversationContext = params.conversationContext?.trim().slice(-8_000);
+  if (conversationContext) {
+    sections.push(
+      "",
+      "PRIVATE CONVERSATION CONTEXT - DO NOT DISPLAY VERBATIM",
+      conversationContext,
+      "Use this only as hidden context for the current user request. Do not quote or mention this section unless the user asks for the underlying transcript.",
     );
   }
 

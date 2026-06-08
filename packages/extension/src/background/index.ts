@@ -41,7 +41,12 @@ import {
 } from "@codex-sidepanel/shared";
 
 import { createYouTubeCurrentMomentPromptResult } from "../youtube-current-moment.js";
-import { getCurrentPageSupport, isRestrictedBrowserUrl } from "../permission-plans.js";
+import {
+  getCurrentPageSupport,
+  getFileUrlAccessHelpMessage,
+  isFileUrl,
+} from "../permission-plans.js";
+import { normalizeSelectedTextContext } from "../page-selection-context.js";
 import {
   buildTabOriginPermission,
   isSitePermissionRequiredError,
@@ -52,7 +57,12 @@ import {
   BrowserPermissionRequiredError,
   isBrowserPermissionRequiredError,
 } from "../browser-permission-errors.js";
-import { classifyRuntimeMessageError, isRetryableRuntimeMessageError, toErrorMessage } from "../runtime-errors.js";
+import {
+  classifyRuntimeMessageError,
+  isRecoverableTabMessagingError,
+  isRetryableRuntimeMessageError,
+  toErrorMessage,
+} from "../runtime-errors.js";
 import {
   createConversation,
   clearConversations,
@@ -88,9 +98,12 @@ import { assertApiKeyLoginExplicitlyConfirmed } from "./api-key-login-guard.js";
 import { createUserProfileTemplate, updateUserProfileTemplate } from "../profile-templates.js";
 import { inferActionCardsForOpenTab } from "./site-suggestions.js";
 import {
+  isRecoverableModelCatalogAuthError,
+  recoverModelCatalogAfterAuthError,
   normalizeCatalogWorkspaceRoot,
   resolveCatalogModelState,
   resolveSelectedCatalogModel,
+  shouldRefreshCatalogAfterSettingsUpdate,
   shouldTriggerCatalogRefresh,
 } from "./catalog-refresh.js";
 import {
@@ -103,7 +116,12 @@ import {
   shouldSuppressDefaultCurrentPageContextForImageGeneration,
   shouldSuppressDefaultCurrentPageContextForImageWorkflow,
 } from "./image-workflow-routing.js";
-import { buildImageEditTimeoutMessage, IMAGE_EDIT_TIMEOUT_MS } from "./image-edit-timeout.js";
+import {
+  buildImageEditTimeoutMessage,
+  buildImageGenerationWorkflowTimeoutMessage,
+  IMAGE_EDIT_TIMEOUT_MS,
+  IMAGE_GENERATION_WORKFLOW_TIMEOUT_MS,
+} from "./image-edit-timeout.js";
 import { isRecoverableTurnSteerError } from "./turn-steer-recovery.js";
 import {
   createVisibleTabCaptureThrottle,
@@ -144,7 +162,9 @@ import type {
   PromptRequestPayload,
   RuntimeConfigSnapshot,
   SavedConversation,
+  SelectedPageTextContext,
   UiInitPayload,
+  UiSettingsSnapshotPayload,
 } from "../types.js";
 import type { SkillOption } from "../sidepanel/skills.js";
 import type { PromptActivityPhase } from "../sidepanel/prompt-activity.js";
@@ -176,6 +196,7 @@ const bridge = new NativeBridgeClient();
 const UI_BRIDGE_TIMEOUT_MS = 4000;
 const UI_CONTEXT_TIMEOUT_MS = 2500;
 const PLAYWRIGHT_RUNTIME_INSTALL_TIMEOUT_MS = 10 * 60 * 1000;
+const SELECTED_PAGE_TEXT_CONTEXT_MAX_CHARS = 12_000;
 const throttleVisibleTabCapture = createVisibleTabCaptureThrottle();
 const cancelledPromptClientRequestIds = new Set<string>();
 const OFFSCREEN_DOCUMENT_PATH = "offscreen.html";
@@ -184,6 +205,11 @@ let offscreenDocumentPromise: Promise<void> | null = null;
 const conversationRuntime = new ConversationRuntimeRegistry();
 type ReadableBrowserTab = chrome.tabs.Tab & { id: number; url: string; windowId: number };
 type PromptStatusEmitter = (phase: PromptActivityPhase, workflow?: PromptImageWorkflowKind) => void;
+type CurrentPageContextResult = {
+  envelope: PageContextEnvelope;
+  readStrategy: ReadStrategy;
+  actionCards: ActionCard[];
+};
 type PromptTurnResult = { threadId: string; turnId: string };
 type CompletedAssistantMessageEvent = {
   type: "message.completed";
@@ -212,9 +238,15 @@ type PendingImagePromptExtraction = {
 type PendingImageAttachment = {
   imageUrl: string;
   pageUrl?: string;
+  attachment?: UserFileAttachment;
   createdAt: number;
 };
 type PendingContextMenuAction = "summarize-page" | "summarize-video";
+type PendingContextMenuSelection = SelectedPageTextContext;
+type PendingDictationShortcut = {
+  requestId: string;
+  createdAt: number;
+};
 let activeAiControlTab: ReadableBrowserTab | null = null;
 const state = {
   selectedProfileId: "default",
@@ -272,6 +304,14 @@ bridge.subscribe((event) => {
     } else if (state.activeTurn?.turnId === completed.turnId) {
       state.activeTurn = null;
     }
+  } else if (bridgeEvent.type === "turn.failed") {
+    const failed = event as { threadId: string; turnId: string };
+    eventConversationId = conversationRuntime.completeTurn(failed.threadId, failed.turnId) ?? eventConversationId;
+    if (eventConversationId) {
+      syncCurrentRuntimeState(eventConversationId);
+    } else if (state.activeTurn?.turnId === failed.turnId) {
+      state.activeTurn = null;
+    }
   } else if (bridgeEvent.type === "turn.plan.updated") {
     const plan = (event as { plan: CodexTurnPlan }).plan;
     state.latestPlan = plan;
@@ -288,23 +328,69 @@ bridge.subscribe((event) => {
   broadcastBridgeEvent(annotateBridgeEventConversation(event, eventConversationId));
 });
 
-chrome.runtime.onInstalled.addListener(() => {
-  chrome.contextMenus.create({
+const CONTEXT_MENU_ITEMS: chrome.contextMenus.CreateProperties[] = [
+  {
     id: "ask-codex-page",
-    title: chrome.i18n.getMessage("contextAskPage"),
+    title: getContextMenuMessage("contextAskPage", "Ask Chromex about this page"),
     contexts: ["page"],
-  });
-  chrome.contextMenus.create({
+  },
+  {
+    id: "ask-codex-selection",
+    title: getContextMenuMessage("contextAskSelection", "Ask AI about selection"),
+    contexts: ["selection"],
+  },
+  {
     id: "edit-codex-image",
-    title: chrome.i18n.getMessage("contextEditImage"),
+    title: getContextMenuMessage("contextEditImage", "Edit this image with Chromex"),
     contexts: ["image"],
-  });
-  chrome.contextMenus.create({
+  },
+  {
     id: "summarize-codex-youtube",
-    title: chrome.i18n.getMessage("contextSummarizeYoutube"),
+    title: getContextMenuMessage("contextSummarizeYoutube", "Summarize this YouTube video"),
     contexts: ["page"],
     documentUrlPatterns: ["*://*.youtube.com/*", "*://youtu.be/*"],
+  },
+];
+
+function getContextMenuMessage(key: string, fallback: string): string {
+  return chrome.i18n.getMessage(key) || fallback;
+}
+
+function consumeContextMenuRuntimeError(action: string): void {
+  const message = chrome.runtime.lastError?.message;
+  if (message) {
+    console.warn(`Chromex context menu ${action} failed: ${message}`);
+  }
+}
+
+function safeCreateContextMenu(properties: chrome.contextMenus.CreateProperties): void {
+  const id = typeof properties.id === "string" ? properties.id : "";
+  const createMenuItem = () => {
+    chrome.contextMenus.create(properties, () => {
+      consumeContextMenuRuntimeError(`create ${properties.id ?? ""}`.trim());
+    });
+  };
+  if (!id) {
+    createMenuItem();
+    return;
+  }
+  chrome.contextMenus.remove(id, () => {
+    consumeContextMenuRuntimeError(`remove ${id}`);
+    createMenuItem();
   });
+}
+
+function registerContextMenus(): void {
+  chrome.contextMenus.removeAll(() => {
+    consumeContextMenuRuntimeError("reset");
+    for (const item of CONTEXT_MENU_ITEMS) {
+      safeCreateContextMenu(item);
+    }
+  });
+}
+
+chrome.runtime.onInstalled.addListener(() => {
+  registerContextMenus();
   void chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => undefined);
 });
 
@@ -350,6 +436,20 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
     console.warn("Failed to open the Chromex side panel from a context menu action.", error);
   });
 
+  if (info.menuItemId === "ask-codex-selection") {
+    const selectionContext = await createPendingSelectionContextWithPageSnapshot(info, tab);
+    if (selectionContext) {
+      await chrome.storage.session.set({
+        pendingSelectionContext: selectionContext,
+      });
+      await chrome.storage.session.remove(["pendingAction", "pendingImageAttachment"]);
+    }
+    await sidePanelOpenPromise;
+    void broadcastActiveTabSnapshot();
+    void chrome.runtime.sendMessage({ type: "ui.context-menu-action.pending" }).catch(() => undefined);
+    return;
+  }
+
   if (info.menuItemId === "edit-codex-image" && info.srcUrl) {
     await chrome.storage.session.set({
       pendingImageAttachment: {
@@ -358,7 +458,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
         createdAt: Date.now(),
       },
     });
-    await chrome.storage.session.remove("pendingAction");
+    await chrome.storage.session.remove(["pendingAction", "pendingSelectionContext"]);
     await sidePanelOpenPromise;
     void broadcastActiveTabSnapshot();
     void chrome.runtime.sendMessage({ type: "ui.image-attachment.pending" }).catch(() => undefined);
@@ -375,7 +475,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   await chrome.storage.session.set({
     pendingAction: pendingAction,
   });
-  await chrome.storage.session.remove("pendingImageAttachment");
+  await chrome.storage.session.remove(["pendingImageAttachment", "pendingSelectionContext"]);
   await sidePanelOpenPromise;
   void broadcastActiveTabSnapshot();
   void chrome.runtime.sendMessage({ type: "ui.context-menu-action.pending" }).catch(() => undefined);
@@ -419,6 +519,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           sendResponse(expectedPermissionResponse);
           return;
         }
+        if (shouldLogBackgroundMessageError(error)) {
+          console.error("background message handling failed", message?.type, error);
+        }
+        sendResponse({
+          error: error instanceof Error ? error.message : "Unknown background failure",
+        });
+      });
+    return true;
+  }
+
+  if (message.type === "ui.settings.snapshot") {
+    void loadStoredUiSettingsSnapshot()
+      .then(sendResponse)
+      .catch((error) => {
         if (shouldLogBackgroundMessageError(error)) {
           console.error("background message handling failed", message?.type, error);
         }
@@ -649,8 +763,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         case "image.attachment.pending.take":
           sendResponse(await takePendingImageAttachment());
           return;
+        case "context.menu.selection.pending.take":
+          sendResponse(await takePendingContextMenuSelection());
+          return;
         case "context.menu.pending.take":
           sendResponse(await takePendingContextMenuAction());
+          return;
+        case "dictation.shortcut.pending.take":
+          sendResponse(await takePendingDictationShortcut());
           return;
         case "prompt.send":
           sendResponse(await handlePromptSend(message.payload));
@@ -663,6 +783,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           return;
         case "turn.steer":
           sendResponse(await handleTurnSteer(message.payload));
+          return;
+        case "plan.user_input.respond":
+          sendResponse(await bridge.request("plan.user_input.respond", message.payload ?? {}));
           return;
         case "turn.interrupt":
           sendResponse(await handleTurnInterrupt(message.threadId, message.turnId));
@@ -712,6 +835,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         case "image.asset.folder.open":
           sendResponse(await bridge.request("image.asset.folder.open", { folder: message.folder }));
           return;
+        case "local.file.reveal":
+          sendResponse(await bridge.request("local.file.reveal", { path: message.path }));
+          return;
         case "diagnostics.log.folder":
           sendResponse(await bridge.request("diagnostics.log.folder"));
           return;
@@ -731,9 +857,51 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             }),
           );
           return;
+        case "dictation.transcription.start":
+          sendResponse(
+            await bridge.request<{ threadId?: string }>(
+              "dictation.transcription.start",
+              buildVoiceSessionStartParams(message, undefined),
+            ),
+          );
+          return;
         case "voice.session.stop":
           sendResponse(
             await bridge.request("voice.session.stop", buildVoiceSessionStopParams(message, state.threadId)),
+          );
+          return;
+        case "dictation.transcription.stop":
+          sendResponse(
+            await bridge.request("dictation.transcription.stop", buildVoiceSessionStopParams(message, undefined)),
+          );
+          return;
+        case "translation.api_key.save":
+          assertApiKeyLoginExplicitlyConfirmed({
+            loginType: "apiKey",
+            apiKey: message.apiKey,
+            confirmed: message.confirmed,
+          });
+          sendResponse(
+            await bridge.request("translation.api_key.save", {
+              apiKey: typeof message.apiKey === "string" ? message.apiKey : "",
+            }),
+          );
+          return;
+        case "translation.api_key.clear":
+          sendResponse(await bridge.request("translation.api_key.clear"));
+          if (state.accountStatus) {
+            state.accountStatus = {
+              ...state.accountStatus,
+              openAiApiKeyConfigured: false,
+            };
+          }
+          return;
+        case "translation.client_secret.create":
+          sendResponse(
+            await bridge.request("translation.client_secret.create", {
+              targetLanguage: typeof message.targetLanguage === "string" ? message.targetLanguage : undefined,
+              ttlSeconds: typeof message.ttlSeconds === "number" ? message.ttlSeconds : undefined,
+            }),
           );
           return;
         case "voice.context.snapshot":
@@ -750,6 +918,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         case "voice.session.append_audio":
           sendResponse(
             await bridge.request("voice.session.append_audio", {
+              threadId: typeof message.threadId === "string" ? message.threadId : undefined,
+              audio: message.audio,
+            }),
+          );
+          return;
+        case "dictation.transcription.append_audio":
+          sendResponse(
+            await bridge.request("dictation.transcription.append_audio", {
               threadId: typeof message.threadId === "string" ? message.threadId : undefined,
               audio: message.audio,
             }),
@@ -784,6 +960,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         case "page.image-prompt-hover.install":
           sendResponse(await installImagePromptHoverForTab(await getActiveTab().catch(() => null)));
           return;
+        case "page.image-attachment.add":
+          sendResponse(await handlePageImageAttachmentAdd(message, sender.tab));
+          return;
         case "page.image-prompt.extract":
           sendResponse(await handlePageImagePromptExtraction(message, sender.tab));
           return;
@@ -800,6 +979,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               sendPageDomPerformWithIndicator(message.steps),
             ),
           );
+          return;
+        case "page.dictation.insert":
+          sendResponse(
+            await guardAndRun("page.dom.perform", Boolean(message.confirmed), () =>
+              sendMessageToActiveTab({ type: "page.dictation.insert", text: String(message.text ?? "") }),
+            ),
+          );
+          return;
+        case "ui.page-selection.changed":
+          sendResponse({ ok: true });
           return;
         default:
           sendResponse({ error: `Unknown message type: ${message.type as string}` });
@@ -835,7 +1024,37 @@ async function handleCommand(command: string): Promise<void> {
 
   if (command === "open-popup-chat") {
     await popOutChat();
+    return;
   }
+
+  if (command === "start-dictation") {
+    await startDictationFromCommand(activeTab);
+  }
+}
+
+async function startDictationFromCommand(activeTab: chrome.tabs.Tab | null): Promise<void> {
+  const request = createPendingDictationShortcut();
+  let sidePanelOpenPromise: Promise<void> = Promise.resolve();
+  if (activeTab?.windowId) {
+    state.browserWindowId = activeTab.windowId;
+    sidePanelOpenPromise = chrome.sidePanel.open({ windowId: activeTab.windowId }).catch(() => undefined);
+  }
+
+  await chrome.storage.session.set({ pendingDictationShortcut: request });
+  await sidePanelOpenPromise;
+  void chrome.runtime
+    .sendMessage({
+      type: "ui.dictation.shortcut",
+      requestId: request.requestId,
+    })
+    .catch(() => undefined);
+}
+
+function createPendingDictationShortcut(): PendingDictationShortcut {
+  return {
+    requestId: `dictation-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    createdAt: Date.now(),
+  };
 }
 
 function listAvailableProfiles(): ProfileTemplate[] {
@@ -868,6 +1087,42 @@ function normalizeSelectedProfileId(profileId: string | null | undefined): strin
   return availableProfiles.some((profile) => profile.id === "default")
     ? "default"
     : (availableProfiles[0]?.id ?? "default");
+}
+
+async function loadStoredUiSettingsSnapshot(): Promise<UiSettingsSnapshotPayload> {
+  const [
+    settings,
+    customProfiles,
+    deletedProfileIds,
+    selectedProfileId,
+    selectedModel,
+    selectedReasoningEffort,
+    selectedServiceTier,
+  ] = await Promise.all([
+    getStoredSettings(),
+    listCustomProfiles(),
+    listDeletedProfileIds(),
+    getSelectedProfileId(),
+    getSelectedModel(),
+    getSelectedReasoningEffort(),
+    getSelectedServiceTier(),
+  ]);
+
+  state.customProfiles = customProfiles;
+  state.deletedProfileIds = deletedProfileIds;
+  state.selectedProfileId = normalizeSelectedProfileId(selectedProfileId);
+  state.selectedModel = selectedModel;
+  state.selectedReasoningEffort = selectedReasoningEffort;
+  state.selectedServiceTier = selectedServiceTier;
+
+  return {
+    settings,
+    profiles: listAvailableProfiles(),
+    selectedProfileId: state.selectedProfileId,
+    selectedModel: state.selectedModel,
+    selectedReasoningEffort: state.selectedReasoningEffort,
+    selectedServiceTier: state.selectedServiceTier,
+  };
 }
 
 async function ensurePromptConversationRuntime(payload: PromptRequestPayload) {
@@ -1006,14 +1261,9 @@ async function buildUiInitPayload(
   state.imageAssetFolder = imageAssetFolder;
   state.diagnosticLogFolder = diagnosticLogFolder;
 
-  await softTimeout(
-    triggerCatalogRefresh(workspaceHarness.workspaceRoot || undefined, {
-      force: options.forceCatalog || state.modelCatalogState !== "ready" || state.models.length === 0,
-    }),
-    UI_BRIDGE_TIMEOUT_MS,
-    undefined,
-    "catalog.refresh(ui.init)",
-  );
+  void triggerCatalogRefresh(workspaceHarness.workspaceRoot || undefined, {
+    force: Boolean(options.forceCatalog),
+  });
 
   const activeTab = await getActiveTab().catch(() => null);
   const currentPageSupport = getCurrentPageSupport(activeTab?.url);
@@ -1166,6 +1416,28 @@ async function handlePromptSend(payload: PromptRequestPayload) {
   if (cancellationAfterBuild) {
     return cancellationAfterBuild;
   }
+  const routeIntent = prepared.agenticRoutePlan.intent;
+  const planClarificationQuestion =
+    payload.planMode && routeIntent?.needsClarification
+      ? routeIntent.clarificationQuestion?.trim()
+      : "";
+  if (planClarificationQuestion) {
+    void recordDiagnostic("extension.plan_mode.local_clarification", {
+      clientRequestId: payload.clientRequestId ?? null,
+      conversationId,
+      question: planClarificationQuestion,
+      summary: routeIntent?.summary,
+    });
+    return {
+      planClarification: {
+        question: planClarificationQuestion,
+        summary: routeIntent?.summary,
+      },
+      actionCards: prepared.actionCards,
+      settings,
+      currentConversationId: conversationId,
+    };
+  }
 
   if (payload.resetThread) {
     conversationRuntime.resetConversation(conversationId);
@@ -1264,15 +1536,19 @@ async function handlePromptSend(payload: PromptRequestPayload) {
     clientRequestId: payload.clientRequestId,
     profile: prepared.profile,
     message: payload.message,
+    conversationContext: payload.conversationContext ?? payload.contextHint ?? "",
     contexts: prepared.contexts,
     fileAttachments: prepared.fileAttachments,
     routePlan: prepared.routePlan,
     structuredInputs,
     threadId,
+    ...(payload.planMode ? { planMode: true } : {}),
     ...(cwd ? { cwd } : {}),
     ...(prepared.selectedModel ? { model: prepared.selectedModel } : {}),
     ...(payload.reasoningEffort ? { reasoningEffort: payload.reasoningEffort } : {}),
     ...(payload.serviceTier ? { serviceTier: payload.serviceTier } : {}),
+    ...(payload.useGoal ? { useGoal: true } : {}),
+    ...(payload.goalObjective?.trim() ? { goalObjective: payload.goalObjective.trim() } : {}),
   });
   const result = promptTurn.result;
   const cancellationAfterPrompt = await getPromptCancellationResponse(payload);
@@ -1301,6 +1577,7 @@ async function handlePromptSend(payload: PromptRequestPayload) {
 
   return {
     ...result,
+    assistantText: promptTurn.assistantText,
     actionCards: prepared.actionCards,
     settings,
     currentConversationId: conversationId,
@@ -1398,6 +1675,7 @@ async function handleTurnSteer(payload: PromptRequestPayload) {
       clientRequestId: payload.clientRequestId,
       profile: prepared.profile,
       message: payload.message,
+      conversationContext: payload.conversationContext ?? payload.contextHint ?? "",
       contexts: prepared.contexts,
       fileAttachments: prepared.fileAttachments,
       routePlan: prepared.routePlan,
@@ -1552,15 +1830,25 @@ async function buildPromptRequest(
   }
   const routePlan = routePlanToPromptRoutingPlan(agenticRoutePlan, routeInput);
   const currentPageSupport = getCurrentPageSupport(activeTab?.url);
-  const requestedContextRequests = payload.suppressPageContext
-    ? filterSuppressedPageContextRequests(agenticRoutePlan.contextRequests)
+  const selectedTextContext = normalizeSelectedPageTextContext(payload.selectedTextContext, activeTab);
+  const hasExplicitSelectionContext = payload.attachments.includes("selection") && Boolean(selectedTextContext);
+  const selectionOnlyContextRequested =
+    hasExplicitSelectionContext &&
+    !payload.attachments.includes("current-page") &&
+    !payload.attachments.includes("image");
+  const routeContextRequests = payload.suppressPageContext
+    ? filterSuppressedPageContextRequests(agenticRoutePlan.contextRequests, payload.attachments)
     : agenticRoutePlan.contextRequests;
+  const requestedContextRequests = selectionOnlyContextRequested
+    ? routeContextRequests.filter((request) => request.source !== "current-page" && request.source !== "image")
+    : routeContextRequests;
   const effectiveContextRequests = ensureDefaultCurrentPageContextRequests(
     requestedContextRequests,
     currentPageSupport,
     {
       suppressDefault:
         payload.suppressPageContext ||
+        selectionOnlyContextRequested ||
         shouldSuppressDefaultCurrentPageContextForImageWorkflow(agenticRoutePlan) ||
         shouldSuppressDefaultCurrentPageContextForImageGeneration(agenticRoutePlan) ||
         shouldSuppressDefaultCurrentPageContextForHistory(routePlan, requestedContextRequests),
@@ -1582,7 +1870,7 @@ async function buildPromptRequest(
   const profile = getAvailableProfileTemplate(routePlan.selectedProfileId);
   const contexts: PageContextEnvelope[] = [];
   const actionCards: ActionCard[] = [];
-  const needsCurrentContext = pageAttachments.length > 0;
+  const needsCurrentContext = pageAttachments.some((attachment) => attachment !== "selection" || !selectedTextContext);
   const deferPageContextForImageWorkflow = shouldDeferPageContextCollectionForImageWorkflow(agenticRoutePlan);
   if (needsCurrentContext && !deferPageContextForImageWorkflow) {
     emitStatus("collecting-context");
@@ -1605,9 +1893,14 @@ async function buildPromptRequest(
   if (effectiveAttachments.includes("selection") && currentContext?.envelope.selectionText) {
     contexts.push({
       ...currentContext.envelope,
-      domSummary: `Selected text focus: ${currentContext.envelope.selectionText}`,
+      domSummary: createSelectionFocusedDomSummary(
+        currentContext.envelope.selectionText,
+        currentContext.envelope.domSummary,
+      ),
       visionAssets: [],
     });
+  } else if (effectiveAttachments.includes("selection") && selectedTextContext) {
+    contexts.push(createSelectionContextEnvelope(selectedTextContext));
   }
 
   if (effectiveAttachments.includes("image") && currentContext?.envelope.visionAssets.length) {
@@ -1914,8 +2207,8 @@ async function maybeHandleAgenticImageGenerationWorkflow(
       model: "gpt-image-2",
     },
     {
-      timeoutMs: IMAGE_EDIT_TIMEOUT_MS,
-      timeoutMessage: await buildLocalizedImageEditTimeoutMessage(),
+      timeoutMs: IMAGE_GENERATION_WORKFLOW_TIMEOUT_MS,
+      timeoutMessage: await buildLocalizedImageGenerationWorkflowTimeoutMessage(),
     },
   );
   emitStatus("rendering-image-preview", "generated-image");
@@ -1985,6 +2278,10 @@ function buildImageWorkflowAssistantText(locale: string, target: "page-image" | 
 
 async function buildLocalizedImageEditTimeoutMessage(): Promise<string> {
   return buildImageEditTimeoutMessage(getUiStrings(await getActiveUiLocale()).errors.imageEditTimeout);
+}
+
+async function buildLocalizedImageGenerationWorkflowTimeoutMessage(): Promise<string> {
+  return buildImageGenerationWorkflowTimeoutMessage(await getActiveUiLocale());
 }
 
 async function requestPromptSendWithAssistantCapture(
@@ -2328,8 +2625,8 @@ async function handleInfographicGenerate(
       model: "gpt-image-2",
     },
     {
-      timeoutMs: IMAGE_EDIT_TIMEOUT_MS,
-      timeoutMessage: await buildLocalizedImageEditTimeoutMessage(),
+      timeoutMs: IMAGE_GENERATION_WORKFLOW_TIMEOUT_MS,
+      timeoutMessage: await buildLocalizedImageGenerationWorkflowTimeoutMessage(),
     },
   );
 
@@ -2377,8 +2674,8 @@ async function handleSlideDeckImageGenerate(
       model: "gpt-image-2",
     },
     {
-      timeoutMs: IMAGE_EDIT_TIMEOUT_MS,
-      timeoutMessage: await buildLocalizedImageEditTimeoutMessage(),
+      timeoutMs: IMAGE_GENERATION_WORKFLOW_TIMEOUT_MS,
+      timeoutMessage: await buildLocalizedImageGenerationWorkflowTimeoutMessage(),
     },
   );
 
@@ -2399,7 +2696,7 @@ function normalizeImageGeneratePreviewRefs(previewRefs: string[] | undefined, pr
 }
 
 async function collectInfographicPageContext() {
-  let domContext: Awaited<ReturnType<typeof collectCurrentPageContext>>;
+  let domContext: CurrentPageContextResult;
   try {
     domContext = await collectCurrentPageContext("dom");
   } catch (error) {
@@ -2439,8 +2736,8 @@ function shouldFallbackToVisionForInfographic(envelope: PageContextEnvelope): bo
 }
 
 function mergeInfographicContextFallback(
-  domContext: Awaited<ReturnType<typeof collectCurrentPageContext>>,
-  hybridContext: Awaited<ReturnType<typeof collectCurrentPageContext>>,
+  domContext: CurrentPageContextResult,
+  hybridContext: CurrentPageContextResult,
 ) {
   return {
     envelope: {
@@ -2463,7 +2760,7 @@ function mergeInfographicContextFallback(
 }
 
 async function collectVisibleScreenOnlyInfographicContext(
-  baseContext: Awaited<ReturnType<typeof collectCurrentPageContext>> | null,
+  baseContext: CurrentPageContextResult | null,
 ) {
   const activeTab = await getActiveTab();
   assertPageReadable(activeTab.url);
@@ -2506,7 +2803,7 @@ async function collectVisibleScreenOnlyInfographicContext(
 function createMinimalVisibleScreenContext(
   activeTab: chrome.tabs.Tab & { url: string },
   locale = "",
-): Awaited<ReturnType<typeof collectCurrentPageContext>> {
+): CurrentPageContextResult {
   return {
     envelope: {
       metadata: {
@@ -2612,7 +2909,7 @@ async function handleYouTubeCurrentMomentPrompt() {
   });
 }
 
-async function collectCurrentPageContext(readOverride: ReadStrategy | "auto") {
+async function collectCurrentPageContext(readOverride: ReadStrategy | "auto"): Promise<CurrentPageContextResult> {
   const activeTab = await getActiveTab();
   const locale = await getActiveUiLocale();
 
@@ -2623,17 +2920,11 @@ async function collectCurrentPageContext(readOverride: ReadStrategy | "auto") {
       type: "page.collect",
     })) as ContentProbeResult;
   } catch (error) {
-    const fallback =
-      createPaperPdfFallbackContext(activeTab, locale) ??
-      createGenericSiteFallbackContext(activeTab, locale);
-    if (!fallback) {
-      throw error;
-    }
-    void recordDiagnostic("extension.pdf_page_context.fallback", {
+    void recordDiagnostic("extension.page_context.dom_failed", {
       url: activeTab.url,
       error: toErrorMessage(error),
     });
-    return fallback;
+    return collectVisibleScreenFallbackContext(activeTab, locale, error);
   }
 
   const adapterMatched = Boolean(probe.rawCapture.adapterPayload);
@@ -2672,6 +2963,53 @@ async function collectCurrentPageContext(readOverride: ReadStrategy | "auto") {
   });
 
   return { envelope, readStrategy, actionCards };
+}
+
+async function collectVisibleScreenFallbackContext(
+  activeTab: chrome.tabs.Tab & { id: number; url: string; windowId: number },
+  locale: string,
+  sourceError: unknown,
+): Promise<CurrentPageContextResult> {
+  const fallbackContext =
+    createPaperPdfFallbackContext(activeTab, locale) ??
+    createGenericSiteFallbackContext(activeTab, locale) ??
+    createMinimalVisibleScreenContext(activeTab, locale);
+  try {
+    const screenshotRef = await captureVisibleTab(activeTab);
+    const adapterPayload = fallbackContext.envelope.adapterPayload;
+    return {
+      envelope: {
+        ...fallbackContext.envelope,
+        domSummary:
+          fallbackContext.envelope.domSummary ||
+          "DOM text was not available. Use the attached visible-screen screenshot as the primary source context.",
+        visionAssets: [
+          {
+            ref: screenshotRef,
+            kind: "screenshot" as const,
+          },
+          ...fallbackContext.envelope.visionAssets,
+        ],
+      },
+      readStrategy: "vision" as const,
+      actionCards: fallbackContext.actionCards.length
+        ? fallbackContext.actionCards
+        : inferActionCards({
+            readStrategy: "vision",
+            adapterActions: [],
+            availableSources: ["current-page"],
+            adapterPayload,
+            locale,
+          }),
+    };
+  } catch (captureError) {
+    void recordDiagnostic("extension.page_context.vision_fallback_failed", {
+      url: activeTab.url,
+      sourceError: toErrorMessage(sourceError),
+      captureError: toErrorMessage(captureError),
+    });
+    return fallbackContext;
+  }
 }
 
 async function collectAutomaticDocumentAttachments(
@@ -2784,12 +3122,16 @@ async function installImagePromptHoverForTab(
   if (!tab?.id || !tab.url || !getCurrentPageSupport(tab.url).available) {
     return { ok: true, installed: false };
   }
+  const settings = await getStoredSettings();
+  if (!settings.imagePromptHoverButtonEnabled) {
+    return { ok: true, installed: false };
+  }
   try {
     await sendMessageToTab(tab as chrome.tabs.Tab & { id: number; url: string }, {
       type: "page.image-prompt-hover.install",
     });
   } catch (error) {
-    if (isRetryableRuntimeMessageError(error)) {
+    if (isRecoverableTabMessagingError(error)) {
       void recordDiagnostic("extension.image_prompt.hover_install.transient_disconnect", {
         tabId: tab.id,
         url: tab.url,
@@ -2978,6 +3320,49 @@ async function handlePageImagePromptExtraction(
   return { ok: true };
 }
 
+async function handlePageImageAttachmentAdd(
+  message: Record<string, unknown>,
+  tab: chrome.tabs.Tab | undefined,
+): Promise<{ ok: true } | { error: string }> {
+  const extraction = normalizePendingImagePromptExtraction(message);
+  if (!extraction) {
+    return { error: "No online image URL was provided." };
+  }
+
+  let sidePanelOpenPromise: Promise<void> | null = null;
+  if (tab?.windowId) {
+    state.browserWindowId = tab.windowId;
+    sidePanelOpenPromise = chrome.sidePanel.open({ windowId: tab.windowId }).catch(() => undefined);
+  }
+
+  const attachment = await createOnlineImagePromptAttachment(extraction, tab);
+  if (!attachment) {
+    const error = buildOnlineImagePromptAttachmentError(extraction);
+    await chrome.storage.session.set({ pendingImagePromptError: error });
+    await sidePanelOpenPromise;
+    await chrome.runtime
+      .sendMessage({
+        type: "ui.image-prompt.error",
+        error,
+      })
+      .catch(() => undefined);
+    return { error: "Chromex could not read this page image for attachment." };
+  }
+
+  await chrome.storage.session.set({
+    pendingImageAttachment: {
+      imageUrl: extraction.imageUrl,
+      ...(tab?.url || extraction.pageUrl ? { pageUrl: extraction.pageUrl ?? tab?.url } : {}),
+      attachment,
+      createdAt: Date.now(),
+    },
+  });
+  await chrome.storage.session.remove(["pendingAction", "pendingSelectionContext"]);
+  await sidePanelOpenPromise;
+  await chrome.runtime.sendMessage({ type: "ui.image-attachment.pending" }).catch(() => undefined);
+  return { ok: true };
+}
+
 function buildOnlineImagePromptAttachmentError(
   extraction: PendingImagePromptExtraction,
 ): { code: "attachment-unavailable"; imageUrl: string } {
@@ -3094,6 +3479,13 @@ async function takePendingImageAttachment(): Promise<{ attachment?: PendingImage
   return attachment ? { attachment } : {};
 }
 
+async function takePendingContextMenuSelection(): Promise<{ selection?: PendingContextMenuSelection }> {
+  const stored = await chrome.storage.session.get("pendingSelectionContext");
+  await chrome.storage.session.remove("pendingSelectionContext");
+  const selection = normalizePendingContextMenuSelection(stored.pendingSelectionContext);
+  return selection ? { selection } : {};
+}
+
 async function takePendingContextMenuAction(): Promise<{ action?: PendingContextMenuAction }> {
   const stored = await chrome.storage.session.get("pendingAction");
   await chrome.storage.session.remove("pendingAction");
@@ -3101,8 +3493,171 @@ async function takePendingContextMenuAction(): Promise<{ action?: PendingContext
   return action ? { action } : {};
 }
 
+async function takePendingDictationShortcut(): Promise<{ shortcut?: PendingDictationShortcut }> {
+  const stored = await chrome.storage.session.get("pendingDictationShortcut");
+  await chrome.storage.session.remove("pendingDictationShortcut");
+  const shortcut = normalizePendingDictationShortcut(stored.pendingDictationShortcut);
+  return shortcut ? { shortcut } : {};
+}
+
 function normalizePendingContextMenuAction(value: unknown): PendingContextMenuAction | null {
   return value === "summarize-page" || value === "summarize-video" ? value : null;
+}
+
+function createPendingSelectionContext(
+  info: chrome.contextMenus.OnClickData,
+  tab?: chrome.tabs.Tab,
+): PendingContextMenuSelection | null {
+  const text = normalizePendingSelectionText(info.selectionText);
+  const url = normalizePendingSelectionUrl(info.pageUrl) || normalizePendingSelectionUrl(tab?.url);
+  if (!text || !url) {
+    return null;
+  }
+  const domain = getPendingSelectionDomain(url);
+  const title = normalizePendingSelectionLabel(tab?.title) || domain || "Selected page text";
+  const favIconUrl = normalizePendingSelectionLabel(tab?.favIconUrl);
+  return {
+    text,
+    url,
+    title,
+    domain,
+    ...(typeof tab?.id === "number" ? { tabId: tab.id } : {}),
+    ...(favIconUrl ? { favIconUrl } : {}),
+  };
+}
+
+async function createPendingSelectionContextWithPageSnapshot(
+  info: chrome.contextMenus.OnClickData,
+  tab?: chrome.tabs.Tab,
+): Promise<PendingContextMenuSelection | null> {
+  const context = createPendingSelectionContext(info, tab);
+  const readableTab = getReadableSelectionSnapshotTab(tab);
+  if (!context || !readableTab) {
+    return context;
+  }
+
+  const snapshot = await sendMessageToTab(readableTab, { type: "page.selection.snapshot" }).catch(() => null);
+  if (!snapshot || typeof snapshot !== "object") {
+    return context;
+  }
+  return mergePendingSelectionSnapshotContext(context, snapshot as Record<string, unknown>);
+}
+
+function normalizePendingContextMenuSelection(value: unknown): PendingContextMenuSelection | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  const text = normalizePendingSelectionText(record.text);
+  const url = normalizePendingSelectionUrl(record.url);
+  if (!text || !url) {
+    return null;
+  }
+  const domain = normalizePendingSelectionLabel(record.domain) || getPendingSelectionDomain(url);
+  const title = normalizePendingSelectionLabel(record.title) || domain || "Selected page text";
+  const tabId = Number(record.tabId);
+  const favIconUrl = normalizePendingSelectionLabel(record.favIconUrl);
+  const contextText = normalizePendingSelectionContextText(record.contextText);
+  return {
+    text,
+    ...(contextText ? { contextText } : {}),
+    url,
+    title,
+    domain,
+    ...(Number.isFinite(tabId) ? { tabId } : {}),
+    ...(favIconUrl ? { favIconUrl } : {}),
+  };
+}
+
+function normalizePendingSelectionText(value: unknown): string {
+  return typeof value === "string"
+    ? value.replace(/\s+/gu, " ").trim().slice(0, SELECTED_PAGE_TEXT_CONTEXT_MAX_CHARS)
+    : "";
+}
+
+function normalizePendingSelectionContextText(value: unknown): string {
+  return normalizeSelectedTextContext(value, SELECTED_PAGE_TEXT_CONTEXT_MAX_CHARS);
+}
+
+function getReadableSelectionSnapshotTab(
+  tab?: chrome.tabs.Tab,
+): (chrome.tabs.Tab & { id: number; url: string }) | null {
+  return typeof tab?.id === "number" && typeof tab.url === "string" && tab.url.trim()
+    ? (tab as chrome.tabs.Tab & { id: number; url: string })
+    : null;
+}
+
+function mergePendingSelectionSnapshotContext(
+  context: PendingContextMenuSelection,
+  snapshot: Record<string, unknown>,
+): PendingContextMenuSelection {
+  const snapshotText = normalizePendingSelectionText(snapshot.text);
+  const contextText = normalizePendingSelectionContextText(snapshot.contextText);
+  if (!contextText || !doesSelectionSnapshotMatchContext(context.text, snapshotText, contextText)) {
+    return context;
+  }
+  return {
+    ...context,
+    contextText,
+  };
+}
+
+function doesSelectionSnapshotMatchContext(
+  contextText: string,
+  snapshotText: string,
+  snapshotContextText: string,
+): boolean {
+  if (!snapshotText) {
+    return false;
+  }
+  return (
+    snapshotText === contextText ||
+    snapshotText.includes(contextText) ||
+    contextText.includes(snapshotText) ||
+    snapshotContextText.includes(contextText)
+  );
+}
+
+function normalizePendingSelectionUrl(value: unknown): string {
+  if (typeof value !== "string") {
+    return "";
+  }
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return "";
+  }
+  try {
+    return new URL(trimmed).toString();
+  } catch {
+    return "";
+  }
+}
+
+function normalizePendingSelectionLabel(value: unknown): string {
+  return typeof value === "string" ? value.replace(/\s+/gu, " ").trim().slice(0, 240) : "";
+}
+
+function getPendingSelectionDomain(url: string): string {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return "";
+  }
+}
+
+function normalizePendingDictationShortcut(value: unknown): PendingDictationShortcut | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const input = value as Record<string, unknown>;
+  const requestId = typeof input.requestId === "string" ? input.requestId.trim() : "";
+  if (!requestId) {
+    return null;
+  }
+  return {
+    requestId,
+    createdAt: Math.max(0, Number(input.createdAt) || Date.now()),
+  };
 }
 
 function normalizePendingImageAttachment(value: unknown): PendingImageAttachment | null {
@@ -3111,12 +3666,14 @@ function normalizePendingImageAttachment(value: unknown): PendingImageAttachment
   }
   const input = value as Record<string, unknown>;
   const imageUrl = typeof input.imageUrl === "string" ? input.imageUrl.trim() : "";
-  if (!isFetchableImagePromptSource(imageUrl)) {
+  const attachment = normalizePromptImageAttachment(input.attachment);
+  if (!attachment && !isFetchableImagePromptSource(imageUrl)) {
     return null;
   }
   return {
-    imageUrl,
+    imageUrl: imageUrl || attachment?.sourceUrl || "",
     createdAt: Math.max(0, Number(input.createdAt) || Date.now()),
+    ...(attachment ? { attachment } : {}),
     ...(typeof input.pageUrl === "string" && input.pageUrl.trim() ? { pageUrl: input.pageUrl.trim() } : {}),
   };
 }
@@ -3256,6 +3813,99 @@ function tabToEnvelope(tab: OpenTabContext): PageContextEnvelope {
       userConsentedToHistory: false,
     },
   };
+}
+
+function normalizeSelectedPageTextContext(
+  context: PromptRequestPayload["selectedTextContext"],
+  activeTab: chrome.tabs.Tab | null,
+): SelectedPageTextContext | null {
+  if (!context || typeof context !== "object") {
+    return null;
+  }
+  const text = normalizeSelectedContextText(context.text);
+  if (!text) {
+    return null;
+  }
+  const url = normalizeSelectedContextUrl(context.url) || normalizeSelectedContextUrl(activeTab?.url);
+  if (!url) {
+    return null;
+  }
+  const activeTabUrl = normalizeSelectedContextUrl(activeTab?.url);
+  if (activeTabUrl && activeTabUrl !== url) {
+    return null;
+  }
+  const domain = context.domain?.trim() || parseTabDomain(url);
+  const title = context.title?.trim() || activeTab?.title?.trim() || domain || "Selected page text";
+  const tabId = Number(context.tabId);
+  const activeTabId = Number(activeTab?.id);
+  if (Number.isFinite(tabId) && Number.isFinite(activeTabId) && tabId !== activeTabId) {
+    return null;
+  }
+  const favIconUrl = context.favIconUrl?.trim() || activeTab?.favIconUrl?.trim() || "";
+  const contextText = normalizeSelectedContextFullText(context.contextText);
+  return {
+    text,
+    ...(contextText ? { contextText } : {}),
+    url,
+    title,
+    domain,
+    ...(Number.isFinite(tabId) ? { tabId } : Number.isFinite(activeTabId) ? { tabId: activeTabId } : {}),
+    ...(favIconUrl ? { favIconUrl } : {}),
+  };
+}
+
+function createSelectionContextEnvelope(context: SelectedPageTextContext): PageContextEnvelope {
+  return {
+    metadata: {
+      url: context.url,
+      title: context.title,
+      domain: context.domain || parseTabDomain(context.url),
+    },
+    selectionText: context.text,
+    domSummary: context.contextText || createSelectionFocusedDomSummary(context.text),
+    visionAssets: [],
+    adapterPayload: null,
+    privacyFlags: {
+      containsSensitiveFormData: false,
+      userConsentedToHistory: false,
+    },
+  };
+}
+
+function normalizeSelectedContextText(value: unknown): string {
+  return typeof value === "string" ? value.replace(/\s+/gu, " ").trim().slice(0, 12_000) : "";
+}
+
+function normalizeSelectedContextFullText(value: unknown): string {
+  return normalizeSelectedTextContext(value, 12_000);
+}
+
+function createSelectionFocusedDomSummary(selectedText: string, pageContextText = ""): string {
+  const normalizedContext = normalizeSelectedContextFullText(pageContextText);
+  if (!normalizedContext) {
+    return `Selected text focus: ${selectedText}`;
+  }
+  return [
+    "Selected text in page context:",
+    `Selected text:\n${selectedText}`,
+    "Page context:",
+    normalizedContext,
+  ].join("\n\n");
+}
+
+function normalizeSelectedContextUrl(value: unknown): string {
+  if (typeof value !== "string") {
+    return "";
+  }
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return "";
+  }
+  try {
+    return new URL(trimmed).toString();
+  } catch {
+    return "";
+  }
 }
 
 async function getEditableImageInput() {
@@ -3606,12 +4256,18 @@ async function refreshAppServerCatalog(
   const cwd = normalizedWorkspaceRoot || undefined;
   let modelRequestFailed = false;
   let modelRequestErrorMessage = "";
+  const previousModels = state.models;
   const [models, serverThreads, appServerSkills, connectedApps, appServerPlugins, mcpServers, rateLimits] = await Promise.all([
     bridge.request<CodexModelOption[]>("model.list").catch((error) => {
       modelRequestFailed = true;
       modelRequestErrorMessage = toErrorMessage(error);
       console.warn("model.list failed", error);
-      return [];
+      return isRecoverableModelCatalogAuthError(modelRequestErrorMessage)
+        ? recoverModelCatalogAfterAuthError({
+            previousModels,
+            selectedModel: state.selectedModel,
+          })
+        : [];
     }),
     bridge.request<CodexThreadSummary[]>("thread.list", {
       ...(cwd ? { cwd } : {}),
@@ -3642,10 +4298,11 @@ async function refreshAppServerCatalog(
   state.mcpServers = mcpServers;
   state.rateLimits = rateLimits;
   state.modelCatalogState = resolveCatalogModelState({
-    modelRequestFailed,
+    modelRequestFailed: modelRequestFailed && !isRecoverableModelCatalogAuthError(modelRequestErrorMessage),
     models,
   });
-  state.modelCatalogErrorMessage = modelRequestFailed ? modelRequestErrorMessage : "";
+  state.modelCatalogErrorMessage =
+    modelRequestFailed && !isRecoverableModelCatalogAuthError(modelRequestErrorMessage) ? modelRequestErrorMessage : "";
   await reconcileSelectedModelWithCatalog(state.selectedModel);
 }
 
@@ -3894,6 +4551,8 @@ async function handleConversationDelete(conversationId: string) {
 }
 
 async function handleConversationClear() {
+  const conversations = await listConversations();
+  const deletedCount = conversations.length;
   await clearConversations();
   conversationRuntime.clear();
   state.currentConversationId = "";
@@ -3908,6 +4567,7 @@ async function handleConversationClear() {
   return {
     recentChats: [],
     currentConversation: null,
+    deletedCount,
   };
 }
 
@@ -3995,7 +4655,19 @@ async function getWorkspaceHarness(): Promise<WorkspaceHarnessSnapshot> {
 }
 
 async function handleSettingsUpdate(patch: Partial<ExtensionSettings>): Promise<ExtensionSettings> {
+  const previousSettings = await getStoredSettings();
   const settings = await updateStoredSettings(patch);
+  if (
+    !shouldRefreshCatalogAfterSettingsUpdate({
+      previousWorkspaceRoot: previousSettings.workspaceRoot,
+      nextWorkspaceRoot: settings.workspaceRoot,
+      previousCodexBinPath: previousSettings.codexBinPath,
+      nextCodexBinPath: settings.codexBinPath,
+    })
+  ) {
+    return settings;
+  }
+
   await softTimeout(syncBridgeRuntimeConfig(settings), UI_BRIDGE_TIMEOUT_MS, undefined, "runtime.config.update(settings)");
   state.workspaceHarness = await softTimeout(
     getWorkspaceHarness(),
@@ -4071,8 +4743,9 @@ async function ensureTabsPermission(): Promise<boolean> {
 }
 
 function assertPageReadable(url: string): void {
-  if (isRestrictedBrowserUrl(url)) {
-    throw new Error("This page is a restricted browser page, so Codex cannot read or modify it.");
+  const support = getCurrentPageSupport(url);
+  if (!support.available) {
+    throw new Error(support.blockedReason);
   }
 }
 
@@ -4158,8 +4831,15 @@ function toFriendlyPageAccessError(
   error: unknown,
   options: { captureOnly?: boolean } = {},
 ): Error {
-  if (url && isRestrictedBrowserUrl(url) && !options.captureOnly) {
-    return new Error("This page is a restricted browser page, so Codex cannot read or modify it.");
+  if (url && isFileUrl(url)) {
+    return new Error(getFileUrlAccessHelpMessage());
+  }
+
+  if (url && !options.captureOnly) {
+    const support = getCurrentPageSupport(url);
+    if (!support.available) {
+      return new Error(support.blockedReason);
+    }
   }
 
   const kind = classifyRuntimeMessageError(error);

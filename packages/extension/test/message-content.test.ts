@@ -117,9 +117,11 @@ describe("renderMessageContentHtml", () => {
   });
 
   test("renders local PDF markdown links so generated files can be opened from chat", () => {
-    const html = renderMessageContentHtml("PDF: [slides.pdf](/Users/test/Generated Images/slides.pdf)");
+    const html = renderMessageContentHtml("PDF: [slides.pdf](</Users/test/Generated Images/slides.pdf>)");
 
     expect(html).toContain('href="file:///Users/test/Generated%20Images/slides.pdf"');
+    expect(html).toContain('data-local-file-path="/Users/test/Generated Images/slides.pdf"');
+    expect(html).toContain('data-local-file-action="reveal"');
     expect(html).toContain(">slides.pdf</a>");
   });
 

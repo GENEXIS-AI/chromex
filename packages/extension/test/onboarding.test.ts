@@ -33,10 +33,16 @@ describe("auth onboarding", () => {
     expect(getUiStrings("en").onboarding.chatgptCta).toBe("Continue with ChatGPT");
     expect(getUiStrings("en").onboarding.nativeHostSetup).toContain("local bridge");
     expect(getUiStrings("en").onboarding.codexBinaryMissing).toContain("Codex");
+    expect(getUiStrings("en").onboarding.codexBinaryMissing).toContain("npm install -g @openai/codex");
+    expect(getUiStrings("en").onboarding.codexBinaryMissing).toContain("%APPDATA%\\npm\\codex.cmd");
+    expect(getUiStrings("en").onboarding.installBody).toContain("package.json");
+    expect(getUiStrings("en").onboarding.installBody).toContain("close every Chrome window");
     expect(getUiStrings("ko").onboarding.title).toBe("Welcome to Chromex");
     expect(getUiStrings("ko").onboarding.apiCta).toBe("API 키로 사용");
     expect(getUiStrings("ko").onboarding.nativeHostSetup).toContain("로컬 브리지");
     expect(getUiStrings("ko").onboarding.webOnlyUnavailable).toContain("로컬 브리지");
+    expect(getUiStrings("ko").onboarding.installBody).toContain("package.json");
+    expect(getUiStrings("ko").onboarding.codexBinaryMissing).toContain("where codex");
   });
 
   test("renders a centered internal onboarding surface with existing login actions", () => {
@@ -47,6 +53,12 @@ describe("auth onboarding", () => {
     expect(sidepanelSource).toContain('id="onboarding-reconnect"');
     expect(sidepanelSource).toContain('id="onboarding-open-settings"');
     expect(sidepanelSource).toContain('class="auth-onboarding-install"');
+    expect(sidepanelSource).toContain('class="auth-onboarding-install-guide"');
+    expect(sidepanelSource).toContain("https://genexis-ai.github.io/chromex/install/");
+    expect(sidepanelSource).toContain("getNativeHostInstallCopy(strings)");
+    expect(sidepanelSource).toContain("isChromeWebStoreInstall");
+    expect(sidepanelSource).toContain("odlalmnpmmakfigepbaabimjcmcppgfo");
+    expect(sidepanelSource).toContain("syncAuthOnboardingAutoReconnect");
     expect(sidepanelSource).toContain("getNativeHostInstallCommand(strings)");
     expect(sidepanelSource).toContain("formatNativeHostInstallCommand");
     expect(sidepanelSource).toContain('.join("\\n")');
@@ -57,6 +69,7 @@ describe("auth onboarding", () => {
     expect(sidepanelCss).toContain(".auth-onboarding-card");
     expect(sidepanelCss).toContain(".auth-onboarding-readiness");
     expect(sidepanelCss).toContain(".auth-onboarding-install");
+    expect(sidepanelCss).toContain(".auth-onboarding-install-guide");
     expect(sidepanelCss).toContain("white-space: pre-wrap");
   });
 

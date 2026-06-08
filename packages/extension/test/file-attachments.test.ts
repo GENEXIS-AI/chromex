@@ -9,6 +9,7 @@ import {
   createFileChipLabel,
   extractWebImageUrlsFromDropData,
   planAttachmentSelection,
+  MAX_AUDIO_FILE_ATTACHMENT_BYTES,
   MAX_FILE_ATTACHMENTS,
   MAX_FILE_ATTACHMENT_BYTES,
   MAX_TOTAL_FILE_ATTACHMENT_BYTES,
@@ -49,6 +50,61 @@ describe("file attachment policy", () => {
     expect(plan.accepted.map((attachment) => attachment.kind)).toEqual(["image", "pdf"]);
   });
 
+  test("accepts uploaded audio files as regular visible attachments", () => {
+    const plan = planAttachmentSelection([], [
+      {
+        name: "meeting.m4a",
+        mimeType: "audio/mp4",
+        sizeBytes: 512_000,
+        lastModified: 3,
+      },
+      {
+        name: "voice-note.wav",
+        mimeType: "",
+        sizeBytes: 256_000,
+        lastModified: 4,
+      },
+    ]);
+
+    expect(plan.rejected).toEqual([]);
+    expect(plan.accepted.map((attachment) => attachment.kind)).toEqual(["audio", "audio"]);
+    expect(createFileChipLabel({ name: "meeting.m4a", kind: "audio" })).toBe("audio: meeting.m4a");
+  });
+
+  test("allows common audio files to exceed the regular document limit", () => {
+    const plan = planAttachmentSelection([], [
+      {
+        name: "interview.wav",
+        mimeType: "application/octet-stream",
+        sizeBytes: MAX_FILE_ATTACHMENT_BYTES + 1,
+        lastModified: 5,
+      },
+      {
+        name: "voice-note.mp3",
+        mimeType: "",
+        sizeBytes: MAX_AUDIO_FILE_ATTACHMENT_BYTES,
+        lastModified: 6,
+      },
+    ]);
+
+    expect(plan.rejected).toEqual([]);
+    expect(plan.accepted.map((attachment) => attachment.kind)).toEqual(["audio", "audio"]);
+  });
+
+  test("rejects audio files that exceed the audio-specific cap", () => {
+    const plan = planAttachmentSelection([], [
+      {
+        name: "too-long.wav",
+        mimeType: "audio/wav",
+        sizeBytes: MAX_AUDIO_FILE_ATTACHMENT_BYTES + 1,
+        lastModified: 7,
+      },
+    ]);
+
+    expect(plan.accepted).toEqual([]);
+    expect(plan.rejected).toEqual(["file-too-large:too-long.wav"]);
+  });
+
   test("rejects duplicates and oversized files", () => {
     const existing = [
       {
@@ -81,21 +137,21 @@ describe("file attachment policy", () => {
   });
 
   test("enforces total upload limits", () => {
-    const existing = Array.from({ length: MAX_FILE_ATTACHMENTS - 1 }, (_, index) => ({
+    const existing = Array.from({ length: 2 }, (_, index) => ({
       id: `file-${index}`,
-      name: `existing-${index}.txt`,
-      mimeType: "text/plain",
-      sizeBytes: Math.floor(MAX_TOTAL_FILE_ATTACHMENT_BYTES / MAX_FILE_ATTACHMENTS),
+      name: `existing-${index}.m4a`,
+      mimeType: "audio/mp4",
+      sizeBytes: Math.floor(MAX_TOTAL_FILE_ATTACHMENT_BYTES / 2) - 1024,
       lastModified: index,
       base64: "ZmFrZQ==",
-      kind: "text" as const,
+      kind: "audio" as const,
     }));
 
     const plan = planAttachmentSelection(existing, [
       {
         name: "overflow.txt",
         mimeType: "text/plain",
-        sizeBytes: Math.floor(MAX_FILE_ATTACHMENT_BYTES / 2),
+        sizeBytes: 4096,
         lastModified: 99,
       },
     ]);
@@ -157,6 +213,19 @@ describe("file attachment policy", () => {
     expect(sidepanelSource).toContain('root.addEventListener("drop"');
     expect(sidepanelSource).toContain("const droppedFiles = getDroppedFiles(dataTransfer)");
     expect(sidepanelSource).toContain("await ingestSelectedFiles(droppedFiles)");
+  });
+
+  test("shows selected audio files in the composer before slow file reads finish", () => {
+    const ingestBody = getFunctionSource(sidepanelSource, "ingestSelectedFiles");
+
+    expect(ingestBody).toContain("const pendingAttachments: UserFileAttachment[]");
+    expect(ingestBody).toContain("state.fileAttachments = [...state.fileAttachments, ...pendingAttachments]");
+    expect(ingestBody).toContain("getFileAttachmentReadingStatus(pendingAttachments.length)");
+    expect(ingestBody.indexOf("state.fileAttachments = [...state.fileAttachments, ...pendingAttachments]")).toBeLessThan(
+      ingestBody.indexOf("await readFileAsBase64(job.file)"),
+    );
+    expect(ingestBody).toContain("base64: \"\"");
+    expect(ingestBody).toContain("state.fileAttachments = state.fileAttachments.map");
   });
 
   test("adds context-menu images to the composer as attachments without launching image edit", () => {

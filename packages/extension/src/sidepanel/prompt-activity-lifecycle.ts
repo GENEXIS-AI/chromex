@@ -68,6 +68,10 @@ export function promotePromptActivityForTurnActivity(input: {
   kind?: string | undefined;
   status?: "running" | "completed" | undefined;
 }): PromptActivityState | null {
+  if (input.status === "completed" && input.kind !== "image") {
+    return input.current;
+  }
+
   if (input.kind === "image") {
     const clientRequestId = input.current?.clientRequestId || createTurnScopedClientRequestId(input.activeTurn);
     if (!clientRequestId) {

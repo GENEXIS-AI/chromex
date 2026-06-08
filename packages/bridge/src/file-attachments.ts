@@ -13,14 +13,24 @@ export interface PreparedUserFileAttachments {
   }>;
 }
 
+type FetchLike = (url: string, init?: { signal?: AbortSignal }) => Promise<{
+  ok: boolean;
+  status: number;
+  headers: { get(name: string): string | null };
+  arrayBuffer(): Promise<ArrayBuffer>;
+}>;
+
 const MAX_FILE_ATTACHMENTS = 6;
 const MAX_FILE_ATTACHMENT_BYTES = 6 * 1024 * 1024;
 const MAX_EXTRACTED_TEXT_CHARS = 12_000;
 const MAX_SPREADSHEET_ROWS = 24;
 const MAX_SPREADSHEET_COLUMNS = 8;
+const REMOTE_IMAGE_FETCH_TIMEOUT_MS = 12_000;
+const SUPPORTED_VISUAL_IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/webp"]);
 
 export async function prepareUserFileAttachments(
   attachments: UserFileAttachment[],
+  options: { fetchImpl?: FetchLike } = {},
 ): Promise<PreparedUserFileAttachments> {
   if (attachments.length === 0) {
     return {
@@ -38,14 +48,18 @@ export async function prepareUserFileAttachments(
 
   for (const [index, attachment] of attachments.entries()) {
     if (attachment.kind === "image" && isRemoteImageAttachment(attachment)) {
-      uploadedImages.push({
-        name: attachment.name,
-        ref: attachment.sourceUrl,
-      });
+      const remoteImage = await resolveRemoteImageAttachment(attachment, options.fetchImpl);
+      if (remoteImage) {
+        uploadedImages.push({
+          name: attachment.name,
+          ref: createDataUrl(remoteImage.mimeType, remoteImage.base64),
+        });
+      }
       sections.push(
         formatAttachmentSection(index, attachment, {
-          handling:
-            "Attached as a remote visual input. Prefer this web image when the user refers to an attached image or uploaded reference.",
+          handling: remoteImage
+            ? "Attached as a fetched remote visual input. Prefer this web image when the user refers to an attached image or uploaded reference."
+            : "Remote image metadata only. Chromex could not safely fetch this image as a supported visual input, so do not claim to have inspected its pixels.",
           extractedText: "",
         }),
       );
@@ -55,14 +69,18 @@ export async function prepareUserFileAttachments(
     const buffer = decodeAttachmentBuffer(attachment);
 
     if (attachment.kind === "image") {
-      uploadedImages.push({
-        name: attachment.name,
-        ref: createDataUrl(attachment.mimeType, attachment.base64),
-      });
+      const visualMimeType = normalizeSupportedVisualImageMimeType(attachment.mimeType, attachment.name);
+      if (visualMimeType && isLikelyBase64Payload(attachment.base64) && isSupportedImageBytes(buffer, visualMimeType)) {
+        uploadedImages.push({
+          name: attachment.name,
+          ref: createDataUrl(visualMimeType, attachment.base64),
+        });
+      }
       sections.push(
         formatAttachmentSection(index, attachment, {
-          handling:
-            "Attached separately as an uploaded visual input. Prefer this file when the user refers to an attached image or uploaded reference.",
+          handling: visualMimeType && isSupportedImageBytes(buffer, visualMimeType)
+            ? "Attached separately as an uploaded visual input. Prefer this file when the user refers to an attached image or uploaded reference."
+            : "Image metadata only. This file is not a valid supported Codex visual input, so do not claim to have inspected its pixels.",
           extractedText: "",
         }),
       );
@@ -74,6 +92,17 @@ export async function prepareUserFileAttachments(
         formatAttachmentSection(index, attachment, {
           handling: "Parsed as plain text. Prefer this extracted content over general assumptions.",
           extractedText: truncateText(decodeTextBuffer(buffer)),
+        }),
+      );
+      continue;
+    }
+
+    if (attachment.kind === "audio") {
+      sections.push(
+        formatAttachmentSection(index, attachment, {
+          handling:
+            "Audio file metadata only. Chromex transcribes supported audio attachments before sending the request; use the transcript in the prompt when present.",
+          extractedText: "",
         }),
       );
       continue;
@@ -131,6 +160,88 @@ function isRemoteImageAttachment(attachment: UserFileAttachment): attachment is 
     return false;
   }
   return /^https?:\/\//iu.test(sourceUrl);
+}
+
+async function resolveRemoteImageAttachment(
+  attachment: UserFileAttachment & { sourceUrl: string },
+  fetchImpl: FetchLike | undefined,
+): Promise<{ mimeType: string; base64: string } | null> {
+  const fetchRemote = fetchImpl ?? globalThis.fetch;
+  if (!fetchRemote) {
+    return null;
+  }
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), REMOTE_IMAGE_FETCH_TIMEOUT_MS);
+  try {
+    const response = await fetchRemote(attachment.sourceUrl, { signal: controller.signal });
+    if (!response.ok) {
+      return null;
+    }
+    const responseMimeType = response.headers.get("content-type")?.split(";")[0]?.trim() ?? "";
+    const mimeType = normalizeSupportedVisualImageMimeType(responseMimeType || attachment.mimeType, attachment.name);
+    if (!mimeType) {
+      return null;
+    }
+    const bytes = Buffer.from(await response.arrayBuffer());
+    if (bytes.byteLength === 0 || bytes.byteLength > MAX_FILE_ATTACHMENT_BYTES) {
+      return null;
+    }
+    if (!isSupportedImageBytes(bytes, mimeType)) {
+      return null;
+    }
+    return {
+      mimeType,
+      base64: bytes.toString("base64"),
+    };
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function normalizeSupportedVisualImageMimeType(mimeType: string, filename: string): string | null {
+  const normalized = mimeType.trim().toLowerCase();
+  if (normalized === "image/jpg") {
+    return "image/jpeg";
+  }
+  if (SUPPORTED_VISUAL_IMAGE_MIME_TYPES.has(normalized)) {
+    return normalized;
+  }
+  const extensionMimeType = imageMimeTypeFromFilename(filename);
+  return extensionMimeType && SUPPORTED_VISUAL_IMAGE_MIME_TYPES.has(extensionMimeType) ? extensionMimeType : null;
+}
+
+function imageMimeTypeFromFilename(filename: string): string | null {
+  switch (extname(filename).toLowerCase()) {
+    case ".png":
+      return "image/png";
+    case ".jpg":
+    case ".jpeg":
+      return "image/jpeg";
+    case ".webp":
+      return "image/webp";
+    default:
+      return null;
+  }
+}
+
+function isLikelyBase64Payload(value: string): boolean {
+  const normalized = value.replace(/\s+/gu, "");
+  return Boolean(normalized) && normalized.length % 4 === 0 && /^[a-z0-9+/]+={0,2}$/iu.test(normalized);
+}
+
+function isSupportedImageBytes(buffer: Buffer, mimeType: string): boolean {
+  switch (mimeType) {
+    case "image/png":
+      return buffer.length >= 8 && buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+    case "image/jpeg":
+      return buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff;
+    case "image/webp":
+      return buffer.length >= 12 && buffer.subarray(0, 4).toString("ascii") === "RIFF" && buffer.subarray(8, 12).toString("ascii") === "WEBP";
+    default:
+      return false;
+  }
 }
 
 function decodeAttachmentBuffer(attachment: UserFileAttachment): Buffer {

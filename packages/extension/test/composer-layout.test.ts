@@ -66,6 +66,38 @@ describe("composer layout css", () => {
     expect(readFinalDeclaration(".file-chip-label", "white-space")).toBe("nowrap");
   });
 
+  test("keeps selected-page context chips inside the composer without horizontal scrolling", () => {
+    expect(readFinalDeclaration('.composer-context-group[data-composer-context-group="references"]', "width")).toBe(
+      "100%",
+    );
+    expect(readFinalDeclaration('.composer-context-group[data-composer-context-group="references"]', "max-width")).toBe(
+      "100%",
+    );
+    expect(readFinalDeclaration('.composer-context-group[data-composer-context-group="references"]', "overflow-x")).toBe(
+      "hidden",
+    );
+    expect(readFinalDeclaration('.composer-context-group[data-composer-context-group="references"]', "flex-wrap")).toBe(
+      "wrap",
+    );
+    expect(readFinalDeclaration(".composer-file-list", "overflow-x")).toBe("auto");
+  });
+
+  test("lays out selected-page context chips as fixed icon text dismiss columns", () => {
+    expect(readFinalDeclaration(".selected-page-context-chip", "display")).toBe("grid");
+    expect(readFinalDeclaration(".selected-page-context-chip", "grid-template-columns")).toBe(
+      "24px minmax(0, 1fr) 28px",
+    );
+    expect(readFinalDeclaration(".selected-page-context-chip", "width")).toBe("100%");
+    expect(readFinalDeclaration(".selected-page-context-chip", "max-width")).toBe("100%");
+    expect(readFinalDeclaration(".selected-page-context-chip", "min-width")).toBe("0");
+    expect(readFinalDeclaration(".selected-page-context-chip", "overflow")).toBe("hidden");
+    expect(readFinalDeclaration(".selected-page-context-chip .summary-chip-dismiss", "position")).toBe("static");
+    expect(readFinalDeclaration(".selected-page-context-chip .summary-chip-dismiss", "justify-self")).toBe("end");
+    expect(readFinalDeclaration(".selected-page-context-chip .summary-chip-dismiss", "transform")).toBe("none");
+    expect(readFinalDeclaration(".selected-page-context-icon", "justify-self")).toBe("start");
+    expect(readFinalDeclaration(".selected-page-context-icon", "place-items")).toBe("center");
+  });
+
   test("renders fenced code blocks as bordered cards with a header copy action", () => {
     expect(readFinalDeclaration(".message-code-block", "overflow")).toBe("hidden");
     expect(readFinalDeclaration(".message-code-header", "display")).toBe("flex");
@@ -128,9 +160,10 @@ describe("composer layout css", () => {
   });
 
   test("removes excess spacing when trace details are collapsed", () => {
-    expect(readFinalDeclaration(".message-trace-text", "margin")).toBe("0 0 8px");
-    expect(readFinalDeclaration(".message-trace-text:not([open])", "margin-bottom")).toBe("2px");
+    expect(readFinalDeclaration(".message-trace-text", "margin")).toBe("6px 0 2px");
+    expect(readFinalDeclaration(".message-trace-text:not([open])", "margin-bottom")).toBe("0");
     expect(readFinalDeclaration(".message-trace-text:not([open]) .message-trace-summary", "margin-bottom")).toBe("0");
+    expect(readFinalDeclaration(".message-trace-summary", "margin-bottom")).toBe("4px");
     expect(readFinalDeclaration(".message-trace-lines", "gap")).toBe("3px");
   });
 
@@ -150,7 +183,9 @@ describe("composer layout css", () => {
     expect(readFinalDeclaration(".top-quick-action", "width")).toBe("34px");
     expect(readFinalDeclaration(".top-quick-action", "padding")).toBe("0");
     expect(readFinalDeclaration(".top-quick-action[data-tooltip]::after", "content")).toBe("attr(data-tooltip)");
-    expect(readFinalDeclaration(".top-quick-action[data-tooltip]::after", "z-index")).toBe("240");
+    expect(readFinalDeclaration(".top-quick-action[data-tooltip]::after", "z-index")).toBe("var(--z-tooltip)");
+    expect(readFinalDeclaration(".top-quick-action[data-tooltip]::after", "right")).toBe("0");
+    expect(readFinalDeclaration(".top-quick-action[data-tooltip]::after", "left")).toBe("auto");
     expect(readFinalDeclaration(".top-quick-action[data-tooltip]:hover::after", "opacity")).toBe("1");
     expect(readFinalDeclaration(".top-quick-action.infographic", "background")).toBe("transparent");
     expect(readFinalDeclaration(".top-quick-action.infographic", "color")).toBe("#c8cdd5");
@@ -260,6 +295,54 @@ describe("composer layout css", () => {
     expect(readFinalDeclaration('.composer-submit .send-button:not(.live-active) svg[data-ui-icon="send"]', "transform")).toBe(
       "none",
     );
+  });
+
+  test("keeps hover tooltips above clipped surfaces and inside side-panel edges", () => {
+    expect(readFinalDeclaration(":root", "--z-tooltip")).toBe("2147483000");
+    expect(readFinalDeclaration(".composer-frame", "overflow")).toBe("hidden");
+    expect(
+      readFinalDeclaration(".composer-frame:has(.composer-submit [data-tooltip]:hover)", "overflow"),
+    ).toBe("visible");
+    expect(readFinalDeclaration(".composer-submit [data-tooltip]::after", "z-index")).toBe("var(--z-tooltip)");
+    expect(readFinalDeclaration(".composer-submit [data-tooltip]::after", "right")).toBe("0");
+    expect(readFinalDeclaration(".composer-submit [data-tooltip]::after", "max-width")).toBe(
+      "min(260px, calc(100dvw - 24px))",
+    );
+    expect(readFinalDeclaration(".composer-submit [data-tooltip]:hover::after", "transform")).toBe("translateY(0)");
+    expect(readFinalDeclaration(".message-action-button[data-tooltip]::after", "z-index")).toBe("var(--z-tooltip)");
+    expect(readFinalDeclaration(".message-action-button[data-tooltip]::after", "white-space")).toBe("normal");
+    expect(readFinalDeclaration(".message-actions.user .message-action-button[data-tooltip]::after", "right")).toBe(
+      "0",
+    );
+  });
+
+  test("anchors composer popovers to their controls and keeps command popovers inside composer edges", () => {
+    expect(readFinalDeclaration(".suggestions", "left")).toBe("10px");
+    expect(readFinalDeclaration(".suggestions", "right")).toBe("10px");
+    expect(readFinalDeclaration(".suggestions", "bottom")).toBe("calc(100% + 10px)");
+    expect(readFinalDeclaration(".suggestions", "width")).toBe("auto");
+    expect(readFinalDeclaration(".suggestions", "max-width")).toBe("none");
+    expect(readFinalDeclaration(".composer-frame.has-suggestions", "overflow")).toBe("visible");
+    expect(readFinalDeclaration(".composer-model-dropdown", "position")).toBe("absolute");
+    expect(readFinalDeclaration(".composer-model-dropdown", "right")).toBe(
+      "clamp(-84px, calc(100dvw - 360px), 0px)",
+    );
+    expect(readFinalDeclaration(".composer-model-dropdown", "bottom")).toBe("calc(100% + 8px)");
+    expect(readFinalDeclaration(".composer-permission-menu", "position")).toBe("absolute");
+    expect(readFinalDeclaration(".composer-permission-menu", "left")).toBe("0");
+    expect(readFinalDeclaration(".composer-permission-menu", "bottom")).toBe("calc(100% + 8px)");
+  });
+
+  test("uses a compact model picker menu scale", () => {
+    expect(readFinalDeclaration(".composer-model-dropdown", "width")).toBe("min(276px, calc(100dvw - 24px))");
+    expect(readFinalDeclaration(".composer-model-dropdown", "max-height")).toBe("min(340px, calc(100dvh - 132px))");
+    expect(readFinalDeclaration(".composer-model-dropdown", "padding")).toBe("7px");
+    expect(readFinalDeclaration(".composer-model-dropdown", "border-radius")).toBe("16px");
+    expect(readFinalDeclaration(".composer-model-menu-row", "min-height")).toBe("34px");
+    expect(readFinalDeclaration(".composer-model-menu-row", "padding")).toBe("5px 8px");
+    expect(readFinalDeclaration(".composer-model-menu-copy strong", "font-size")).toBe("12.5px");
+    expect(readFinalDeclaration(".composer-model-menu-copy span", "font-size")).toBe("11px");
+    expect(readFinalDeclaration(".composer-model-menu-title", "font-size")).toBe("11.5px");
   });
 
   test("removes hover animation from composer and image editor send buttons", () => {

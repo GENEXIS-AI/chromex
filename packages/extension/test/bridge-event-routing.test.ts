@@ -85,4 +85,21 @@ describe("resolveBridgeEventConversationId", () => {
       ),
     ).toBe("conversation-d");
   });
+
+  test("routes plan user input requests by top-level thread id", () => {
+    expect(
+      resolveBridgeEventConversationId(
+        {
+          type: "plan.user_input.requested",
+          threadId: "thread-plan",
+          turnId: "turn-plan",
+          requestId: "request-plan",
+          questions: [{ id: "stack", question: "What stack should this use?" }],
+        },
+        {
+          findConversationIdForThread: (threadId) => (threadId === "thread-plan" ? "conversation-plan" : null),
+        },
+      ),
+    ).toBe("conversation-plan");
+  });
 });

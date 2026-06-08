@@ -41,4 +41,16 @@ describe("profile selection persistence", () => {
     expect(ensureStateLoaded).not.toContain("state.selectedProfileId = normalizeSelectedProfileId(currentConversation.profileId)");
     expect(buildUiInitPayload).not.toContain("state.selectedProfileId = normalizeSelectedProfileId(currentConversation.profileId)");
   });
+
+  test("regenerate reuses the original message profile without switching the composer profile", () => {
+    const replayConversationFromMessage = extractBetween(
+      sidepanelSource,
+      "async function replayConversationFromMessage",
+      "function isSlideImageGenerationActionCard",
+    );
+
+    expect(replayConversationFromMessage).toContain("profileId: replay.profileId");
+    expect(replayConversationFromMessage).not.toContain("selectProfileForComposer");
+    expect(replayConversationFromMessage).not.toContain("profile.select");
+  });
 });

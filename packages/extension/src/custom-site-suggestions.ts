@@ -3,7 +3,8 @@ import type { ActionCard, OpenTabContext } from "@codex-sidepanel/shared";
 import type { CustomSiteSuggestion } from "./types.js";
 
 const MAX_CUSTOM_SITE_SUGGESTIONS = 60;
-const MAX_CUSTOM_SITE_PROMPT_LENGTH = 280;
+const MAX_CUSTOM_SITE_COMMAND_LENGTH = 80;
+const MAX_CUSTOM_SITE_PROMPT_LENGTH = 2000;
 const MAX_CUSTOM_SITE_LABEL_LENGTH = 80;
 
 type SiteInput = Pick<OpenTabContext, "title" | "url">;
@@ -24,37 +25,47 @@ export function resolveCustomSiteSuggestionKey(url: string): string | null {
 
 export function createCustomSiteSuggestion(
   tab: SiteInput,
-  prompt: string,
+  command: string,
+  promptOrCreatedAt: string | number = command,
   createdAt = Date.now(),
 ): CustomSiteSuggestion {
   const siteKey = resolveCustomSiteSuggestionKey(tab.url);
   if (!siteKey) {
     throw new Error("Custom suggestions can only be registered for normal web sites.");
   }
-  const normalizedPrompt = normalizePrompt(prompt);
+  const normalizedPrompt = normalizePrompt(typeof promptOrCreatedAt === "number" ? command : promptOrCreatedAt);
+  const normalizedCommand = normalizeCommand(command || normalizedPrompt);
+  const normalizedCreatedAt = typeof promptOrCreatedAt === "number" ? promptOrCreatedAt : createdAt;
+  if (!normalizedCommand) {
+    throw new Error("Custom suggestion command is required.");
+  }
   if (!normalizedPrompt) {
     throw new Error("Custom suggestion prompt is required.");
   }
 
   return {
-    id: createSuggestionId(siteKey, normalizedPrompt, createdAt),
+    id: createSuggestionId(siteKey, normalizedCommand, normalizedPrompt, normalizedCreatedAt),
     siteKey,
     siteLabel: createSiteLabel(tab, siteKey),
+    command: normalizedCommand,
     prompt: normalizedPrompt,
-    createdAt,
+    createdAt: normalizedCreatedAt,
   };
 }
 
 export function upsertCustomSiteSuggestion(
   current: CustomSiteSuggestion[],
   tab: SiteInput,
-  prompt: string,
+  command: string,
+  promptOrCreatedAt: string | number = command,
   createdAt = Date.now(),
 ): CustomSiteSuggestion[] {
-  const next = createCustomSiteSuggestion(tab, prompt, createdAt);
+  const next = createCustomSiteSuggestion(tab, command, promptOrCreatedAt, createdAt);
   return normalizeCustomSiteSuggestions([
     next,
-    ...current.filter((item) => item.siteKey !== next.siteKey || item.prompt !== next.prompt),
+    ...current.filter(
+      (item) => item.siteKey !== next.siteKey || item.command !== next.command || item.prompt !== next.prompt,
+    ),
   ]);
 }
 
@@ -74,7 +85,7 @@ export function normalizeCustomSiteSuggestions(value: unknown): CustomSiteSugges
     if (!suggestion) {
       continue;
     }
-    const dedupeKey = `${suggestion.siteKey}\n${suggestion.prompt}`;
+    const dedupeKey = `${suggestion.siteKey}\n${suggestion.command}\n${suggestion.prompt}`;
     if (seen.has(dedupeKey)) {
       continue;
     }
@@ -104,7 +115,7 @@ export function inferCustomSiteSuggestionCards(
 ): ActionCard[] {
   return listCustomSiteSuggestionsForTab(tab, suggestions).map((suggestion) => ({
     id: `custom-site-${suggestion.id}`,
-    title: suggestion.prompt,
+    title: suggestion.command,
     description: suggestion.siteLabel,
     kind: "prompt",
     prompt: suggestion.prompt,
@@ -122,17 +133,19 @@ function normalizeCustomSiteSuggestion(value: unknown): CustomSiteSuggestion | n
   const input = value as Partial<CustomSiteSuggestion>;
   const siteKey = resolveCustomSiteSuggestionKey(String(input.siteKey ?? ""));
   const prompt = normalizePrompt(input.prompt ?? "");
-  if (!siteKey || !prompt) {
+  const command = normalizeCommand(input.command ?? prompt);
+  if (!siteKey || !command || !prompt) {
     return null;
   }
   const createdAt = Number.isFinite(input.createdAt) ? Number(input.createdAt) : Date.now();
-  const fallbackId = createSuggestionId(siteKey, prompt, createdAt);
+  const fallbackId = createSuggestionId(siteKey, command, prompt, createdAt);
   const id = normalizeSuggestionId(input.id) || fallbackId;
   const siteLabel = normalizeSiteLabel(input.siteLabel, siteKey);
   return {
     id,
     siteKey,
     siteLabel,
+    command,
     prompt,
     createdAt,
   };
@@ -147,8 +160,15 @@ function normalizeSuggestionId(value: unknown): string {
     .slice(0, 80);
 }
 
-function createSuggestionId(siteKey: string, prompt: string, createdAt: number): string {
-  return normalizeSuggestionId(`${siteKey}-${createdAt}-${hashString(prompt)}`);
+function createSuggestionId(siteKey: string, command: string, prompt: string, createdAt: number): string {
+  return normalizeSuggestionId(`${siteKey}-${createdAt}-${hashString(`${command}\n${prompt}`)}`);
+}
+
+function normalizeCommand(value: unknown): string {
+  return String(value ?? "")
+    .replace(/\s+/gu, " ")
+    .trim()
+    .slice(0, MAX_CUSTOM_SITE_COMMAND_LENGTH);
 }
 
 function normalizePrompt(value: unknown): string {

@@ -47,4 +47,31 @@ describe("composer attachment submission", () => {
       composerFileAttachments: [],
     });
   });
+
+  test("keeps audio files in the submitted request and visible message snapshots", () => {
+    const audio = {
+      id: "audio-1",
+      name: "meeting.m4a",
+      mimeType: "audio/mp4",
+      sizeBytes: 256,
+      lastModified: 3,
+      base64: "ZmFrZQ==",
+      kind: "audio" as const,
+    };
+    const pdf = {
+      id: "pdf-1",
+      name: "brief.pdf",
+      mimeType: "application/pdf",
+      sizeBytes: 512,
+      lastModified: 4,
+      base64: "ZmFrZQ==",
+      kind: "pdf" as const,
+    };
+
+    expect(createSubmittedComposerFileAttachmentState([audio, pdf])).toEqual({
+      requestFileAttachments: [audio, pdf],
+      messageFileAttachments: [audio, pdf],
+      composerFileAttachments: [],
+    });
+  });
 });

@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { copyFile, cp, mkdir, readFile, readdir, rm, stat, unlink, writeFile } from "node:fs/promises";
+import { copyFile, cp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, extname, join, relative, resolve, sep } from "node:path";
 import process from "node:process";
 import JSZip from "jszip";
@@ -8,14 +8,10 @@ const root = process.cwd();
 const packageJson = JSON.parse(await readFile(resolve(root, "package.json"), "utf8"));
 const version = String(packageJson.version ?? "0.0.0");
 const timestamp = new Date().toISOString().replace(/[-:.TZ]/gu, "").slice(0, 14);
-const distDir = resolve(root, "packages/extension/dist");
 const outDir = resolve(root, "output/public-release");
 const sourceStagingDir = resolve(outDir, "chromex-public-source");
-const unpackedStagingDir = resolve(outDir, "chromex-unpacked-extension");
 const sourceZipPath = resolve(outDir, `chromex-${version}-public-source-${timestamp}.zip`);
-const unpackedZipPath = resolve(outDir, `chromex-${version}-unpacked-extension-${timestamp}.zip`);
 const stableSourceZipPath = resolve(outDir, "chromex-public-source.zip");
-const stableUnpackedZipPath = resolve(outDir, "chromex-unpacked-extension.zip");
 
 const sourceBlockedPathPatterns = [
   /(^|\/)\.git(?:\/|$)/u,
@@ -83,34 +79,17 @@ const binaryExtensions = new Set([
   ".zip",
 ]);
 
-await assertExtensionBuilt();
 await rm(outDir, { recursive: true, force: true });
 await mkdir(outDir, { recursive: true });
 
 await stagePublicSource();
-await stageUnpackedExtension();
 await createZipFromDirectory(sourceStagingDir, sourceZipPath, "chromex");
-await createZipFromDirectory(unpackedStagingDir, unpackedZipPath, "chromex-extension");
-await validateArchive(sourceZipPath, { expectedManifest: false });
-await validateArchive(unpackedZipPath, { expectedManifest: true, requireManifestKey: true });
+await validateArchive(sourceZipPath);
 await copyFile(sourceZipPath, stableSourceZipPath);
-await copyFile(unpackedZipPath, stableUnpackedZipPath);
-await validateArchive(stableSourceZipPath, { expectedManifest: false });
-await validateArchive(stableUnpackedZipPath, { expectedManifest: true, requireManifestKey: true });
+await validateArchive(stableSourceZipPath);
 
 console.log(`Public source archive created: ${sourceZipPath}`);
-console.log(`Unpacked extension archive created: ${unpackedZipPath}`);
 console.log(`Stable public source archive created: ${stableSourceZipPath}`);
-console.log(`Stable unpacked extension archive created: ${stableUnpackedZipPath}`);
-console.log(`Load this unpacked folder in Chrome after unzip: ${unpackedStagingDir}`);
-
-async function assertExtensionBuilt() {
-  const manifestPath = resolve(distDir, "manifest.json");
-  const info = await stat(manifestPath).catch(() => null);
-  if (!info?.isFile()) {
-    throw new Error("Run npm run build before packaging a public release.");
-  }
-}
 
 async function stagePublicSource() {
   await rm(sourceStagingDir, { recursive: true, force: true });
@@ -156,36 +135,6 @@ function listPublicSourceFiles() {
     .filter((file) => !isBlockedSourcePath(normalizePath(file)));
 }
 
-async function stageUnpackedExtension() {
-  await rm(unpackedStagingDir, { recursive: true, force: true });
-  await cp(distDir, unpackedStagingDir, { recursive: true });
-  await removeIfExists(resolve(unpackedStagingDir, "build-info.json"));
-  await walkFiles(unpackedStagingDir, async (path) => {
-    const name = basename(path);
-    const extension = extname(path).toLowerCase();
-    if (isBlockedUnpackedArtifact(name, extension)) {
-      await unlink(path);
-      return;
-    }
-    if (extension === ".js") {
-      const source = await readFile(path, "utf8");
-      const sanitized = source.replace(/\r?\n?\/\/[#@] sourceMappingURL=[^\r\n]*/gu, "");
-      if (sanitized !== source) {
-        await writeFile(path, sanitized);
-      }
-    }
-  });
-}
-
-function isBlockedUnpackedArtifact(name, extension) {
-  return (
-    name === ".DS_Store" ||
-    name.startsWith(".env") ||
-    /^.+-source\.(?:png|jpe?g|webp)$/iu.test(name) ||
-    [".map", ".pem", ".key", ".log", ".tmp", ".crx", ".zip"].includes(extension)
-  );
-}
-
 async function createZipFromDirectory(directory, zipPath, archiveRoot) {
   const zip = new JSZip();
   await addDirectoryToZip(zip, directory, directory, archiveRoot);
@@ -216,7 +165,7 @@ async function addDirectoryToZip(zip, directory, baseDirectory, archiveRoot) {
   }
 }
 
-async function validateArchive(zipPath, { expectedManifest, requireManifestKey = false }) {
+async function validateArchive(zipPath) {
   const zip = await JSZip.loadAsync(await readFile(zipPath));
   const listing = Object.keys(zip.files).join("\n");
   const blockedPatterns = [
@@ -233,22 +182,9 @@ async function validateArchive(zipPath, { expectedManifest, requireManifestKey =
     /__MACOSX/u,
     /\.DS_Store/u,
   ];
-  if (expectedManifest) {
-    blockedPatterns.push(/source\.(?:png|jpe?g|webp)/iu);
-  }
   const blocked = blockedPatterns.find((pattern) => pattern.test(listing));
   if (blocked) {
     throw new Error(`${basename(zipPath)} contains blocked artifact matching ${blocked}.`);
-  }
-  const manifestFile = zip.file("chromex-extension/manifest.json");
-  if (expectedManifest && !manifestFile) {
-    throw new Error(`${basename(zipPath)} is missing chromex-extension/manifest.json.`);
-  }
-  if (manifestFile && requireManifestKey) {
-    const manifest = JSON.parse(await manifestFile.async("string"));
-    if (typeof manifest.key !== "string" || !manifest.key) {
-      throw new Error(`${basename(zipPath)} must keep manifest.key so Windows native-host installs use a stable extension ID.`);
-    }
   }
 }
 
@@ -283,8 +219,4 @@ function normalizePath(path) {
 
 function normalizeZipPath(path) {
   return path.split(sep).join("/");
-}
-
-async function removeIfExists(path) {
-  await rm(path, { force: true });
 }

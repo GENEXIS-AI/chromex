@@ -46,6 +46,17 @@ export class BridgeRpcRouter {
           return { id: request.id, result: await this.#dependencies.codex.readThread(request.params as never) };
         case "thread.turns.list":
           return { id: request.id, result: await this.#dependencies.codex.listTurns(request.params as never) };
+        case "goal.set":
+          return { id: request.id, result: await this.#dependencies.codex.setGoal(request.params as never) };
+        case "goal.get":
+          return { id: request.id, result: await this.#dependencies.codex.getGoal(request.params as never) };
+        case "goal.clear":
+          return { id: request.id, result: await this.#dependencies.codex.clearGoal(request.params as never) };
+        case "plan.user_input.respond":
+          return {
+            id: request.id,
+            result: await this.#dependencies.codex.respondToUserInputRequest(request.params as never),
+          };
         case "session.open":
           return { id: request.id, result: await this.#dependencies.codex.openSession(request.params as never) };
         case "session.resume":
@@ -97,6 +108,8 @@ export class BridgeRpcRouter {
           return { id: request.id, result: await this.#dependencies.image.describeAssetFolder() };
         case "image.asset.folder.open":
           return { id: request.id, result: await this.#dependencies.image.openAssetFolder(request.params as never) };
+        case "local.file.reveal":
+          return { id: request.id, result: await this.#dependencies.localFiles.reveal(request.params as never) };
         case "diagnostics.log.write":
           await this.#requireDiagnostics().record(
             String((request.params as { event?: unknown }).event ?? "extension.event"),
@@ -109,15 +122,38 @@ export class BridgeRpcRouter {
           return { id: request.id, result: await this.#requireDiagnostics().openLogFolder(request.params as never) };
         case "voice.session.start":
           return { id: request.id, result: await this.#dependencies.voice.start(request.params as never, emit) };
+        case "dictation.transcription.start":
+          return { id: request.id, result: await this.#dependencies.voice.start(request.params as never, emit) };
         case "voice.session.append_text":
           await this.#dependencies.voice.appendText(request.params as never);
           return { id: request.id, result: {} };
         case "voice.session.append_audio":
           await this.#dependencies.voice.appendAudio(request.params as never);
           return { id: request.id, result: {} };
+        case "dictation.transcription.append_audio":
+          await this.#dependencies.voice.appendAudio(request.params as never);
+          return { id: request.id, result: {} };
         case "voice.session.stop":
           await this.#dependencies.voice.stop(request.params as never);
           return { id: request.id, result: {} };
+        case "dictation.transcription.stop":
+          await this.#dependencies.voice.stop(request.params as never);
+          return { id: request.id, result: {} };
+        case "translation.api_key.save":
+          return {
+            id: request.id,
+            result: await this.#dependencies.translation.saveApiKey(request.params as never),
+          };
+        case "translation.api_key.clear":
+          return {
+            id: request.id,
+            result: await this.#dependencies.translation.clearApiKey(),
+          };
+        case "translation.client_secret.create":
+          return {
+            id: request.id,
+            result: await this.#dependencies.translation.createClientSecret(request.params as never),
+          };
         case "profile.list":
           return { id: request.id, result: listProfileTemplates() };
         case "profile.select":

@@ -5,6 +5,8 @@ interface VoiceSessionMessage {
   sdp?: unknown;
   outputModality?: unknown;
   prompt?: unknown;
+  sessionId?: unknown;
+  realtimeSessionId?: unknown;
   voice?: unknown;
 }
 
@@ -12,13 +14,19 @@ function nonEmptyString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
+function nonEmptyPreservedString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value : undefined;
+}
+
 export function buildVoiceSessionStartParams(
   message: VoiceSessionMessage,
   _activeChatThreadId?: string,
 ): Record<string, unknown> {
   const threadId = nonEmptyString(message.threadId);
-  const sdp = nonEmptyString(message.sdp);
+  const sdp = nonEmptyPreservedString(message.sdp);
   const prompt = nonEmptyString(message.prompt);
+  const sessionId = nonEmptyString(message.sessionId);
+  const realtimeSessionId = nonEmptyString(message.realtimeSessionId);
   const voice = normalizeCodexRealtimeVoice(nonEmptyString(message.voice));
   const outputModality =
     message.outputModality === "text" || message.outputModality === "audio" ? message.outputModality : "audio";
@@ -28,6 +36,8 @@ export function buildVoiceSessionStartParams(
     ...(sdp ? { sdp } : {}),
     outputModality,
     ...(prompt ? { prompt } : {}),
+    ...(sessionId ? { sessionId } : {}),
+    ...(realtimeSessionId ? { realtimeSessionId } : {}),
     ...(voice ? { voice } : {}),
   };
 }

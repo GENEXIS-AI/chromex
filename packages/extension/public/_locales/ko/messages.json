@@ -19,9 +19,17 @@
     "message": "Chromex 팝업 열기",
     "description": "Keyboard shortcut description for opening the popup workspace."
   },
+  "commandStartDictation": {
+    "message": "받아쓰기 시작/중지",
+    "description": "Chrome command description for voice dictation shortcut."
+  },
   "contextAskPage": {
     "message": "이 페이지를 Chromex에 물어보기",
     "description": "Context menu item for asking about the current page."
+  },
+  "contextAskSelection": {
+    "message": "AI에게 질문하기",
+    "description": "Context menu item for asking about selected text."
   },
   "contextEditImage": {
     "message": "이 이미지를 Chromex로 편집하기",

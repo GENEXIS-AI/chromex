@@ -19,9 +19,17 @@
     "message": "Buksan ang Chromex popup",
     "description": "Keyboard shortcut description for opening the popup workspace."
   },
+  "commandStartDictation": {
+    "message": "Start or stop dictation",
+    "description": "Chrome command description for voice dictation shortcut."
+  },
   "contextAskPage": {
     "message": "Tanungin ang Chromex tungkol sa page na ito",
     "description": "Context menu item for asking about the current page."
+  },
+  "contextAskSelection": {
+    "message": "Ask AI about selection",
+    "description": "Context menu item for asking about selected text."
   },
   "contextEditImage": {
     "message": "I-edit ang larawang ito gamit ang Chromex",

@@ -20,26 +20,38 @@ Published by **GenexisAI CHOI**.
 - 現在のウェブページ、選択した開いているタブ、スクリーンショット、アップロードファイル、PDF、Office ファイル、画像、ブラウザ履歴を、ユーザーが求めたときだけ会話の文脈に使います。
 - ページ、YouTube 動画、ニュース記事、調査ページ、PDF、arXiv 論文を要約・比較します。
 - Codex の画像ワークフローで画像を編集または生成し、出力をローカルで扱います。
-- 音声文字起こし、ライブ音声モード、ページに応じた提案、カスタムプロファイル、任意の Codex スキルを利用できます。
+- 音声文字起こし、プランモード、ページに応じた提案、カスタムプロファイル、任意の Codex スキルを利用できます。
+- Translation/Live モードでは、ライブ文字起こし、任意のリアルタイム翻訳、文字起こし内容に基づくフォローアップチャットを使えます。
 - Chrome content script を通じてブラウザ操作ワークフローを実行し、ページ上に作業状態を表示します。
 
-## 5 分でインストール
+## Chrome Web Store からインストール
 
-一般ユーザー向けの最短手順:
+Chrome Web Store からインストールしたユーザーは、Chromex をソースからビルドする必要はありません。
 
-1. [latest GitHub Release](https://github.com/GENEXIS-AI/chromex/releases/latest) を開きます。
-2. Release assets から [`chromex-unpacked-extension.zip`](https://github.com/GENEXIS-AI/chromex/releases/latest/download/chromex-unpacked-extension.zip) をダウンロードします。
-3. ZIP を展開します。
-4. Chrome で `chrome://extensions` を開きます。
-5. **Developer mode** を有効にします。
-6. **Load unpacked** を選び、展開した `chromex-extension` フォルダを選択します。
-7. Chrome ツールバーまたはサイドパネルから Chromex を開き、オンボーディングに従います。
+英語、韓国語、日本語、簡体字中国語に対応したコピー用ボタン付きの手順は公開セットアップページにあります: <https://genexis-ai.github.io/chromex/install/>
 
-Release ZIP ファイルは GitHub Releases に添付されます。リポジトリのファイルツリーには直接コミットされません。直接ダウンロードリンクが開けない場合は、[latest release page](https://github.com/GENEXIS-AI/chromex/releases/latest) の **Assets** から `chromex-unpacked-extension.zip` をダウンロードしてください。
+1. 公式 Codex CLI をインストールし、動作を確認します。公式のインストール方法は <https://github.com/openai/codex> で確認できます。
 
-拡張機能 ZIP がインストールするのは Chrome UI だけです。ローカルブリッジは、ソース checkout または `chromex-public-source.zip` から一度インストールする必要があります。
+```bash
+npm install -g @openai/codex
+codex --version
+```
 
-開発者向けソースインストール:
+   Chromex は `@openai/codex` の **0.130.0 以降** を必要とします。これより前のバージョン（例: 0.124.x、0.125.x）は一部のブートストラップ機能フラグを拒否するため、`codex login` が成功した直後でも `codex app-server exited with code 1` エラーが繰り返し発生します。
+
+2. 最新の [GitHub Release](https://github.com/GENEXIS-AI/chromex/releases/latest) から `chromex-local-bridge.zip` をダウンロードして展開し、次を実行します。
+
+```bash
+node scripts/install-native-host.mjs --browser=chrome
+```
+
+3. すべての Chrome ウィンドウを完全に終了して開き直し、Chromex で **Check connection** を押します。
+
+Chrome 拡張機能はセキュリティ上、ローカルブリッジを自動インストールできません。この 1 回だけのブリッジ登録で、Chrome とローカル Codex app-server を安全につなぎます。
+
+## ソースからインストール
+
+ソース checkout または [`chromex-public-source.zip`](https://github.com/GENEXIS-AI/chromex/releases/latest/download/chromex-public-source.zip) を使用してください。
 
 ```bash
 git clone https://github.com/GENEXIS-AI/chromex.git
@@ -49,11 +61,13 @@ npm run build
 node scripts/install-native-host.mjs
 ```
 
-その後、`chrome://extensions` で **Developer mode** を有効にし、**Load unpacked** から次のフォルダを選択します。
+その後、すべての Chrome ウィンドウを閉じて開き直し、`chrome://extensions` で **Developer mode** を有効にし、**Load unpacked** から次のフォルダを選択します。
 
 ```text
 packages/extension/dist
 ```
+
+重要: `npm install`、`npm run build`、`install-native-host.mjs` は、必ず `package.json` がある `chromex` ソースフォルダで実行してください。Windows で `ENOENT Could not read package.json` が出る場合は、別のフォルダにいます。
 
 ### Windows ローカルブリッジ設定
 
@@ -63,6 +77,8 @@ Windows では Node.js 20 LTS 以降をインストールしたうえで、先�
 npm install -g @openai/codex
 codex --version
 ```
+
+`winget install Codex -s msstore` が失敗しても、上記の npm インストール手順を使ってください。`0x8a15005e: The server certificate did not match any of the expected values` は Chromex ではなく Windows Store / TLS 証明書チェーンの問題です。
 
 その後、`chromex` ソースフォルダから **PowerShell** で実行します。
 
@@ -76,7 +92,7 @@ node scripts/install-native-host.mjs --browser=chrome
 
 それでもローカルブリッジ待機のままの場合:
 
-1. Chromex が release の `chromex-extension` フォルダ、または `packages/extension/dist` から読み込まれていることを確認します。
+1. Chromex が `packages/extension/dist` から読み込まれていることを確認します。
 2. `chrome://extensions` の Chromex カードに表示される extension ID をコピーします。
 3. その ID を指定してインストーラを再実行します。
 
@@ -87,6 +103,16 @@ node scripts/install-native-host.mjs <extension-id> --browser=chrome
 公開リリースで想定される ID は `menmlhahmendmkiicbjihgjhppkgaeom` です。Chrome に別の ID が表示される場合は、Chrome に表示された ID を使用してください。
 
 ログイン時に `Failed to start codex app-server` が出る場合、Chromex はローカルブリッジには接続できていますが Codex CLI を起動できていません。`codex --version` を再確認してください。Windows が Codex を見つけられない場合は、optional Codex binary path に `%APPDATA%\npm\codex.cmd` を設定するか、フォルダとして `%APPDATA%\npm` を設定します。workspace フォルダと Codex executable path は別の設定なので、Codex binary 欄にプロジェクトフォルダを入れないでください。
+
+Windows で実行ファイル検出を確認するには:
+
+```powershell
+npm install -g @openai/codex
+where codex
+codex --version
+```
+
+`where codex` が `C:\Users\<you>\AppData\Roaming\npm\codex.cmd` を表示する場合は、Chromex settings で optional Codex binary path を `%APPDATA%\npm\codex.cmd` に設定して保存し、すべての Chrome ウィンドウを閉じて開き直してから **Check connection** を押してください。
 
 ## ランタイム境界
 
@@ -114,6 +140,7 @@ Chromex は既定でブラウザの言語に自動的に従います。ユーザ
 - 拡張機能は、OpenAI API キー、OAuth トークン、ChatGPT セッショントークンの生値を Chrome extension storage に保存しません。
 - Codex OAuth / ChatGPT ログインは、ローカル Codex app-server フローで処理されます。
 - API キーログインは任意のローカル fallback であり、ユーザー確認なしに自動使用されません。
+- リアルタイム翻訳は別途確認された OpenAI API キー経路を使用し、設定から切断できます。
 - ページ内容、タブデータ、スクリーンショット、ブラウザ履歴、マイク入力、ブラウザ操作は、ユーザーが要求したワークフローでのみ使われます。
 - `history`、`tabs`、画面キャプチャ、マイク、サイトアクセス権限は、機能が必要とするときだけ要求されます。
 - 会話履歴は既定でセッション専用です。永続的なローカルチャット履歴はオプトインです。
@@ -128,8 +155,12 @@ Chromex は既定でブラウザの言語に自動的に従います。ユーザ
 - ページ、ファイル、画像、履歴、音声、ブラウザ操作リクエストの自動ルーティング
 - 複数の開いているタブを選択できる `@` ピッカー
 - プロファイル選択用の `/` ピッカー
+- あいまいな依頼を実行前に明示的な計画へ整理するプランモード
 - 画像、テキスト、PDF、DOCX、CSV、TSV、XLSX、XLSM の添付
 - DOM、vision、hybrid、site adapter ワークフロー向けの読み取り戦略ポリシー
+- 選択テキストの文脈注入、ファクトチェック提案、右クリックで AI に質問するフロー
+- 表示コマンドと実際に送信されるプロンプトを分けられるサイト別提案
+- ライブ文字起こし履歴、任意のリアルタイム翻訳再生、文字起こしに基づくフォローアップチャットを備えた Translation/Live モード
 - YouTube、ニュース、調査、メール、共同作業、ノート、タスク管理、ショッピング、旅行、韓国の業務サービスに応じたサイト提案
 - 現在のタイムスタンプ文脈とシーク操作に対応した YouTube adapter
 - アップロード画像、ページ画像、表示画面キャプチャに対する非破壊的な画像編集
@@ -171,6 +202,7 @@ Chromex は `0.1.1` 以降、通常のオープンソースリリース履歴を
 ## トラブルシューティング
 
 - **Native host missing or forbidden**: `npm run build` を実行し、続けて `node scripts/install-native-host.mjs --browser=chrome` を実行します。`chrome://extensions` で拡張機能を再読み込みし、Chromex のオンボーディングまたはシステム状態を確認してください。Chrome に別の extension ID が表示される場合は、`node scripts/install-native-host.mjs <extension-id> --browser=chrome` で再インストールしてください。
+- **Codex executable is not detected**: `npm install -g @openai/codex`、`where codex`、`codex --version` を実行します。必要なら Chromex の optional Codex binary path に `%APPDATA%\npm\codex.cmd` を設定して保存し、Chrome を完全に再起動して **Check connection** を押してください。
 - **モデル一覧が読み込まれない**: native bridge が接続されていることを確認し、app-server ベースのログインフローでサインインしてください。
 - **ページ文脈を利用できない**: 対象タブから Chromex を開くか、ワークフローが要求する Chrome サイト権限を許可してください。
 - **Chrome に古い UI が表示され続ける**: `npm run build` を実行し、拡張機能カードを再読み込みして、Chrome が `packages/extension/dist` を読み込んでいることを確認してください。

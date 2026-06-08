@@ -42,4 +42,16 @@ describe("action card routing", () => {
       }),
     ).toBe(true);
   });
+
+  test("keeps selected-text fact-check suggestions attached to the outgoing chat message", () => {
+    expect(
+      isTextFirstActionCard({
+        id: "selection-fact-check",
+        title: "Fact-check",
+        description: "",
+        kind: "prompt",
+        prompt: "Fact-check the selected text.",
+      }),
+    ).toBe(false);
+  });
 });

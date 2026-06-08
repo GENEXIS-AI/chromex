@@ -6,6 +6,9 @@ export function isTextFirstActionCard(card: ActionCard): boolean {
   if (isImageAttachmentSuggestionActionId(card.id)) {
     return false;
   }
+  if (card.id === "selection-fact-check") {
+    return false;
+  }
 
   return (
     card.kind === "prompt" ||

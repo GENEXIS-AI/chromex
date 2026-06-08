@@ -19,9 +19,17 @@
     "message": "打开 Chromex 弹出窗口",
     "description": "Keyboard shortcut description for opening the popup workspace."
   },
+  "commandStartDictation": {
+    "message": "开始/停止听写",
+    "description": "Chrome command description for voice dictation shortcut."
+  },
   "contextAskPage": {
     "message": "向 Chromex 询问此页面",
     "description": "Context menu item for asking about the current page."
+  },
+  "contextAskSelection": {
+    "message": "Ask AI about selection",
+    "description": "Context menu item for asking about selected text."
   },
   "contextEditImage": {
     "message": "用 Chromex 编辑此图片",

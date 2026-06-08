@@ -111,7 +111,7 @@ export interface ImageAssetFolderSnapshot {
   latestAssetPath?: string;
 }
 
-export type UserFileAttachmentKind = "image" | "text" | "pdf" | "docx" | "spreadsheet" | "binary";
+export type UserFileAttachmentKind = "image" | "audio" | "text" | "pdf" | "docx" | "spreadsheet" | "binary";
 
 export interface UserFileAttachment {
   id: string;
@@ -132,6 +132,7 @@ export interface VoiceSessionState {
   outputModality?: "audio" | "text";
   realtimeAvailable?: boolean;
   error?: string;
+  errorCode?: "requires-api-key" | string;
 }
 
 export interface CodexModelOption {

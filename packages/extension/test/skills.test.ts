@@ -10,7 +10,7 @@ describe("skills", () => {
     expect(extractSlashQuery("plain text")).toBeNull();
   });
 
-  test("lists only profile commands for slash invocation", () => {
+  test("lists profile commands and a direct profile creation action for slash invocation", () => {
     const results = listSlashCommandOptions(
       "legal",
       [
@@ -44,7 +44,11 @@ describe("skills", () => {
       kind: "profile",
       label: "Legal Reviewer",
     });
-    expect(results.every((option) => option.kind === "profile")).toBe(true);
+    expect(results.at(-1)).toMatchObject({
+      id: "create-profile",
+      kind: "create-profile",
+      label: "Create manually",
+    });
   });
 
   test("marks the active profile in slash command options", () => {
@@ -86,6 +90,11 @@ describe("skills", () => {
       kind: "profile",
       active: true,
       description: "",
+    });
+    expect(results.at(-1)).toMatchObject({
+      id: "create-profile",
+      kind: "create-profile",
+      label: "직접 만들기",
     });
   });
 
@@ -133,7 +142,14 @@ describe("skills", () => {
       "default",
     );
 
-    expect(results).toEqual([]);
+    expect(results).toEqual([
+      {
+        id: "create-profile",
+        kind: "create-profile",
+        label: "Create manually",
+        description: "",
+      },
+    ]);
   });
 
   test("filters profile commands by the text after the slash", () => {
@@ -165,7 +181,10 @@ describe("skills", () => {
       "default",
     );
 
-    expect(results.map((option) => option.label)).toEqual(["Research Assistant"]);
+    expect(results.filter((option) => option.kind === "profile").map((option) => option.label)).toEqual([
+      "Research Assistant",
+    ]);
     expect(results.some((option) => option.label === "Email Reply")).toBe(false);
+    expect(results.at(-1)?.kind).toBe("create-profile");
   });
 });

@@ -506,6 +506,31 @@ describe("sidepanel state normalization", () => {
     });
   });
 
+  test("preserves steer markers when hydrating and storing conversations", () => {
+    const conversation = normalizePanelConversation({
+      id: "steer-chat",
+      title: "Steer chat",
+      profileId: "default",
+      messages: [
+        {
+          id: "steer-user-1",
+          role: "user",
+          text: "길게 생각해",
+          steer: true,
+        },
+      ],
+    });
+
+    expect(conversation?.messages[0]).toMatchObject({
+      role: "user",
+      steer: true,
+    });
+    expect(serializeConversationMessagesForStorage(conversation?.messages ?? [])[0]).toMatchObject({
+      role: "user",
+      steer: true,
+    });
+  });
+
   test("drops transient trace-only assistant messages from saved chat history", () => {
     const conversation = normalizePanelConversation({
       id: "trace-chat",

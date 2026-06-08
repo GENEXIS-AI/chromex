@@ -1,6 +1,6 @@
 {
   "name": "@codex-sidepanel/bridge",
-  "version": "0.1.2",
+  "version": "0.1.7",
   "license": "MIT",
   "type": "module",
   "main": "dist/index.js",
@@ -11,7 +11,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@codex-sidepanel/shared": "0.1.2",
+    "@codex-sidepanel/shared": "0.1.7",
     "duplexer2": "^0.1.4",
     "mammoth": "^1.12.0",
     "pdf-parse": "^2.4.5",

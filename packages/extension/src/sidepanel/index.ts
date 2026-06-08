@@ -28,8 +28,17 @@ import { createPendingComposerDraftState, createRestoredComposerDraftState } fro
 import { getDroppedFiles, hasComposerDropPayload } from "./composer-drop.js";
 import { isTextFirstActionCard } from "./action-card-routing.js";
 import { mergePromptResultActionCards } from "./action-card-state.js";
+import {
+  createConferenceModeTranslationRequestEvent,
+  mergeConferenceModeTranscriptEntry,
+  parseConferenceModeAssistantText,
+  type ConferenceTranscriptEntry,
+} from "./conference-mode.js";
+import { buildComicImagePrompt } from "../comic-image-prompt.js";
+import { normalizeSelectedTextContext } from "../page-selection-context.js";
 import { calculateComposerTextareaAutosize } from "./composer-textarea-autosize.js";
 import { canSendComposerMessage } from "./composer-send-guard.js";
+import { parseGoalCommand } from "./goal-command.js";
 import {
   didComposerPrimaryActionChangeForDraftInput,
   resolveComposerPrimaryAction,
@@ -95,6 +104,7 @@ import {
   shouldClearPromptActivityOnMessageCompleted,
   shouldClearPromptActivityOnTurnCompleted,
 } from "./prompt-activity-lifecycle.js";
+import { collectBusyConversationIds } from "./busy-conversations.js";
 import {
   getPermissionRequestForMessage,
   getPermissionRequestForRuntimeResponse,
@@ -143,13 +153,14 @@ import {
 import { parseVoiceNavigationCommand } from "./voice-commands.js";
 import { shouldAutoReconnectVoice } from "./voice-reconnect.js";
 import { shouldInterruptVoiceOutputForTranscript } from "./voice-barge-in.js";
+import { listChangedSpeechRecognitionResults, type SpeechRecognitionResultEventLike } from "./voice-recognition-results.js";
 import {
   classifyMicrophonePermissionError,
   microphonePermissionResultToError,
   shouldOpenDedicatedMicrophonePermissionWindow,
   type MicrophonePermissionWindowResult,
 } from "./voice-permissions.js";
-import { listCodexRealtimeVoiceOptions } from "./voice-session.js";
+import { buildRealtimeVoiceStartMessage, listCodexRealtimeVoiceOptions } from "./voice-session.js";
 import { createRealtimeVoiceContextAppendText } from "./voice-turn-context.js";
 import { shouldRouteRealtimeVoiceTranscriptThroughPrompt } from "./voice-agentic-routing.js";
 import { extractRealtimeVoiceHandoffPrompt } from "./voice-handoff.js";
@@ -232,9 +243,11 @@ import {
 } from "./image-annotation.js";
 import { isYouTubeCurrentMomentAction, type YouTubeCurrentMomentPromptResult } from "../youtube-current-moment.js";
 import type {
+  ConversationConferenceModeSnapshot,
   ConversationMessageAttachment,
   ConversationMessageImage,
   ConversationMessageProfile,
+  ConferenceTranscriptSnapshotEntry,
   ConversationMessageStructuredInput,
   ConversationMessageTraceItem,
   ConversationMessage,
@@ -242,7 +255,10 @@ import type {
   ExtensionSettings,
   PromptRequestPayload,
   SavedConversation,
+  SelectedPageTextContext,
   UiInitPayload,
+  UiSettingsSnapshotPayload,
+  VoiceInputAudioSource,
 } from "../types.js";
 import { listAttachmentMenuItems, type AttachmentMenuAction } from "./attachment-menu.js";
 import {
@@ -260,6 +276,7 @@ import {
 } from "./i18n.js";
 import { normalizeUiThemeSetting, resolveUiTheme } from "../ui-theme.js";
 import { classifyRuntimeMessageError, isRetryableRuntimeMessageError, toErrorMessage } from "../runtime-errors.js";
+import { getSpecificRuntimeErrorMessage } from "./runtime-error-copy.js";
 import { isCurrentPageAttachment, sanitizeUnavailableCurrentPageAttachments } from "../page-context.js";
 import { MAX_PROFILE_SYSTEM_PROMPT_LENGTH } from "../profile-templates.js";
 import {
@@ -273,9 +290,11 @@ import {
   isPluginMentionRouteable,
 } from "../plugin-connection-availability.js";
 import {
+  createCustomSiteSuggestion,
   deleteCustomSiteSuggestion,
   inferCustomSiteSuggestionCards,
   listCustomSiteSuggestionsForTab,
+  normalizeCustomSiteSuggestions,
   resolveCustomSiteSuggestionKey,
   upsertCustomSiteSuggestion,
 } from "../custom-site-suggestions.js";
@@ -298,8 +317,10 @@ import {
 import { createStreamingDeltaBuffer } from "./streaming-delta-buffer.js";
 import { renderUiIcon, type UiIconName } from "./ui-icons.js";
 
-type MainView = "chat" | "context" | "skills" | "plugins" | "workspace";
+type MainView = "chat" | "conference" | "interpreter" | "context" | "skills" | "plugins" | "workspace";
 const MAX_TRACE_ITEMS = 12;
+const COMPLETED_IMAGE_WORKFLOW_MESSAGE_RETENTION_MS = 60_000;
+const PARTIAL_IMAGE_WORKFLOW_MESSAGE_RETENTION_MS = 30 * 60_000;
 
 type ProfileEditorState = {
   mode: "create" | "edit";
@@ -314,6 +335,17 @@ type ProfileEditorState = {
   error?: string;
 };
 
+type CustomSiteSuggestionEditorState = {
+  mode: "create" | "edit";
+  siteKey: string;
+  siteLabel: string;
+  command: string;
+  prompt: string;
+  suggestionId?: string;
+  createdAt?: number;
+  error?: string;
+};
+
 type NativeTextDialogState = {
   kind: "api-key";
   title: string;
@@ -323,15 +355,84 @@ type NativeTextDialogState = {
   confirmLabel: string;
   cancelLabel: string;
   inputType: "text" | "password";
-  afterSubmit?: {
-    kind: "retry-prompt";
-    message: string;
-    displayMessage: string;
-    resetThread?: boolean;
-  };
+  afterSubmit?:
+    | {
+        kind: "retry-prompt";
+        message: string;
+        displayMessage: string;
+        resetThread?: boolean;
+        profileId?: string;
+      }
+    | { kind: "retry-live-voice" }
+    | { kind: "retry-composer-dictation"; target: ComposerVoiceInputTarget }
+    | { kind: "retry-realtime-interpreter" }
+    | { kind: "retry-conference-mode" };
   error?: string;
   submitting?: boolean;
 };
+
+type RealtimeInterpreterTranscriptEntry = {
+  id: string;
+  sourceText: string;
+  translationText: string;
+  createdAt: number;
+};
+
+type RealtimeInterpreterInputSource = "display" | "microphone";
+
+type RealtimeInterpreterMicrophoneDevice = {
+  deviceId: string;
+  label: string;
+};
+
+type RealtimeInterpreterAudioStreamResult = {
+  stream: MediaStream;
+  sourceLabel: string;
+};
+
+type RealtimeTranslationOwner = "interpreter" | "conference";
+
+type RealtimeInterpreterState = {
+  viewActive: boolean;
+  active: boolean;
+  starting: boolean;
+  stopping: boolean;
+  settingsOpen: boolean;
+  livePlaybackEnabled: boolean;
+  outputVolume: number;
+  error: string;
+  sourceLabel: string;
+  inputSource: RealtimeInterpreterInputSource;
+  microphoneDeviceId: string;
+  microphoneDevices: RealtimeInterpreterMicrophoneDevice[];
+  microphoneDevicesLoading: boolean;
+  targetLanguage: string;
+  entries: RealtimeInterpreterTranscriptEntry[];
+  partialSourceText: string;
+  partialTranslationText: string;
+};
+
+type ComputerAudioCaptureOptions = {
+  suppressLocalAudioPlayback?: boolean;
+};
+
+const DEFAULT_REALTIME_INTERPRETER_OUTPUT_VOLUME = 0.5;
+
+const REALTIME_INTERPRETER_TARGET_LANGUAGES = [
+  { value: "ko", ko: "한국어", en: "Korean" },
+  { value: "en", ko: "영어", en: "English" },
+  { value: "ja", ko: "일본어", en: "Japanese" },
+  { value: "zh", ko: "중국어", en: "Chinese" },
+  { value: "es", ko: "스페인어", en: "Spanish" },
+  { value: "fr", ko: "프랑스어", en: "French" },
+  { value: "de", ko: "독일어", en: "German" },
+  { value: "it", ko: "이탈리아어", en: "Italian" },
+  { value: "pt", ko: "포르투갈어", en: "Portuguese" },
+  { value: "nl", ko: "네덜란드어", en: "Dutch" },
+  { value: "hi", ko: "힌디어", en: "Hindi" },
+  { value: "ar", ko: "아랍어", en: "Arabic" },
+  { value: "tr", ko: "터키어", en: "Turkish" },
+] as const;
 
 type NativeConfirmationDialogState = {
   title: string;
@@ -355,15 +456,10 @@ type ImageAnnotationEditorState =
   | { source: "file"; attachmentId: string }
   | { source: "conversation"; messageId: string; imageIndex: number; name: string; dataUrl: string };
 
-type SpeechRecognitionResult = {
-  isFinal: boolean;
-  0: { transcript: string };
-};
-
 type SpeechRecognitionCtor = new () => {
   continuous: boolean;
   interimResults: boolean;
-  onresult: ((event: { results: ArrayLike<SpeechRecognitionResult> }) => void) | null;
+  onresult: ((event: SpeechRecognitionResultEventLike) => void) | null;
   onend: (() => void) | null;
   start(): void;
   stop(): void;
@@ -398,6 +494,7 @@ type SidepanelBridgeEvent = {
   transport?: "webrtc" | "websocket";
   audio?: RealtimeOutputAudioChunk;
   message?: string;
+  errorCode?: string;
   reason?: string | null;
   threadId?: string;
   turnId?: string;
@@ -418,6 +515,32 @@ type SidepanelBridgeEvent = {
   status?: "running" | "completed";
   timestampMs?: number;
   conversationId?: string;
+  requestId?: string;
+  questions?: PlanUserInputQuestion[];
+};
+
+type PlanUserInputQuestion = {
+  id: string;
+  header: string;
+  question: string;
+  isOther?: boolean;
+  isSecret?: boolean;
+  options?: Array<{ label: string; description: string }>;
+};
+
+type PlanUserInputRequestState = {
+  requestId: string;
+  threadId: string;
+  turnId: string;
+  itemId: string;
+  questions: PlanUserInputQuestion[];
+  local?: boolean;
+  originalMessage?: string;
+};
+
+type PlanInputAnswerDraft = {
+  selectedIndex: number | null;
+  custom: string;
 };
 
 type PendingVoiceAnswer = {
@@ -436,6 +559,12 @@ type PendingVoiceStart = {
 
 type RealtimeVoiceTransport = "webrtc" | "websocket" | "browser-speech";
 type VoiceRecognitionMode = "live" | "composer";
+type ComposerVoiceInputTarget = "composer" | "page";
+type ComposerVoiceInputPhase = "idle" | "starting" | "listening" | "stopping";
+type PendingDictationShortcut = {
+  requestId: string;
+  createdAt: number;
+};
 
 type RealtimeOutputAudioChunk = {
   data?: unknown;
@@ -603,15 +732,19 @@ const DEFAULT_PROFILE_VISUAL_ICON = DEFAULT_PROFILE_ICON_ID;
 const MAX_PROFILE_IMAGE_BYTES = 180_000;
 const EXTERNAL_IMAGE_PREVIEW_OBJECT_URL_REVOKE_MS = 60_000;
 const EMPTY_ASSISTANT_RESPONSE_NOTICE_DELAY_MS = 3000;
+const SELECTED_PAGE_TEXT_CONTEXT_MAX_CHARS = 12_000;
+const SELECTION_FACT_CHECK_ACTION_ID = "selection-fact-check";
 const autoSavedImageAssetRefs = new Set<string>();
 const pendingImageWorkflowMessageIdsByRequest = new Map<string, string>();
 const completedImageWorkflowMessageIdsByRequest = new Map<string, string>();
 const streamedImagePreviewRefsByRequest = new Map<string, string[]>();
 const promptRequestConversationIds = new Map<string, string>();
+const pendingPromptRequestIdsByConversationId = new Map<string, string>();
 const conversationMessagesById = new Map<string, ConversationMessage[]>();
 const conversationThreadIdsById = new Map<string, string>();
 const conversationProfilesById = new Map<string, string>();
 const conversationModelsById = new Map<string, string | undefined>();
+const conferenceModesByConversationId = new Map<string, ConversationConferenceModeSnapshot>();
 const promptActivitiesByConversationId = new Map<string, PromptActivityState>();
 const activePromptUserMessageIdsByConversationId = new Map<string, string>();
 const activeTurnsByConversationId = new Map<string, CodexActiveTurn>();
@@ -635,6 +768,7 @@ if (!rootElement) {
   throw new Error("Missing #app root");
 }
 const root: HTMLDivElement = rootElement;
+root.addEventListener("click", handleYouTubeTimestampClick);
 const initialLocale = detectUiLocale(getBrowserUiLanguage());
 
 function createFallbackPlaywrightRuntime(): UiInitPayload["playwrightRuntime"] {
@@ -650,6 +784,58 @@ function createFallbackPlaywrightRuntime(): UiInitPayload["playwrightRuntime"] {
   };
 }
 
+type ConferenceModeState = {
+  viewActive: boolean;
+  active: boolean;
+  starting: boolean;
+  stopping: boolean;
+  error: string;
+  sourceLabel: string;
+  sessionId: string;
+  threadId: string;
+  entries: ConferenceTranscriptEntry[];
+  partialSourceText: string;
+  partialTranslationText: string;
+};
+
+function createConferenceModeState(): ConferenceModeState {
+  return {
+    viewActive: false,
+    active: false,
+    starting: false,
+    stopping: false,
+    error: "",
+    sourceLabel: "",
+    sessionId: "",
+    threadId: "",
+    entries: [],
+    partialSourceText: "",
+    partialTranslationText: "",
+  };
+}
+
+function createRealtimeInterpreterState(): RealtimeInterpreterState {
+  return {
+    viewActive: false,
+    active: false,
+    starting: false,
+    stopping: false,
+    settingsOpen: false,
+    livePlaybackEnabled: false,
+    outputVolume: DEFAULT_REALTIME_INTERPRETER_OUTPUT_VOLUME,
+    error: "",
+    sourceLabel: "",
+    inputSource: "display",
+    microphoneDeviceId: "",
+    microphoneDevices: [],
+    microphoneDevicesLoading: false,
+    targetLanguage: "ko",
+    entries: [],
+    partialSourceText: "",
+    partialTranslationText: "",
+  };
+}
+
 const state = {
   accountStatus: null as UiInitPayload["accountStatus"] | null,
   currentPageSupport: {
@@ -657,6 +843,7 @@ const state = {
     blockedReason: "",
   } as UiInitPayload["currentPageSupport"],
   currentTabReference: null as OpenTabContext | null,
+  selectedPageTextContext: null as SelectedPageTextContext | null,
   models: [] as CodexModelOption[],
   profiles: [] as ProfileTemplate[],
   selectedProfileId: "default",
@@ -691,6 +878,7 @@ const state = {
   imageAnnotationReferenceAttachments: [] as UserFileAttachment[],
   imageAnnotationEditor: null as null | ImageAnnotationEditorState,
   profileEditor: null as null | ProfileEditorState,
+  customSiteSuggestionEditor: null as null | CustomSiteSuggestionEditorState,
   nativeTextDialog: null as null | NativeTextDialogState,
   nativeConfirmationDialog: null as null | NativeConfirmationDialogState,
   pluginConnectionDialog: null as null | PluginConnectionDialogState,
@@ -718,6 +906,8 @@ const state = {
   browserActionPermissionMenuOpen: false,
   composerModelMenuOpen: false,
   appMenuOpen: false,
+  settingsDropdownOpen: "" as SettingsSelectId | "",
+  settingsDropdownSearch: "",
   appMenuRecentChatLimit: APP_MENU_RECENT_CHAT_LIMIT,
   settings: {
     uiLanguage: "auto",
@@ -729,8 +919,11 @@ const state = {
     allowVoiceNavigation: true,
     allowBrowserActions: true,
     browserActionPermissionMode: "ask",
+    imagePromptHoverButtonEnabled: true,
+    planModeEnabled: false,
     playwrightBrowserControlEnabled: false,
     preferredVoice: "",
+    voiceInputAudioSource: "microphone",
     workspaceRoot: "",
     codexBinPath: "",
     enabledCodexSkillIds: [],
@@ -744,6 +937,8 @@ const state = {
   connectedApps: [] as CodexAppOption[],
   appServerPlugins: [] as CodexPluginOption[],
   mcpServers: [] as CodexMcpServerOption[],
+  skillSettingsSearchQuery: "",
+  pluginMcpSettingsSearchQuery: "",
   recentChats: [] as ConversationSummary[],
   serverThreads: [] as CodexThreadSummary[],
   currentConversationId: "",
@@ -768,6 +963,11 @@ const state = {
     retryMessage?: string;
   } | null,
   pendingAction: "" as "" | "voice" | "image-edit",
+  pendingPlanInputRequest: null as PlanUserInputRequestState | null,
+  planInputActiveIndex: 0,
+  planInputAnswers: {} as Record<string, PlanInputAnswerDraft>,
+  conferenceMode: createConferenceModeState(),
+  realtimeInterpreter: createRealtimeInterpreterState(),
   uiLocale: initialLocale as UiLocale,
   activeView: "chat" as MainView,
 };
@@ -796,11 +996,23 @@ let pendingVoiceStart: PendingVoiceStart | null = null;
 let realtimeVoiceContextSnapshotPromise: Promise<string> | null = null;
 let realtimeVoiceContextSnapshotPrompt = "";
 let realtimeVoiceContextSnapshotCapturedAt = 0;
+let chatgptRealtimeEndpointFailureReason: string | null = null;
+let chatgptRealtimeEndpointFailureAccountKey: string | null = null;
 let composerVoiceInputStream: MediaStream | null = null;
 let composerVoiceInputAudioContext: AudioContext | null = null;
 let composerVoiceInputAudioSource: MediaStreamAudioSourceNode | null = null;
 let composerVoiceInputAnalyser: AnalyserNode | null = null;
+let composerVoiceInputAudioBoostContext: AudioContext | null = null;
+let composerVoiceInputAudioBoostSource: MediaStreamAudioSourceNode | null = null;
+let composerVoiceInputAudioBoostGain: GainNode | null = null;
+let composerVoiceInputAudioBoostCompressor: DynamicsCompressorNode | null = null;
+let composerVoiceInputAudioBoostDestination: MediaStreamAudioDestinationNode | null = null;
+let composerVoiceInputRawCaptureStream: MediaStream | null = null;
 let composerVoiceInputWaveformTimer: number | null = null;
+let composerVoiceInputSilenceWarningTimer: number | null = null;
+let composerVoiceInputLastAudibleAt = 0;
+let composerVoiceInputSilenceWarningShown = false;
+let composerVoiceInputSilenceWarningStatusActive = false;
 let composerVoiceInputWaveformLevels = createSilentComposerVoiceWaveform();
 let composerVoiceInputAudioData: Uint8Array<ArrayBuffer> | null = null;
 let systemThemeMediaQuery: MediaQueryList | null = null;
@@ -809,12 +1021,52 @@ let composerDropHandlersInstalled = false;
 let composerVoiceInputFinalTranscript = "";
 let composerVoiceInputInterimTranscript = "";
 let composerVoiceInputCommitPromise: Promise<void> | null = null;
+let composerVoiceInputTarget: ComposerVoiceInputTarget = "composer";
+let composerVoiceInputPhase: ComposerVoiceInputPhase = "idle";
+let composerVoiceInputRealtimeThreadId: string | null = null;
+let composerVoiceInputRealtimeSessionId: string | null = null;
+let composerVoiceInputRealtimeStarted = false;
+let composerVoiceInputRealtimeStartPromise: PendingVoiceStart | null = null;
+let composerVoiceInputRealtimePeer: RTCPeerConnection | null = null;
+let composerVoiceInputRealtimeAudioContext: AudioContext | null = null;
+let composerVoiceInputRealtimeAudioSource: MediaStreamAudioSourceNode | null = null;
+let composerVoiceInputRealtimeAudioWorkletNode: AudioWorkletNode | null = null;
+let composerVoiceInputRealtimeAudioSamples: number[] = [];
+let composerVoiceInputRealtimeAudioSendChain: Promise<void> = Promise.resolve();
+let composerVoiceInputRealtimeDataChannelTranscriptsActive = false;
+let composerVoiceInputRealtimeDataChannelTranscriptLogged = false;
+let composerVoiceInputRealtimeDataChannel: RTCDataChannel | null = null;
+let composerVoiceInputRealtimeAudioChunksSent = 0;
+let composerVoiceInputRealtimeLastAudioSentAt = 0;
+let composerVoiceInputRealtimeLastTranscriptAt = 0;
+let conferenceModeStream: MediaStream | null = null;
+let conferenceModePeer: RTCPeerConnection | null = null;
+let conferenceModeAudioContext: AudioContext | null = null;
+let conferenceModeAudioSource: MediaStreamAudioSourceNode | null = null;
+let conferenceModeAudioWorkletNode: AudioWorkletNode | null = null;
+let conferenceModeAudioSamples: number[] = [];
+let conferenceModeAudioSendChain: Promise<void> = Promise.resolve();
+let conferenceModeAudioGeneration = 0;
+let conferenceModeDataChannel: RTCDataChannel | null = null;
+let conferenceModePendingTranslationRequests: string[] = [];
+let conferenceModeTranslationInFlight = false;
+let conferenceModeActiveTranslationSource = "";
+let conferenceModeTranslationRetryTimer: number | null = null;
+let conferenceModeDataChannelTranscriptsActive = false;
+let conferenceModeTranscriptCounter = 0;
+let realtimeInterpreterStream: MediaStream | null = null;
+let realtimeInterpreterPeer: RTCPeerConnection | null = null;
+let realtimeInterpreterDataChannel: RTCDataChannel | null = null;
+let realtimeInterpreterAudio: HTMLAudioElement | null = null;
+let realtimeInterpreterEntryCounter = 0;
+let realtimeInterpreterStartGeneration = 0;
+let realtimeTranslationOwner: RealtimeTranslationOwner = "interpreter";
+let lastHandledDictationShortcutId = "";
 let microphonePermissionWindowPromise: Promise<{
   result: MicrophonePermissionWindowResult;
   message?: string;
 }> | null = null;
 let voiceStartPromise: Promise<void> | null = null;
-let browserVoiceFallbackActive = false;
 let voiceReconnectTimer: number | null = null;
 let voiceReconnectAttempts = 0;
 let voiceStopRequested = false;
@@ -832,22 +1084,51 @@ let pendingPluginConnectionCatalogRefresh = false;
 let composerCompositionInProgress = false;
 let composerCompositionStartDraft = "";
 let renderDeferredDuringComposerComposition = false;
+let floatingSurfaceLayoutBindingsInstalled = false;
+let floatingSurfaceLayoutFrame: number | null = null;
 let smokeDryRunSubmissions: string[] = [];
 let promptSubmissionBootstrapInFlight = false;
 let chatScrollUserOverrideUntil = 0;
 let pendingChatScrollToBottom = false;
 let pendingChatScrollAnchor: { previousScrollTop: number; previousScrollHeight: number } | null = null;
 let lastRenderedActiveView: MainView | null = null;
+let conferenceTranscriptStickToBottom = true;
+let realtimeInterpreterTranscriptStickToBottom = true;
+let conferencePaneSplitRatio = 0.46;
+let realtimeInterpreterPaneSplitRatio = 0.52;
 const completedTurnIds = new Set<string>();
 const cancelledPromptRequestIds = new Set<string>();
-const REALTIME_AUDIO_CHUNK_MS = 240;
+const REALTIME_AUDIO_CHUNK_MS = 120;
 const REALTIME_BARGE_IN_RMS_THRESHOLD = 0.075;
 const REALTIME_BARGE_IN_REQUIRED_AUDIO_FRAMES = 6;
 const REALTIME_BARGE_IN_SUPPRESSION_MS = 220;
 const REALTIME_VOICE_CONTEXT_SNAPSHOT_TTL_MS = 5000;
 const COMPOSER_VOICE_WAVEFORM_BAR_COUNT = 46;
 const COMPOSER_VOICE_WAVEFORM_REFRESH_MS = 90;
+const COMPOSER_VOICE_SILENCE_WARNING_MS = 3500;
 const COMPOSER_VOICE_STOP_FINALIZATION_TIMEOUT_MS = 1500;
+const COMPOSER_REALTIME_DICTATION_FINALIZATION_TIMEOUT_MS = 700;
+const COMPOSER_REALTIME_DICTATION_LATE_TRANSCRIPT_TIMEOUT_MS = 2600;
+const COMPOSER_REALTIME_TRANSCRIPT_POLL_INTERVAL_MS = 160;
+const COMPUTER_AUDIO_CAPTURE_BOOST_GAIN = 3.6;
+const CHROME_WEB_STORE_EXTENSION_ID = "odlalmnpmmakfigepbaabimjcmcppgfo";
+const AUTH_ONBOARDING_AUTO_RECONNECT_INTERVAL_MS = 5_000;
+const TRANSCRIPT_AUTOSCROLL_BOTTOM_THRESHOLD_PX = 36;
+const TRANSCRIPT_PANE_SPLIT_MIN = 0.28;
+const TRANSCRIPT_PANE_SPLIT_MAX = 0.72;
+type DisplayAudioCaptureHint = "include" | "exclude";
+type WindowAudioCaptureHint = "exclude" | "window" | "system";
+type ExtendedDisplayMediaOptions = DisplayMediaStreamOptions & {
+  monitorTypeSurfaces?: DisplayAudioCaptureHint;
+  preferCurrentTab?: boolean;
+  selfBrowserSurface?: DisplayAudioCaptureHint;
+  surfaceSwitching?: DisplayAudioCaptureHint;
+  systemAudio?: DisplayAudioCaptureHint;
+  windowAudio?: WindowAudioCaptureHint;
+};
+type ExtendedDisplayAudioConstraints = MediaTrackConstraints & {
+  suppressLocalAudioPlayback?: boolean;
+};
 type ComposerTextareaAutosizeMetrics = {
   lineHeight: number;
   paddingTop: number;
@@ -858,6 +1139,8 @@ const composerTextareaAutosizeMetricsByElement = new WeakMap<
   HTMLTextAreaElement,
   ComposerTextareaAutosizeMetrics
 >();
+let authOnboardingAutoReconnectTimer: number | null = null;
+let authOnboardingAutoReconnectInFlight = false;
 const renderBatcher = createRenderBatcher(
   () => renderNow(),
   (callback) =>
@@ -909,9 +1192,12 @@ void scheduleInitialize();
 
 window.addEventListener("pagehide", () => {
   flushStreamingAssistantDeltas();
+  syncAuthOnboardingAutoReconnect(false);
   void persistConversationBatch.flush();
   voiceStopRequested = true;
   cancelVoiceReconnect();
+  void stopConferenceMode({ notifyBridge: true, preserveEntries: true, keepViewActive: true });
+  void stopRealtimeInterpreterMode({ preserveEntries: true, keepViewActive: true });
   void stopRealtimeVoiceSession({ notifyBridge: true });
 });
 
@@ -931,9 +1217,14 @@ window.addEventListener("unhandledrejection", (event) => {
   event.preventDefault();
 });
 
-chrome.runtime.onMessage.addListener((message) => {
+chrome.runtime.onMessage.addListener((message, sender) => {
   if (message.type === "ui.active-tab.updated") {
     applyActiveTabUpdate(message);
+    return;
+  }
+
+  if (message.type === "ui.page-selection.changed") {
+    applyPageSelectionContextUpdate(message, sender);
     return;
   }
 
@@ -953,7 +1244,13 @@ chrome.runtime.onMessage.addListener((message) => {
   }
 
   if (message.type === "ui.context-menu-action.pending") {
+    void takePendingContextMenuSelection();
     void takePendingContextMenuAction();
+    return;
+  }
+
+  if (message.type === "ui.dictation.shortcut") {
+    void handleDictationShortcutMessage(message);
     return;
   }
 
@@ -976,6 +1273,20 @@ chrome.runtime.onMessage.addListener((message) => {
   ) {
     bufferUnresolvedConversationScopedBridgeEvent(event);
     return;
+  }
+
+  if (event.type === "plan.user_input.requested") {
+    if (!isCurrentConversationEvent) {
+      return;
+    }
+    applyPlanUserInputRequest(event);
+    shouldRender = true;
+  }
+  if (event.type === "plan.user_input.resolved") {
+    if (state.pendingPlanInputRequest?.requestId === event.requestId) {
+      clearPlanUserInputRequest();
+      shouldRender = true;
+    }
   }
 
   if (event.type === "message.delta") {
@@ -1037,9 +1348,9 @@ chrome.runtime.onMessage.addListener((message) => {
     clearResolvedEmptyAssistantResponseNotices(state.messages);
     if (!state.promptActivity && !state.activeTurn?.turnId) {
       state.streamingAssistantMessageIds.delete(messageId);
-    }
-    if (state.voiceEnabled && browserVoiceFallbackActive) {
-      speak(event.text ?? "");
+      if (state.currentConversationId) {
+        clearConversationActivity(state.currentConversationId);
+      }
     }
     scheduleConversationPersist();
     flushConversationPersist();
@@ -1105,10 +1416,57 @@ chrome.runtime.onMessage.addListener((message) => {
     return;
   }
   if (event.type === "voice.output_audio.delta") {
+    if (isComposerRealtimeVoiceInputEvent(event)) {
+      return;
+    }
+    if (isConferenceModeVoiceEvent(event)) {
+      return;
+    }
     void playRealtimeOutputAudio(event.audio as RealtimeOutputAudioChunk);
     return;
   }
+  if (isComposerRealtimeVoiceInputStartedEvent(event)) {
+    handleComposerRealtimeVoiceInputStarted(event);
+    shouldRender = true;
+  }
+  if (isComposerRealtimeVoiceInputEvent(event)) {
+    if (event.type === "voice.transcript.delta") {
+      if (!composerVoiceInputRealtimeDataChannelTranscriptsActive) {
+        handleComposerRealtimeTranscriptDelta(event);
+      }
+      shouldRender = true;
+    }
+    if (event.type === "voice.transcript.done") {
+      if (!composerVoiceInputRealtimeDataChannelTranscriptsActive) {
+        handleComposerRealtimeTranscriptDone(event);
+      }
+      shouldRender = true;
+    }
+    if (event.type === "voice.error") {
+      handleComposerRealtimeVoiceInputError(event.message ?? stringsForState().errors.voiceUpdate);
+      shouldRender = true;
+    }
+    if (event.type === "voice.session.stopped") {
+      handleComposerRealtimeVoiceInputStopped();
+      shouldRender = true;
+    }
+    if (shouldRender) {
+      render();
+    }
+    return;
+  }
+  if (isConferenceModeVoiceEvent(event)) {
+    handleConferenceModeVoiceEvent(event);
+    shouldRender = true;
+    if (shouldRender) {
+      render();
+    }
+    return;
+  }
   if (event.type === "voice.session.started") {
+    if (state.accountStatus?.authMode === "chatgpt") {
+      clearKnownChatgptRealtimeEndpointFailure();
+    }
     activateRealtimeVoiceSession({
       ...(event.threadId ? { threadId: event.threadId } : {}),
       transport: event.transport ?? realtimeVoiceTransport,
@@ -1170,6 +1528,48 @@ chrome.runtime.onMessage.addListener((message) => {
     );
     shouldRender = true;
   }
+  if (event.type === "turn.failed" && event.threadId) {
+    const turnId = event.turnId ?? "";
+    const failureMessage = toUserFacingRuntimeError(event.message || "", stringsForState().errors.requestFailed);
+    const failureMessageId = createAssistantFailureMessageId(
+      event.clientRequestId || `${event.threadId}-${turnId || Date.now()}`,
+    );
+    cancelEmptyAssistantResponseNotice(event.threadId, turnId, eventConversationId);
+    if (!isCurrentConversationEvent && eventConversationId) {
+      upsertAssistantFailureMessageInMessages(
+        getDetachedConversationMessages(eventConversationId),
+        failureMessage,
+        failureMessageId,
+      );
+      clearEmptyAssistantResponseNoticeForTurn(event.threadId, turnId, eventConversationId);
+      completeTurnTraceForConversation(eventConversationId, event.threadId, turnId);
+      clearConversationActivity(eventConversationId);
+      rememberConversationThreadId(eventConversationId, event.threadId);
+      renderConversationListIfVisible();
+      void persistDetachedConversation(eventConversationId);
+      return;
+    }
+    flushStreamingAssistantDeltas();
+    clearEmptyAssistantResponseNoticeForTurn(event.threadId, turnId, eventConversationId);
+    completeTurnTrace(event.threadId, turnId);
+    upsertAssistantFailureMessageInMessages(state.messages, failureMessage, failureMessageId);
+    state.promptActivity = null;
+    state.streamingAssistantMessageIds.clear();
+    state.threadId = event.threadId;
+    if (turnId) {
+      completedTurnIds.add(turnId);
+    }
+    clearActivePromptUserMessageId();
+    if (state.currentConversationId) {
+      clearConversationActivity(state.currentConversationId);
+    }
+    if (state.activeTurn?.turnId === turnId) {
+      state.activeTurn = null;
+    }
+    scheduleConversationPersist();
+    flushConversationPersist();
+    shouldRender = true;
+  }
   if (event.type === "turn.completed" && event.threadId) {
     if (!isCurrentConversationEvent && eventConversationId) {
       completeTurnTraceForConversation(eventConversationId, event.threadId, event.turnId ?? "");
@@ -1179,10 +1579,7 @@ chrome.runtime.onMessage.addListener((message) => {
         turnId: event.turnId ?? "",
         activeUserMessageId: activePromptUserMessageIdsByConversationId.get(eventConversationId) ?? null,
       });
-      activeTurnsByConversationId.delete(eventConversationId);
-      promptActivitiesByConversationId.delete(eventConversationId);
-      activePromptUserMessageIdsByConversationId.delete(eventConversationId);
-      streamingAssistantMessageIdsByConversationId.delete(eventConversationId);
+      clearConversationActivity(eventConversationId);
       rememberConversationThreadId(eventConversationId, event.threadId);
       renderConversationListIfVisible();
       void persistDetachedConversation(eventConversationId);
@@ -1213,6 +1610,9 @@ chrome.runtime.onMessage.addListener((message) => {
     const completedCurrentPromptAnchor = !state.activeTurn?.turnId || !event.turnId || state.activeTurn.turnId === event.turnId;
     if (completedCurrentPromptAnchor) {
       clearActivePromptUserMessageId();
+      if (state.currentConversationId) {
+        clearConversationActivity(state.currentConversationId);
+      }
     }
     if (state.activeTurn?.turnId === event.turnId) {
       state.activeTurn = null;
@@ -1306,11 +1706,16 @@ chrome.runtime.onMessage.addListener((message) => {
     shouldRender = state.activeView === "chat";
   }
   if (event.type === "turn.activity" && event.threadId && event.turnId) {
+    const activityStatus = event.status === "completed" ? "completed" : "running";
     if (!isCurrentConversationEvent && eventConversationId) {
-      activeTurnsByConversationId.set(eventConversationId, {
-        threadId: event.threadId,
-        turnId: event.turnId,
-      });
+      if (activityStatus === "running" && !completedTurnIds.has(event.turnId)) {
+        activeTurnsByConversationId.set(eventConversationId, {
+          threadId: event.threadId,
+          turnId: event.turnId,
+        });
+      } else if (activeTurnsByConversationId.get(eventConversationId)?.turnId === event.turnId) {
+        activeTurnsByConversationId.delete(eventConversationId);
+      }
       rememberConversationThreadId(eventConversationId, event.threadId);
       upsertTurnActivityTraceForConversation(eventConversationId, {
         threadId: event.threadId,
@@ -1319,13 +1724,37 @@ chrome.runtime.onMessage.addListener((message) => {
         kind: normalizeTraceEventKind(event.kind),
         title: event.title ?? "",
         detail: event.detail ?? "",
-        status: event.status === "completed" ? "completed" : "running",
+        status: activityStatus,
         timestampMs: Number.isFinite(event.timestampMs) ? Number(event.timestampMs) : Date.now(),
       });
       renderConversationListIfVisible();
       return;
     }
-    if (!completedTurnIds.has(event.turnId)) {
+    if (event.kind === "image") {
+      const imageActiveTurn =
+        state.activeTurn?.turnId === event.turnId
+          ? state.activeTurn
+          : {
+              threadId: event.threadId,
+              turnId: event.turnId,
+            };
+      if (activityStatus === "running" && !completedTurnIds.has(event.turnId)) {
+        state.activeTurn = imageActiveTurn;
+        rememberAssistantResponseTurnGroup(state.activeTurn);
+      }
+      state.promptActivity = promotePromptActivityForTurnActivity({
+        current: state.promptActivity,
+        activeTurn: imageActiveTurn,
+        kind: event.kind,
+        status: activityStatus,
+      });
+      if (state.promptActivity?.clientRequestId) {
+        ensurePendingImageWorkflowMessage(state.promptActivity.clientRequestId, "generated-image");
+      }
+      if (activityStatus === "completed" && state.activeTurn?.turnId === event.turnId) {
+        state.activeTurn = null;
+      }
+    } else if (activityStatus === "running" && !completedTurnIds.has(event.turnId)) {
       if (!state.activeTurn || state.activeTurn.turnId !== event.turnId) {
         state.activeTurn = {
           threadId: event.threadId,
@@ -1339,9 +1768,8 @@ chrome.runtime.onMessage.addListener((message) => {
         kind: event.kind,
         status: event.status === "completed" ? "completed" : "running",
       });
-      if (event.kind === "image" && state.promptActivity?.clientRequestId) {
-        ensurePendingImageWorkflowMessage(state.promptActivity.clientRequestId, "generated-image");
-      }
+    } else if (state.activeTurn?.turnId === event.turnId) {
+      state.activeTurn = null;
     }
     upsertTurnActivityTrace({
       threadId: event.threadId,
@@ -1350,7 +1778,7 @@ chrome.runtime.onMessage.addListener((message) => {
       kind: normalizeTraceEventKind(event.kind),
       title: event.title ?? "",
       detail: event.detail ?? "",
-      status: completedTurnIds.has(event.turnId) || event.status === "completed" ? "completed" : "running",
+      status: completedTurnIds.has(event.turnId) || activityStatus === "completed" ? "completed" : "running",
       timestampMs: Number.isFinite(event.timestampMs) ? Number(event.timestampMs) : Date.now(),
     });
     shouldRender = state.activeView === "chat";
@@ -1394,9 +1822,7 @@ chrome.runtime.onMessage.addListener((message) => {
     shouldRender = state.activeView !== "context";
   }
   if (event.type === "catalog.updated") {
-    if (!initializePromise) {
-      void scheduleInitialize();
-    }
+    void scheduleInitialize();
     return;
   }
   if (event.type === "account.updated" || event.type === "account.login.completed") {
@@ -1413,12 +1839,136 @@ function applyActiveTabUpdate(message: {
   currentTab?: OpenTabContext | null;
   actionCards?: ActionCard[];
 }): void {
+  const previousTabKey = getCurrentTabContextKey(state.currentTabReference);
+  const nextTab = message.currentTab ?? null;
   state.currentPageSupport = message.currentPageSupport ?? state.currentPageSupport;
-  state.currentTabReference = message.currentTab ?? null;
+  state.currentTabReference = nextTab;
+  if (
+    previousTabKey !== getCurrentTabContextKey(state.currentTabReference) &&
+    !doesSelectedPageTextContextMatchTab(state.selectedPageTextContext, nextTab)
+  ) {
+    clearSelectedPageTextContext();
+  }
   state.actionCards = normalizeSidepanelCollections({ actionCards: message.actionCards ?? [] }).actionCards;
   sanitizeUnavailableCurrentPageState();
   render();
   void installActiveTabImagePromptExtractor();
+}
+
+function doesSelectedPageTextContextMatchTab(
+  context: SelectedPageTextContext | null,
+  tab: OpenTabContext | null,
+): boolean {
+  if (!context || !tab) {
+    return false;
+  }
+  if (typeof context.tabId === "number" && context.tabId === tab.tabId) {
+    return true;
+  }
+  return normalizeSelectedPageUrl(context.url) === normalizeSelectedPageUrl(tab.url);
+}
+
+function applyPageSelectionContextUpdate(message: Record<string, unknown>, sender: chrome.runtime.MessageSender): void {
+  const senderTab = sender.tab;
+  const senderTabId = Number(senderTab?.id);
+  const currentTab = state.currentTabReference;
+  if (Number.isFinite(senderTabId) && currentTab && currentTab.tabId !== senderTabId) {
+    return;
+  }
+  if (isClearedPageSelectionContextUpdate(message)) {
+    clearSelectedPageTextContext({ persist: true, render: true });
+    return;
+  }
+  const selection = message.selection && typeof message.selection === "object"
+    ? (message.selection as Record<string, unknown>)
+    : {};
+  const text = normalizeSelectedPageText(selection.text);
+  if (!text) {
+    return;
+  }
+  const contextText = normalizeSelectedPageContextText(selection.contextText);
+  const url = normalizeSelectedPageUrl(selection.url) || normalizeSelectedPageUrl(senderTab?.url) || currentTab?.url || "";
+  if (!url) {
+    return;
+  }
+  const title =
+    normalizeSelectedPageLabel(selection.title) ||
+    senderTab?.title?.trim() ||
+    currentTab?.title ||
+    getDomainFromUrl(url) ||
+    "Selected page text";
+  const domain = normalizeSelectedPageLabel(selection.domain) || getDomainFromUrl(url);
+  const favIconUrl = senderTab?.favIconUrl?.trim() || currentTab?.favIconUrl?.trim() || "";
+  state.selectedPageTextContext = {
+    text,
+    ...(contextText ? { contextText } : {}),
+    url,
+    title,
+    domain,
+    ...(Number.isFinite(senderTabId) ? { tabId: senderTabId } : currentTab ? { tabId: currentTab.tabId } : {}),
+    ...(favIconUrl ? { favIconUrl } : {}),
+  };
+  state.attachments.add("selection");
+  state.attachments.delete("current-page");
+  state.attachments.delete("image");
+  state.currentReadStrategy = "dom";
+  state.currentTabContextDismissedKey = "";
+  scheduleConversationPersist();
+  render();
+}
+
+function isClearedPageSelectionContextUpdate(message: Record<string, unknown>): boolean {
+  return message.cleared === true || message.selection === null;
+}
+
+function clearSelectedPageTextContext(options: { persist?: boolean; render?: boolean } = {}): void {
+  const changed = Boolean(state.selectedPageTextContext || state.attachments.has("selection"));
+  state.selectedPageTextContext = null;
+  state.attachments.delete("selection");
+  if (!changed) {
+    return;
+  }
+  if (options.persist) {
+    scheduleConversationPersist();
+  }
+  if (options.render) {
+    render();
+  }
+}
+
+function normalizeSelectedPageText(value: unknown): string {
+  return typeof value === "string" ? value.replace(/\s+/gu, " ").trim().slice(0, SELECTED_PAGE_TEXT_CONTEXT_MAX_CHARS) : "";
+}
+
+function normalizeSelectedPageContextText(value: unknown): string {
+  return normalizeSelectedTextContext(value, SELECTED_PAGE_TEXT_CONTEXT_MAX_CHARS);
+}
+
+function normalizeSelectedPageUrl(value: unknown): string {
+  if (typeof value !== "string") {
+    return "";
+  }
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return "";
+  }
+  try {
+    return new URL(trimmed).toString();
+  } catch {
+    return "";
+  }
+}
+
+function normalizeSelectedPageLabel(value: unknown): string {
+  return typeof value === "string" ? value.replace(/\s+/gu, " ").trim().slice(0, 240) : "";
+}
+
+function getDomainFromUrl(url: string): string {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return "";
+  }
 }
 
 async function installActiveTabImagePromptExtractor(): Promise<void> {
@@ -1477,6 +2027,79 @@ async function takePendingContextMenuImageAttachment(): Promise<void> {
 }
 
 type PendingContextMenuAction = "summarize-page" | "summarize-video";
+type SettingsSelectId =
+  | "setting-ui-language"
+  | "profile-select"
+  | "model-select"
+  | "setting-voice-input-source"
+  | "voice-select";
+
+type SettingsSelectOption = {
+  value: string;
+  label: string;
+  description?: string;
+};
+
+const SETTINGS_SELECT_IDS = new Set<SettingsSelectId>([
+  "setting-ui-language",
+  "profile-select",
+  "model-select",
+  "setting-voice-input-source",
+  "voice-select",
+]);
+
+async function takePendingContextMenuSelection(): Promise<void> {
+  const result = await sendRuntimeMessage<{ selection?: unknown }>({
+    type: "context.menu.selection.pending.take",
+  }).catch(() => null);
+  const selection = createPendingSelectedPageTextContext(result?.selection);
+  if (!selection) {
+    return;
+  }
+  applyPendingSelectedPageTextContext(selection);
+}
+
+function applyPendingSelectedPageTextContext(selection: SelectedPageTextContext): void {
+  state.activeView = "chat";
+  state.selectedPageTextContext = selection;
+  state.attachments.add("selection");
+  state.attachments.delete("current-page");
+  state.attachments.delete("image");
+  state.currentReadStrategy = "dom";
+  state.currentTabContextDismissedKey = "";
+  scheduleConversationPersist();
+  render();
+  focusComposerAtEnd();
+}
+
+function createPendingSelectedPageTextContext(value: unknown): SelectedPageTextContext | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  const text = normalizeSelectedPageText(record.text);
+  const contextText = normalizeSelectedPageContextText(record.contextText);
+  const url = normalizeSelectedPageUrl(record.url);
+  if (!text || !url) {
+    return null;
+  }
+  const title =
+    normalizeSelectedPageLabel(record.title) ||
+    getDomainFromUrl(url) ||
+    (isKoreanUiLocale() ? "선택한 페이지 텍스트" : "Selected page text");
+  const domain = normalizeSelectedPageLabel(record.domain) || getDomainFromUrl(url);
+  const tabId = Number(record.tabId);
+  const favIconUrl = typeof record.favIconUrl === "string" ? record.favIconUrl.trim() : "";
+  return {
+    text,
+    ...(contextText ? { contextText } : {}),
+    url,
+    title,
+    domain,
+    ...(Number.isFinite(tabId) ? { tabId } : {}),
+    ...(favIconUrl ? { favIconUrl } : {}),
+  };
+}
 
 async function takePendingContextMenuAction(): Promise<void> {
   const result = await sendRuntimeMessage<{ action?: unknown }>({
@@ -1489,15 +2112,55 @@ async function takePendingContextMenuAction(): Promise<void> {
   await handleActionCard(action);
 }
 
+async function handleDictationShortcutMessage(message: Record<string, unknown>): Promise<void> {
+  const requestId = typeof message.requestId === "string" ? message.requestId.trim() : "";
+  await sendRuntimeMessage({ type: "dictation.shortcut.pending.take" }).catch(() => null);
+  await startDictationFromShortcut(requestId);
+}
+
+async function takePendingDictationShortcut(): Promise<void> {
+  const result = await sendRuntimeMessage<{ shortcut?: unknown }>({
+    type: "dictation.shortcut.pending.take",
+  }).catch(() => null);
+  const shortcut = normalizePendingDictationShortcut(result?.shortcut);
+  if (!shortcut) {
+    return;
+  }
+  await startDictationFromShortcut(shortcut.requestId);
+}
+
 function normalizePendingContextMenuAction(value: unknown): PendingContextMenuAction | null {
   return value === "summarize-page" || value === "summarize-video" ? value : null;
 }
 
-function createContextMenuImageAttachment(value: unknown): UserFileAttachment | null {
+function normalizePendingDictationShortcut(value: unknown): PendingDictationShortcut | null {
   if (!value || typeof value !== "object") {
     return null;
   }
   const input = value as Record<string, unknown>;
+  const requestId = typeof input.requestId === "string" ? input.requestId.trim() : "";
+  if (!requestId) {
+    return null;
+  }
+  return {
+    requestId,
+    createdAt: Math.max(0, Number(input.createdAt) || Date.now()),
+  };
+}
+
+function createContextMenuImageAttachment(value: unknown): UserFileAttachment | null {
+  const directAttachment = normalizeOnlineImagePromptAttachment(value);
+  if (directAttachment) {
+    return directAttachment;
+  }
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const input = value as Record<string, unknown>;
+  const nestedAttachment = normalizeOnlineImagePromptAttachment(input.attachment);
+  if (nestedAttachment) {
+    return nestedAttachment;
+  }
   const imageUrl = typeof input.imageUrl === "string" ? input.imageUrl.trim() : "";
   if (isHttpUrl(imageUrl)) {
     return createRemoteImageAttachment(imageUrl);
@@ -1685,18 +2348,28 @@ async function initialize(options: { forceCatalog?: boolean } = {}): Promise<voi
   state.uiLocale = detectUiLocale(getBrowserUiLanguage());
   syncDocumentLanguage();
   const currentConversationIdBeforeInit = state.currentConversationId;
+  const settingsSnapshotPromise = applyInitialSettingsSnapshot().catch(() => undefined);
+  const initPayloadPromise = sendRuntimeMessage({
+    type: "ui.init",
+    ...(targetWindowId ? { windowId: targetWindowId } : {}),
+    ...(options.forceCatalog ? { forceCatalog: true } : {}),
+  });
   try {
-    const payload = (await sendRuntimeMessage({
-      type: "ui.init",
-      ...(targetWindowId ? { windowId: targetWindowId } : {}),
-      ...(options.forceCatalog ? { forceCatalog: true } : {}),
-    })) as UiInitPayload & { error?: string };
+    await settingsSnapshotPromise;
+    const payload = (await initPayloadPromise) as UiInitPayload & { error?: string };
     if (payload.error) {
       throw new Error(payload.error);
     }
 
     state.initError = "";
     state.accountStatus = payload.accountStatus;
+    if (
+      state.accountStatus.authMode !== "chatgpt" ||
+      (chatgptRealtimeEndpointFailureAccountKey &&
+        chatgptRealtimeEndpointFailureAccountKey !== getCurrentChatgptRealtimeAccountKey())
+    ) {
+      clearKnownChatgptRealtimeEndpointFailure();
+    }
     state.currentPageSupport = payload.currentPageSupport;
     state.currentTabReference = payload.currentTab;
     const collections = normalizeSidepanelCollections(payload);
@@ -1712,15 +2385,7 @@ async function initialize(options: { forceCatalog?: boolean } = {}): Promise<voi
     state.imageAssetFolder = payload.imageAssetFolder;
     state.diagnosticLogFolder = payload.diagnosticLogFolder;
     state.actionCards = collections.actionCards;
-    state.settings = {
-      ...payload.settings,
-      allowBrowserActions: true,
-      browserActionPermissionMode: normalizeBrowserActionPermissionMode(payload.settings.browserActionPermissionMode),
-      playwrightBrowserControlEnabled: payload.settings.playwrightBrowserControlEnabled === true,
-      uiLanguage: normalizeUiLanguageSetting(payload.settings.uiLanguage),
-      uiTheme: normalizeUiThemeSetting(payload.settings.uiTheme),
-      preferredVoice: normalizeCodexRealtimeVoice(payload.settings.preferredVoice),
-    };
+    state.settings = normalizeSettingsForState(payload.settings);
     state.uiLocale = resolveUiLocale(state.settings.uiLanguage, getBrowserUiLanguage());
     syncDocumentLanguage();
     state.profiles = localizeBuiltinProfiles(collections.profiles, state.uiLocale);
@@ -1757,7 +2422,9 @@ async function initialize(options: { forceCatalog?: boolean } = {}): Promise<voi
     void takePendingOnlineImagePromptError();
     void takePendingOnlineImagePromptExtraction();
     void takePendingContextMenuImageAttachment();
+    void takePendingContextMenuSelection();
     void takePendingContextMenuAction();
+    void takePendingDictationShortcut();
     if (state.attachments.has("open-tabs") || state.selectedTabIds.length) {
       await loadTabs();
     }
@@ -1765,6 +2432,41 @@ async function initialize(options: { forceCatalog?: boolean } = {}): Promise<voi
     state.initError = toUserFacingRuntimeError(error, getUiStrings(state.uiLocale).errors.init);
     render();
   }
+}
+
+async function applyInitialSettingsSnapshot(): Promise<void> {
+  const snapshot = await sendRuntimeMessage<UiSettingsSnapshotPayload & { error?: string }>({
+    type: "ui.settings.snapshot",
+  });
+  if (snapshot.error) {
+    throw new Error(snapshot.error);
+  }
+
+  state.settings = normalizeSettingsForState(snapshot.settings);
+  state.uiLocale = resolveUiLocale(state.settings.uiLanguage, getBrowserUiLanguage());
+  state.profiles = localizeBuiltinProfiles(snapshot.profiles, state.uiLocale);
+  state.selectedProfileId = snapshot.selectedProfileId;
+  state.selectedModel = snapshot.selectedModel;
+  state.selectedReasoningEffort = snapshot.selectedReasoningEffort;
+  state.selectedServiceTier = snapshot.selectedServiceTier;
+  syncSelectedReasoningEffort();
+  syncDocumentLanguage();
+  renderSync();
+}
+
+function normalizeSettingsForState(settings: ExtensionSettings): ExtensionSettings {
+  return {
+    ...settings,
+    allowBrowserActions: true,
+    browserActionPermissionMode: normalizeBrowserActionPermissionMode(settings.browserActionPermissionMode),
+    imagePromptHoverButtonEnabled: settings.imagePromptHoverButtonEnabled !== false,
+    planModeEnabled: settings.planModeEnabled === true,
+    playwrightBrowserControlEnabled: settings.playwrightBrowserControlEnabled === true,
+    uiLanguage: normalizeUiLanguageSetting(settings.uiLanguage),
+    uiTheme: normalizeUiThemeSetting(settings.uiTheme),
+    preferredVoice: normalizeCodexRealtimeVoice(settings.preferredVoice),
+    voiceInputAudioSource: normalizeVoiceInputAudioSource(settings.voiceInputAudioSource),
+  };
 }
 
 function scheduleInitialize(options: { forceCatalog?: boolean } = {}): Promise<void> {
@@ -1811,6 +2513,7 @@ function hydrateConversation(conversation: SavedConversation | null): void {
     state.currentReadStrategy = "auto";
     state.fileAttachments = [];
     state.structuredInputs = [];
+    state.conferenceMode = createConferenceModeState();
     state.chatMessageWindowSize = DEFAULT_CHAT_MESSAGE_WINDOW_SIZE;
     pendingChatScrollToBottom = false;
     pendingChatScrollAnchor = null;
@@ -1836,6 +2539,12 @@ function hydrateConversation(conversation: SavedConversation | null): void {
   state.promptActivity = promptActivitiesByConversationId.get(normalized.id) ?? null;
   state.activeTurn = activeTurnsByConversationId.get(normalized.id) ?? null;
   state.streamingAssistantMessageIds = new Set(streamingAssistantMessageIdsByConversationId.get(normalized.id) ?? []);
+  restoreConferenceModeFromConversation(normalized);
+  if (resolveMainViewForConversation(normalized) === "conference") {
+    state.activeView = "conference";
+  } else if (state.activeView === "conference") {
+    state.activeView = "chat";
+  }
   void restoreConversationImagePreviews();
 }
 
@@ -1843,9 +2552,17 @@ function rememberCurrentConversationSnapshot(): void {
   if (!state.currentConversationId) {
     return;
   }
+  const profileId =
+    conversationProfilesById.get(state.currentConversationId) ?? state.selectedProfileId ?? DEFAULT_PROFILE_ID;
   conversationMessagesById.set(state.currentConversationId, cloneConversationMessages(state.messages));
-  conversationProfilesById.set(state.currentConversationId, state.selectedProfileId || DEFAULT_PROFILE_ID);
+  conversationProfilesById.set(state.currentConversationId, profileId);
   conversationModelsById.set(state.currentConversationId, state.selectedModel || undefined);
+  const conferenceSnapshot = serializeConferenceModeForStorage();
+  if (conferenceSnapshot) {
+    conferenceModesByConversationId.set(state.currentConversationId, conferenceSnapshot);
+  } else {
+    conferenceModesByConversationId.delete(state.currentConversationId);
+  }
   if (state.threadId) {
     rememberConversationThreadId(state.currentConversationId, state.threadId);
   }
@@ -1881,6 +2598,11 @@ function rememberConversationMetadata(conversation: SavedConversation): void {
     rememberConversationThreadId(conversation.id, conversation.threadId);
   }
   conversationMessagesById.set(conversation.id, cloneConversationMessages(conversation.messages));
+  if (conversation.conferenceMode) {
+    conferenceModesByConversationId.set(conversation.id, cloneConferenceModeSnapshot(conversation.conferenceMode));
+  } else {
+    conferenceModesByConversationId.delete(conversation.id);
+  }
 }
 
 function rememberConversationThreadId(conversationId: string, threadId: string | undefined): void {
@@ -1952,14 +2674,35 @@ function applyBufferedConversationBridgeEvent(conversationId: string, event: Sid
       void persistDetachedConversation(conversationId);
       break;
     }
+    case "turn.failed": {
+      const threadId = event.threadId ?? "";
+      const turnId = event.turnId ?? "";
+      const failureMessage = toUserFacingRuntimeError(event.message || "", stringsForState().errors.requestFailed);
+      upsertAssistantFailureMessageInMessages(
+        getDetachedConversationMessages(conversationId),
+        failureMessage,
+        createAssistantFailureMessageId(event.clientRequestId || `${threadId}-${turnId || Date.now()}`),
+      );
+      cancelEmptyAssistantResponseNotice(threadId, turnId, conversationId);
+      clearEmptyAssistantResponseNoticeForTurn(threadId, turnId, conversationId);
+      completeTurnTraceForConversation(conversationId, threadId, turnId);
+      clearConversationActivity(conversationId);
+      void persistDetachedConversation(conversationId);
+      break;
+    }
     case "turn.activity": {
       if (!event.threadId || !event.turnId) {
         break;
       }
-      activeTurnsByConversationId.set(conversationId, {
-        threadId: event.threadId,
-        turnId: event.turnId,
-      });
+      const activityStatus = event.status === "completed" ? "completed" : "running";
+      if (activityStatus === "running" && !completedTurnIds.has(event.turnId)) {
+        activeTurnsByConversationId.set(conversationId, {
+          threadId: event.threadId,
+          turnId: event.turnId,
+        });
+      } else if (activeTurnsByConversationId.get(conversationId)?.turnId === event.turnId) {
+        activeTurnsByConversationId.delete(conversationId);
+      }
       upsertTurnActivityTraceForConversation(conversationId, {
         threadId: event.threadId,
         turnId: event.turnId,
@@ -1967,7 +2710,7 @@ function applyBufferedConversationBridgeEvent(conversationId: string, event: Sid
         kind: normalizeTraceEventKind(event.kind),
         title: event.title ?? "",
         detail: event.detail ?? "",
-        status: event.status === "completed" ? "completed" : "running",
+        status: activityStatus,
         timestampMs: Number.isFinite(event.timestampMs) ? Number(event.timestampMs) : Date.now(),
       });
       break;
@@ -2009,6 +2752,76 @@ function cloneConversationMessages(messages: ConversationMessage[]): Conversatio
     ...(message.attachments ? { attachments: message.attachments.map((attachment) => ({ ...attachment })) } : {}),
     ...(message.profile ? { profile: { ...message.profile } } : {}),
     ...(message.trace ? { trace: message.trace.map((item) => ({ ...item })) } : {}),
+    ...(message.plan ? { plan: { ...message.plan, steps: message.plan.steps.map((step) => ({ ...step })) } } : {}),
+  }));
+}
+
+function serializeConferenceModeForStorage(): ConversationConferenceModeSnapshot | undefined {
+  const entries = cloneConferenceTranscriptEntries(state.conferenceMode.entries);
+  const partialSourceText = state.conferenceMode.partialSourceText.trim();
+  const partialTranslationText = state.conferenceMode.partialTranslationText.trim();
+  if (!entries.length && !partialSourceText && !partialTranslationText) {
+    return undefined;
+  }
+  return {
+    entries,
+    ...(state.conferenceMode.sourceLabel.trim() ? { sourceLabel: state.conferenceMode.sourceLabel.trim() } : {}),
+    ...(partialSourceText ? { partialSourceText } : {}),
+    ...(partialTranslationText ? { partialTranslationText } : {}),
+    ...(state.realtimeInterpreter.targetLanguage ? { targetLanguage: state.realtimeInterpreter.targetLanguage } : {}),
+    livePlaybackEnabled: state.realtimeInterpreter.livePlaybackEnabled,
+    updatedAt: Date.now(),
+  };
+}
+
+function restoreConferenceModeFromConversation(conversation: SavedConversation): void {
+  const snapshot = conversation.conferenceMode ?? conferenceModesByConversationId.get(conversation.id);
+  if (conversation.conversationMode !== "conference" || !snapshot) {
+    state.conferenceMode = createConferenceModeState();
+    return;
+  }
+  state.conferenceMode = {
+    ...createConferenceModeState(),
+    viewActive: true,
+    sourceLabel: snapshot.sourceLabel ?? "",
+    entries: cloneConferenceTranscriptEntries(snapshot.entries),
+    partialSourceText: snapshot.partialSourceText ?? "",
+    partialTranslationText: snapshot.partialTranslationText ?? "",
+  };
+  if (snapshot.targetLanguage) {
+    state.realtimeInterpreter.targetLanguage = snapshot.targetLanguage;
+  }
+  if (typeof snapshot.livePlaybackEnabled === "boolean") {
+    state.realtimeInterpreter.livePlaybackEnabled = snapshot.livePlaybackEnabled;
+  }
+}
+
+function resolveMainViewForConversation(conversation: SavedConversation | null | undefined): MainView {
+  return conversation?.conversationMode === "conference" || conversation?.conferenceMode ? "conference" : "chat";
+}
+
+function cloneConferenceModeSnapshot(
+  snapshot: ConversationConferenceModeSnapshot,
+): ConversationConferenceModeSnapshot {
+  return {
+    entries: cloneConferenceTranscriptEntries(snapshot.entries),
+    ...(snapshot.sourceLabel ? { sourceLabel: snapshot.sourceLabel } : {}),
+    ...(snapshot.partialSourceText ? { partialSourceText: snapshot.partialSourceText } : {}),
+    ...(snapshot.partialTranslationText ? { partialTranslationText: snapshot.partialTranslationText } : {}),
+    ...(snapshot.targetLanguage ? { targetLanguage: snapshot.targetLanguage } : {}),
+    ...(typeof snapshot.livePlaybackEnabled === "boolean" ? { livePlaybackEnabled: snapshot.livePlaybackEnabled } : {}),
+    ...(Number.isFinite(snapshot.updatedAt) ? { updatedAt: Number(snapshot.updatedAt) } : {}),
+  };
+}
+
+function cloneConferenceTranscriptEntries(
+  entries: readonly ConferenceTranscriptSnapshotEntry[],
+): ConferenceTranscriptEntry[] {
+  return entries.map((entry) => ({
+    id: entry.id,
+    sourceText: entry.sourceText,
+    translationText: entry.translationText,
+    createdAt: entry.createdAt,
   }));
 }
 
@@ -2075,16 +2888,46 @@ function shouldTreatUnresolvedBridgeEventAsCurrent(
   if (claimedThreadId) {
     return threadId === claimedThreadId;
   }
-  return Boolean(state.promptActivity || promptSubmissionBootstrapInFlight);
+  return Boolean(state.promptActivity || promptSubmissionBootstrapInFlight || isCurrentPromptRequestPending());
 }
 
 function hasCurrentPromptInFlight(): boolean {
   return Boolean(
     promptSubmissionBootstrapInFlight ||
+      isCurrentPromptRequestPending() ||
       state.promptActivity ||
       state.activeTurn ||
       state.streamingAssistantMessageIds.size > 0,
   );
+}
+
+function setPendingPromptRequest(conversationId: string, clientRequestId: string): void {
+  const normalizedConversationId = conversationId.trim();
+  const normalizedClientRequestId = clientRequestId.trim();
+  if (!normalizedConversationId || !normalizedClientRequestId) {
+    return;
+  }
+  pendingPromptRequestIdsByConversationId.set(normalizedConversationId, normalizedClientRequestId);
+}
+
+function clearPendingPromptRequest(conversationId: string, clientRequestId: string): void {
+  const normalizedConversationId = conversationId.trim();
+  const normalizedClientRequestId = clientRequestId.trim();
+  if (!normalizedConversationId || !normalizedClientRequestId) {
+    return;
+  }
+  if (pendingPromptRequestIdsByConversationId.get(normalizedConversationId) === normalizedClientRequestId) {
+    pendingPromptRequestIdsByConversationId.delete(normalizedConversationId);
+  }
+}
+
+function getCurrentPendingPromptRequestId(): string {
+  const conversationId = state.currentConversationId?.trim();
+  return conversationId ? pendingPromptRequestIdsByConversationId.get(conversationId) ?? "" : "";
+}
+
+function isCurrentPromptRequestPending(): boolean {
+  return Boolean(getCurrentPendingPromptRequestId());
 }
 
 function getCurrentClaimedBridgeEventThreadId(): string {
@@ -2098,6 +2941,9 @@ function getCurrentClaimedBridgeEventThreadId(): string {
 }
 
 function rememberCurrentConversationThreadForBridgeEvent(event: SidepanelBridgeEvent): void {
+  if (isRealtimeVoiceBridgeEvent(event)) {
+    return;
+  }
   const threadId = getBridgeEventThreadId(event);
   if (!threadId || !state.currentConversationId) {
     return;
@@ -2106,6 +2952,10 @@ function rememberCurrentConversationThreadForBridgeEvent(event: SidepanelBridgeE
   if (!state.threadId) {
     state.threadId = threadId;
   }
+}
+
+function isRealtimeVoiceBridgeEvent(event: SidepanelBridgeEvent): boolean {
+  return event.type.startsWith("voice.");
 }
 
 function isConversationScopedBridgeEventType(eventType: string): boolean {
@@ -2119,9 +2969,14 @@ function isConversationScopedBridgeEventType(eventType: string): boolean {
     case "context.compaction.completed":
     case "turn.started":
     case "turn.completed":
+    case "turn.failed":
     case "turn.activity":
     case "turn.plan.updated":
     case "turn.diff.updated":
+    case "goal.updated":
+    case "goal.cleared":
+    case "plan.user_input.requested":
+    case "plan.user_input.resolved":
     case "model.rerouted":
       return true;
     default:
@@ -2238,6 +3093,7 @@ async function hydrateGeneratedImagesForDetachedConversation(
 
 function clearConversationActivity(conversationId: string): void {
   promptActivitiesByConversationId.delete(conversationId);
+  pendingPromptRequestIdsByConversationId.delete(conversationId);
   activePromptUserMessageIdsByConversationId.delete(conversationId);
   activeTurnsByConversationId.delete(conversationId);
   streamingAssistantMessageIdsByConversationId.delete(conversationId);
@@ -2249,7 +3105,8 @@ async function persistDetachedConversation(conversationId: string): Promise<void
     return;
   }
   const messages = conversationMessagesById.get(conversationId);
-  if (!messages) {
+  const conferenceSnapshot = conferenceModesByConversationId.get(conversationId);
+  if (!messages && !conferenceSnapshot) {
     return;
   }
   const result = await sendRuntimeMessage<{ conversation: SavedConversation }>({
@@ -2260,7 +3117,9 @@ async function persistDetachedConversation(conversationId: string): Promise<void
       profileId: conversationProfilesById.get(conversationId) ?? DEFAULT_PROFILE_ID,
       model: conversationModelsById.get(conversationId),
       threadId: conversationThreadIdsById.get(conversationId) || undefined,
-      messages: serializeConversationMessagesForStorage(messages),
+      conversationMode: conferenceSnapshot ? "conference" : "chat",
+      ...(conferenceSnapshot ? { conferenceMode: conferenceSnapshot } : {}),
+      messages: serializeConversationMessagesForStorage(messages ?? []),
       attachments: [],
       structuredInputs: [],
       selectedTabIds: [],
@@ -2273,6 +3132,7 @@ async function persistDetachedConversation(conversationId: string): Promise<void
     id: result.conversation.id,
     title: result.conversation.title,
     profileId: result.conversation.profileId,
+    conversationMode: result.conversation.conversationMode === "conference" ? "conference" : "chat",
     updatedAt: result.conversation.updatedAt,
   });
   renderConversationListIfVisible();
@@ -2347,7 +3207,11 @@ function renderNow(): void {
   const mentionActiveIndex = clampMentionOptionIndex(state.mentionActiveIndex, mentionKeyboardOptions.length);
   const slashOptions = getSlashOptionsForState();
   const composerSuggestionsOpen =
-    state.slashQuery !== null || state.mentionQuery !== null || state.attachmentMenuOpen || state.composerModelMenuOpen;
+    state.slashQuery !== null ||
+    state.mentionQuery !== null ||
+    state.attachmentMenuOpen ||
+    state.browserActionPermissionMenuOpen ||
+    state.composerModelMenuOpen;
   const isPopup = panelMode === "popup";
   const currentTurnActive = isCurrentTurnActive();
   const quickInteractionLocked = isQuickInteractionLocked({
@@ -2372,6 +3236,7 @@ function renderNow(): void {
   });
   const showOnboarding =
     !smokeTestMode && state.activeView === "chat" && (showAuthOnboarding || showUsageNoticeOnboarding);
+  syncAuthOnboardingAutoReconnect(showAuthOnboarding && nativeHostHealth.status !== "connected");
   const scrollState = captureScrollPositions();
   const composerState = captureComposerRenderState();
   const returningToChatView =
@@ -2423,6 +3288,10 @@ function renderNow(): void {
               : renderUsageNoticeOnboarding(strings)
             : state.activeView === "chat"
             ? renderChatView(strings)
+            : state.activeView === "conference"
+              ? renderConferenceModeView(strings)
+            : state.activeView === "interpreter"
+              ? renderRealtimeInterpreterView(strings)
             : state.activeView === "context"
               ? renderContextView(strings)
               : state.activeView === "skills"
@@ -2439,7 +3308,7 @@ function renderNow(): void {
           : `<footer class="composer-shell ${composerSuggestionsOpen ? "has-suggestions" : ""}">
         ${state.activeView === "chat" && !isEmptyChat ? renderScrollToBottomButton() : ""}
         ${state.activeView === "chat" ? renderPinnedActionSuggestions(strings, quickInteractionLocked) : ""}
-        <div class="composer-frame ${composerSuggestionsOpen ? "has-suggestions" : ""} ${state.composerDragActive ? "drag-active" : ""}">
+        <div class="composer-frame ${composerSuggestionsOpen ? "has-suggestions" : ""} ${state.composerDragActive ? "drag-active" : ""} ${state.pendingPlanInputRequest ? "plan-input-active" : ""}">
           <input id="file-attachment-input" type="file" multiple hidden />
           ${state.attachmentMenuOpen ? renderAttachmentMenu(strings) : ""}
           ${
@@ -2448,7 +3317,9 @@ function renderNow(): void {
               : ""
           }
           ${
-            state.voiceInputActive
+            state.pendingPlanInputRequest
+              ? renderPlanInputPanel(strings)
+              : state.voiceInputActive
               ? renderComposerDictationPanel(strings)
               : `${
                   hasComposerContextReferences()
@@ -2479,20 +3350,12 @@ function renderNow(): void {
                       title="${escapeAttribute(strings.actions.attachFiles)}"
                       aria-label="${escapeAttribute(strings.actions.attachFiles)}"
                     >${renderUiIcon("plus")}</button>
+                    ${state.settings.planModeEnabled ? renderComposerPlanModeBadge() : ""}
                     ${renderComposerBrowserActionPermissionControl(strings)}
                   </div>
                   <div class="composer-submit">
                     ${renderComposerModelDropdownControl(strings, selectedModelOption)}
-                    <button
-                      id="voice-input-toggle"
-                      class="icon-button composer-voice-toggle"
-                      title="${escapeAttribute(strings.actions.voiceInput)}"
-                      aria-label="${escapeAttribute(strings.actions.voiceInput)}"
-                      aria-pressed="false"
-                      ${state.voiceEnabled || state.pendingAction === "voice" ? "disabled" : ""}
-                    >
-                      ${renderUiIcon("mic")}
-                    </button>
+                    ${renderComposerVoiceInputToggle(strings)}
                     ${renderComposerPrimaryActionButton(strings)}
                   </div>
                 </div>`
@@ -2502,6 +3365,7 @@ function renderNow(): void {
       }
       ${renderImageAnnotationEditor(strings)}
       ${renderProfileEditorModal(strings)}
+      ${renderCustomSiteSuggestionEditorModal(strings)}
       ${renderNativeDialogs(strings)}
     </div>
   `;
@@ -2509,9 +3373,110 @@ function renderNow(): void {
   bindEvents();
   scheduleFloatingNotificationDismiss();
   restoreScrollPositions(scrollState);
+  scrollConferenceTranscriptToBottom({ onlyIfPinned: true });
+  scrollRealtimeInterpreterTranscriptToBottom({ onlyIfPinned: true });
   updateScrollToBottomButtonVisibility();
   restoreComposerRenderState(composerState);
+  scheduleFloatingSurfaceLayoutSync();
   lastRenderedActiveView = state.activeView;
+}
+
+function scheduleFloatingSurfaceLayoutSync(): void {
+  if (floatingSurfaceLayoutFrame !== null) {
+    window.cancelAnimationFrame(floatingSurfaceLayoutFrame);
+  }
+  floatingSurfaceLayoutFrame = window.requestAnimationFrame(() => {
+    floatingSurfaceLayoutFrame = null;
+    syncFloatingSurfaceLayout();
+  });
+}
+
+function ensureFloatingSurfaceLayoutBindings(): void {
+  if (floatingSurfaceLayoutBindingsInstalled) {
+    return;
+  }
+  floatingSurfaceLayoutBindingsInstalled = true;
+  window.addEventListener("resize", scheduleFloatingSurfaceLayoutSync, { passive: true });
+  window.addEventListener("scroll", scheduleFloatingSurfaceLayoutSync, { passive: true });
+}
+
+function syncFloatingSurfaceLayout(): void {
+  syncSettingsSelectMenusToViewport();
+  syncComposerModelDropdownToViewport();
+}
+
+function syncSettingsSelectMenusToViewport(): void {
+  const viewportPadding = 12;
+  root.querySelectorAll<HTMLElement>(".custom-select-shell.open").forEach((shell) => {
+    const menu = shell.querySelector<HTMLElement>(".settings-select-menu");
+    if (!menu) {
+      return;
+    }
+
+    menu.style.removeProperty("bottom");
+    menu.style.setProperty("top", "calc(100% + 6px)");
+    menu.style.setProperty("--floating-shift-x", "0px");
+
+    const shellRect = shell.getBoundingClientRect();
+    const menuRect = menu.getBoundingClientRect();
+    let shiftX = 0;
+
+    if (menuRect.right > window.innerWidth - viewportPadding) {
+      shiftX -= menuRect.right - (window.innerWidth - viewportPadding);
+    }
+    if (menuRect.left + shiftX < viewportPadding) {
+      shiftX += viewportPadding - (menuRect.left + shiftX);
+    }
+
+    menu.style.setProperty("--floating-shift-x", `${shiftX}px`);
+
+    const nextRect = menu.getBoundingClientRect();
+    const canOpenUpward = shellRect.top - nextRect.height - 6 >= viewportPadding;
+    if (nextRect.bottom > window.innerHeight - viewportPadding && canOpenUpward) {
+      menu.style.removeProperty("top");
+      menu.style.setProperty("bottom", "calc(100% + 6px)");
+    }
+  });
+}
+
+function syncComposerModelDropdownToViewport(): void {
+  const menu = root.querySelector<HTMLElement>(".composer-model-dropdown");
+  if (!menu) {
+    return;
+  }
+
+  const viewportPadding = 12;
+  menu.style.setProperty("--floating-shift-x", "0px");
+  const menuRect = menu.getBoundingClientRect();
+  let shiftX = 0;
+
+  if (menuRect.right > window.innerWidth - viewportPadding) {
+    shiftX -= menuRect.right - (window.innerWidth - viewportPadding);
+  }
+  if (menuRect.left + shiftX < viewportPadding) {
+    shiftX += viewportPadding - (menuRect.left + shiftX);
+  }
+
+  menu.style.setProperty("--floating-shift-x", `${shiftX}px`);
+}
+
+function renderComposerVoiceInputToggle(strings: ReturnType<typeof getUiStrings>): string {
+  if (!shouldShowRealtimeVoiceControls()) {
+    return "";
+  }
+  return `
+    <button
+      id="voice-input-toggle"
+      class="icon-button composer-voice-toggle"
+      title="${escapeAttribute(strings.actions.voiceInput)}"
+      aria-label="${escapeAttribute(strings.actions.voiceInput)}"
+      data-tooltip="${escapeAttribute(getVoiceInputTooltip())}"
+      aria-pressed="false"
+      ${state.voiceEnabled || state.pendingAction === "voice" ? "disabled" : ""}
+    >
+      ${renderUiIcon("mic")}
+    </button>
+  `;
 }
 
 function resolveComposerPrimaryActionButton(strings: ReturnType<typeof getUiStrings>): {
@@ -2534,6 +3499,7 @@ function resolveComposerPrimaryActionButton(strings: ReturnType<typeof getUiStri
     composerDraft: state.composerDraft,
     currentWorkActive: canStopCurrentWork,
     liveActive: state.voiceEnabled,
+    liveAvailable: shouldShowRealtimeVoiceControls(),
   });
   const id =
     action === "stop-turn"
@@ -2583,12 +3549,14 @@ function resolveComposerPrimaryActionButton(strings: ReturnType<typeof getUiStri
 
 function renderComposerPrimaryActionButton(strings: ReturnType<typeof getUiStrings> = stringsForState()): string {
   const button = resolveComposerPrimaryActionButton(strings);
+  const tooltip = getComposerPrimaryActionTooltip(button.id);
   return `
     <button
       id="${button.id}"
       class="${button.className}"
       aria-label="${escapeAttribute(button.label)}"
       title="${escapeAttribute(button.label)}"
+      ${tooltip ? `data-tooltip="${escapeAttribute(tooltip)}"` : ""}
       ${button.disabled ? "disabled" : ""}
     >
       ${button.content}
@@ -2636,7 +3604,7 @@ function bindComposerPrimaryActionButton(button: HTMLButtonElement): void {
 }
 
 async function cancelActivePromptFromComposer(): Promise<void> {
-  const activePromptRequestId = state.promptActivity?.clientRequestId;
+  const activePromptRequestId = state.promptActivity?.clientRequestId || getCurrentPendingPromptRequestId();
   const activeTurn = state.activeTurn;
   if (!activeTurn && !activePromptRequestId) {
     return;
@@ -2658,6 +3626,12 @@ async function cancelActivePromptFromComposer(): Promise<void> {
 
 async function toggleRealtimeVoiceFromComposer(): Promise<void> {
   if (voiceStartPromise) {
+    return;
+  }
+  if (!state.voiceEnabled && !shouldShowRealtimeVoiceControls()) {
+    state.initError = "";
+    state.actionStatus = "";
+    render();
     return;
   }
   state.initError = "";
@@ -2792,11 +3766,31 @@ function hasOpenFloatingSurface(): boolean {
       state.attachmentMenuOpen ||
       state.browserActionPermissionMenuOpen ||
       state.composerModelMenuOpen ||
-      state.appMenuOpen,
+      state.appMenuOpen ||
+      state.settingsDropdownOpen ||
+      state.realtimeInterpreter.settingsOpen,
   );
 }
 
 function isInsideFloatingSurfaceInteraction(target: Element): boolean {
+  if (
+    state.realtimeInterpreter.settingsOpen &&
+    target.closest(
+      [
+        ".conference-mode-settings-toggle",
+        ".conference-mode-settings-popover",
+        "#realtime-interpreter-settings-toggle",
+        ".realtime-interpreter-settings-popover",
+      ].join(","),
+    )
+  ) {
+    return true;
+  }
+
+  if (state.settingsDropdownOpen && target.closest(".settings-select-shell, .settings-select-menu")) {
+    return true;
+  }
+
   if (state.appMenuOpen && target.closest("#app-menu-toggle, .app-menu")) {
     return true;
   }
@@ -2837,6 +3831,9 @@ function closeFloatingSurfaces(): boolean {
   state.browserActionPermissionMenuOpen = false;
   state.composerModelMenuOpen = false;
   state.appMenuOpen = false;
+  state.settingsDropdownOpen = "";
+  state.settingsDropdownSearch = "";
+  state.realtimeInterpreter.settingsOpen = false;
   return wasOpen;
 }
 
@@ -2917,6 +3914,11 @@ function renderAppMenu(isPopup: boolean, disabled = false): string {
         <span class="app-menu-icon list" aria-hidden="true">${renderAppMenuListIcon()}</span>
         <span class="app-menu-label">${escapeHtml(labels.compactConversation)}</span>
       </button>
+      <button class="app-menu-row" data-menu-action="conference-toggle" role="menuitem" ${disabledAttribute}>
+        <span class="app-menu-icon" aria-hidden="true">${renderUiIcon("audio-lines")}</span>
+        <span class="app-menu-label">${escapeHtml(getConferenceModeMenuLabel())}</span>
+        <span class="app-menu-meta">${escapeHtml(getConferenceModeMenuMeta())}</span>
+      </button>
       <button class="app-menu-row" data-menu-view="skills" role="menuitem" ${disabledAttribute}>
         <span class="app-menu-icon" aria-hidden="true">${renderAppMenuSkillsIcon()}</span>
         <span class="app-menu-label">${escapeHtml(labels.skills)}</span>
@@ -2934,6 +3936,138 @@ function renderAppMenu(isPopup: boolean, disabled = false): string {
       </button>
     </div>
   `;
+}
+
+function getConferenceModeMenuLabel(): string {
+  return stringsForState().realtimeInterpreter.unifiedTitle;
+}
+
+function getConferenceModeMenuMeta(): string {
+  if (state.conferenceMode.viewActive && !state.conferenceMode.active && state.conferenceMode.entries.length) {
+    return isKoreanUiLocale() ? "기록 보기" : "Transcript";
+  }
+  if (state.conferenceMode.active) {
+    return state.realtimeInterpreter.livePlaybackEnabled
+      ? isKoreanUiLocale()
+        ? "통역 재생 중"
+        : "Playing translation"
+      : isKoreanUiLocale()
+        ? "전사/번역 중"
+        : "Captions live";
+  }
+  if (state.conferenceMode.starting) {
+    return isKoreanUiLocale() ? "연결 중" : "Connecting";
+  }
+  return state.realtimeInterpreter.livePlaybackEnabled
+    ? isKoreanUiLocale()
+      ? "실시간 통역 켜짐"
+      : "Live audio on"
+    : isKoreanUiLocale()
+      ? "컨퍼런스 기본"
+      : "Conference default";
+}
+
+async function switchMainViewFromMenu(view: MainView): Promise<void> {
+  state.appMenuOpen = false;
+  if (view === "chat") {
+    await exitConferenceModeView();
+    await exitRealtimeInterpreterView();
+  }
+  state.activeView = view;
+  renderSync();
+  if (state.activeView === "context" && (state.attachments.has("open-tabs") || state.selectedTabIds.length)) {
+    await loadTabs();
+  }
+}
+
+async function exitConferenceModeView(): Promise<void> {
+  if (
+    state.conferenceMode.active ||
+    state.conferenceMode.starting ||
+    conferenceModePeer ||
+    (realtimeTranslationOwner === "conference" && realtimeInterpreterPeer)
+  ) {
+    await stopConferenceMode({ notifyBridge: true, preserveEntries: true, keepViewActive: false });
+    return;
+  }
+  state.conferenceMode = {
+    ...state.conferenceMode,
+    viewActive: false,
+    stopping: false,
+    error: "",
+    partialSourceText: "",
+    partialTranslationText: "",
+  };
+}
+
+async function exitRealtimeInterpreterView(): Promise<void> {
+  if (state.realtimeInterpreter.active || state.realtimeInterpreter.starting || realtimeInterpreterPeer) {
+    await stopRealtimeInterpreterMode({ preserveEntries: true, keepViewActive: false });
+    return;
+  }
+  state.realtimeInterpreter = {
+    ...state.realtimeInterpreter,
+    viewActive: false,
+    stopping: false,
+    settingsOpen: false,
+    error: "",
+    partialSourceText: "",
+    partialTranslationText: "",
+  };
+}
+
+function getConferenceModeStatusLabel(): string {
+  if (state.conferenceMode.starting) {
+    return isKoreanUiLocale()
+      ? "오디오를 캡쳐할 탭이나 화면을 선택하고 있습니다."
+      : "Choose a tab or screen to capture audio.";
+  }
+  if (state.conferenceMode.stopping) {
+    return isKoreanUiLocale()
+      ? "마지막 전사 결과를 정리하는 중입니다."
+      : "Finalizing the latest transcript.";
+  }
+  if (state.conferenceMode.active) {
+    const source = state.conferenceMode.sourceLabel ? ` · ${state.conferenceMode.sourceLabel}` : "";
+    if (state.realtimeInterpreter.livePlaybackEnabled) {
+      return isKoreanUiLocale()
+        ? `실시간 전사, 번역, 통역 오디오 재생 중${source}`
+        : `Transcribing, translating, and playing interpretation${source}`;
+    }
+    return isKoreanUiLocale()
+      ? `실시간 전사와 번역 자막 표시 중${source}`
+      : `Showing live transcript and translation captions${source}`;
+  }
+  return isKoreanUiLocale()
+    ? "채팅창은 그대로 사용하면서 지금까지의 전사 내용에 질문할 수 있습니다."
+    : "Ask questions below using the transcript captured so far.";
+}
+
+function getRealtimeInterpreterStatusLabel(): string {
+  const targetLanguage = getRealtimeInterpreterTargetLanguageLabel(state.realtimeInterpreter.targetLanguage);
+  if (state.realtimeInterpreter.starting) {
+    if (state.realtimeInterpreter.inputSource === "microphone") {
+      return isKoreanUiLocale()
+        ? `${targetLanguage} 통역에 사용할 마이크를 연결하고 있습니다.`
+        : `Connecting microphone audio for ${targetLanguage} interpretation.`;
+    }
+    return isKoreanUiLocale()
+      ? `${targetLanguage} 통역에 사용할 탭이나 화면 오디오를 선택하고 있습니다.`
+      : `Choose tab or screen audio for ${targetLanguage} interpretation.`;
+  }
+  if (state.realtimeInterpreter.stopping) {
+    return isKoreanUiLocale() ? "통역 세션을 정리하는 중입니다." : "Closing the interpreter session.";
+  }
+  if (state.realtimeInterpreter.active) {
+    const source = state.realtimeInterpreter.sourceLabel ? ` · ${state.realtimeInterpreter.sourceLabel}` : "";
+    return isKoreanUiLocale()
+      ? `${targetLanguage}로 실시간 통역 중${source}`
+      : `Interpreting to ${targetLanguage} in real time${source}`;
+  }
+  if (state.realtimeInterpreter.error) {
+    return isKoreanUiLocale() ? "오류를 확인한 뒤 다시 연결할 수 있습니다." : "Check the error and reconnect.";
+  }
+  return isKoreanUiLocale() ? "오디오 대기 중" : "Ready for audio";
 }
 
 function getRecentChatDisplayItems(limit?: number) {
@@ -2956,26 +4090,16 @@ function renderRecentChatProgressIndicator(busy: boolean): string {
 }
 
 function getBusyConversationIds(): Set<string> {
-  const busyConversationIds = new Set<string>();
-  if (
-    state.currentConversationId &&
-    (Boolean(state.promptActivity) || isCurrentTurnActive() || state.streamingAssistantMessageIds.size > 0)
-  ) {
-    busyConversationIds.add(state.currentConversationId);
-  }
-
-  for (const conversationId of promptActivitiesByConversationId.keys()) {
-    busyConversationIds.add(conversationId);
-  }
-  for (const conversationId of activeTurnsByConversationId.keys()) {
-    busyConversationIds.add(conversationId);
-  }
-  for (const [conversationId, messageIds] of streamingAssistantMessageIdsByConversationId) {
-    if (messageIds.size) {
-      busyConversationIds.add(conversationId);
-    }
-  }
-  return busyConversationIds;
+  return collectBusyConversationIds({
+    currentConversationId: state.currentConversationId,
+    currentPromptActivity: state.promptActivity,
+    currentActiveTurn: state.activeTurn,
+    currentStreamingMessageIds: state.streamingAssistantMessageIds,
+    promptActivitiesByConversationId,
+    activeTurnsByConversationId,
+    streamingAssistantMessageIdsByConversationId,
+    completedTurnIds,
+  });
 }
 
 function renderConversationListIfVisible(): void {
@@ -3076,37 +4200,12 @@ function renderBrowserActionPermissionDropdown(
   `;
 }
 
-function renderBrowserActionPermissionSettings(strings: ReturnType<typeof getUiStrings>): string {
-  const selectedMode = getBrowserActionPermissionMode();
-  return `
-    <div class="browser-action-permission-control" id="setting-browser-action-permission-mode">
-      ${BROWSER_ACTION_PERMISSION_MODES.map((mode) => {
-        const copy = getBrowserActionPermissionCopy(mode, strings);
-        const selected = mode === selectedMode;
-        return `
-          <button
-            class="browser-action-permission-option ${mode} ${selected ? "selected" : ""}"
-            type="button"
-            aria-pressed="${selected ? "true" : "false"}"
-            data-browser-action-permission-mode="${escapeAttribute(mode)}"
-          >
-            <span class="permission-mode-glyph" aria-hidden="true">${renderUiIcon(copy.icon)}</span>
-            <span>
-              <strong>${escapeHtml(copy.label)}</strong>
-              <small>${escapeHtml(copy.description)}</small>
-            </span>
-          </button>
-        `;
-      }).join("")}
-    </div>
-  `;
-}
-
 function renderTopQuickActions(disabled = false): string {
   const strings = stringsForState();
   const disabledAttribute = disabled ? "disabled" : "";
   const summarizeTitle = strings.prompts.summarizePage;
   const infographicTitle = strings.prompts.createInfographicFromPage;
+  const comicTitle = getCurrentPageComicActionLabel();
 
   return `
     <div class="top-quick-actions" aria-label="${escapeAttribute(strings.labels.quickActions)}">
@@ -3136,8 +4235,35 @@ function renderTopQuickActions(disabled = false): string {
           ${renderUiIcon("chart")}
         </span>
       </button>
+      <button
+        class="top-quick-action comic"
+        type="button"
+        data-top-quick-action="page-comic"
+        data-tooltip="${escapeAttribute(comicTitle)}"
+        title="${escapeAttribute(comicTitle)}"
+        aria-label="${escapeAttribute(comicTitle)}"
+        ${disabledAttribute}
+      >
+        <span class="top-quick-action-icon top-quick-comic-icon" aria-hidden="true">
+          ${renderUiIcon("image")}
+        </span>
+      </button>
     </div>
   `;
+}
+
+function getCurrentPageComicActionLabel(): string {
+  return getTranslatedUiLocale(state.uiLocale) === "ko" ? "현재페이지로 만화만들기" : "Create a comic from this page";
+}
+
+function getCurrentPageComicPrompt(): string {
+  const currentTab = getCurrentTabReference();
+  return buildComicImagePrompt({
+    locale: state.uiLocale,
+    pageTitle: currentTab?.title ?? "",
+    pageUrl: currentTab?.url ?? "",
+    userPrompt: getCurrentPageComicActionLabel(),
+  });
 }
 
 function renderAppMenuDotsIcon(): string {
@@ -3178,6 +4304,7 @@ function renderAuthOnboarding(
     codexBinaryStatus: codexBinaryHealth.status,
   });
   const disabledAttribute = readiness.canStartAuth ? "" : " disabled aria-disabled=\"true\"";
+  const installCopy = getNativeHostInstallCopy(strings);
 
   return `
     <section class="auth-onboarding" aria-labelledby="auth-onboarding-title">
@@ -3199,10 +4326,15 @@ function renderAuthOnboarding(
             : `<p class="auth-onboarding-warning">${escapeHtml(strings.onboarding.authDisabled)}</p>`
         }
         <div class="auth-onboarding-install">
-          <div class="auth-onboarding-install-title">${escapeHtml(strings.onboarding.installTitle)}</div>
-          <p>${escapeHtml(strings.onboarding.installBody)}</p>
-          <code>${escapeHtml(getNativeHostInstallCommand(strings))}</code>
-          <p>${escapeHtml(strings.onboarding.webOnlyUnavailable)}</p>
+          <div class="auth-onboarding-install-title">${escapeHtml(installCopy.title)}</div>
+          <p>${escapeHtml(installCopy.body)}</p>
+          ${
+            installCopy.guideUrl
+              ? `<a class="auth-onboarding-install-guide" href="${escapeAttribute(installCopy.guideUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(installCopy.guideLabel ?? installCopy.guideUrl)}</a>`
+              : ""
+          }
+          <code>${escapeHtml(installCopy.command)}</code>
+          <p>${escapeHtml(installCopy.footer)}</p>
         </div>
         <div class="auth-onboarding-actions">
           <button id="onboarding-chatgpt-login" class="auth-onboarding-primary" type="button"${disabledAttribute}>
@@ -3229,15 +4361,73 @@ function renderAuthOnboarding(
   `;
 }
 
+type NativeHostInstallCopy = {
+  title: string;
+  body: string;
+  command: string;
+  footer: string;
+  guideLabel?: string;
+  guideUrl?: string;
+};
+
+function getNativeHostInstallCopy(strings: ReturnType<typeof getUiStrings>): NativeHostInstallCopy {
+  if (isChromeWebStoreInstall()) {
+    return getChromeWebStoreNativeHostInstallCopy();
+  }
+
+  return {
+    title: strings.onboarding.installTitle,
+    body: strings.onboarding.installBody,
+    command: getNativeHostInstallCommand(strings),
+    footer: strings.onboarding.webOnlyUnavailable,
+  };
+}
+
+function getChromeWebStoreNativeHostInstallCopy(): NativeHostInstallCopy {
+  const extensionId = getCurrentExtensionId();
+  const isKorean = getTranslatedUiLocale(state.uiLocale) === "ko";
+  const command = formatNativeHostInstallCommand(
+    "node scripts/install-native-host.mjs --browser=chrome",
+    extensionId,
+  );
+
+  if (isKorean) {
+    return {
+      title: "Codex CLI와 로컬 브리지 연결",
+      body:
+        "먼저 공식 Codex CLI를 설치하고 codex --version이 동작하는지 확인하세요. 그 다음 GitHub Release에서 Chromex Local Bridge ZIP을 내려받아 압축을 풀고 아래 명령을 한 번만 실행하면 됩니다. 소스 빌드나 npm run build는 필요 없습니다.",
+      command,
+      footer: "설치가 끝나면 모든 Chrome 창을 완전히 닫고 다시 여세요. Codex CLI 설치 명령: npm install -g @openai/codex",
+      guideLabel: "쉬운 설치 가이드 열기",
+      guideUrl: "https://genexis-ai.github.io/chromex/install/",
+    };
+  }
+
+  return {
+    title: "Connect Codex CLI and the local bridge",
+    body:
+      "Install the official Codex CLI first and confirm codex --version works. Then download the Chromex Local Bridge ZIP from GitHub Releases, unzip it, and run the command below once. You do not need to build Chromex from source or run npm run build.",
+    command,
+    footer: "After the installer finishes, quit every Chrome window and reopen Chrome. Codex CLI install command: npm install -g @openai/codex",
+    guideLabel: "Open step-by-step setup guide",
+    guideUrl: "https://genexis-ai.github.io/chromex/install/",
+  };
+}
+
 function getNativeHostInstallCommand(strings: ReturnType<typeof getUiStrings>): string {
   const extensionId = getCurrentExtensionId();
   return formatNativeHostInstallCommand(strings.onboarding.sourceInstallCommand, extensionId);
 }
 
 function formatNativeHostInstallCommand(sourceInstallCommand: string, extensionId: string): string {
-  const [buildCommand, installCommand, ...extra] = sourceInstallCommand.split(" && ");
-  if (buildCommand && installCommand && extra.length === 0) {
-    return [buildCommand, `${installCommand}${extensionId ? ` ${extensionId}` : ""}`].join("\n");
+  const commands = sourceInstallCommand
+    .split(" && ")
+    .map((command) => command.trim())
+    .filter(Boolean);
+  if (commands.length > 1) {
+    const lastIndex = commands.length - 1;
+    commands[lastIndex] = `${commands[lastIndex]}${extensionId ? ` ${extensionId}` : ""}`;
+    return commands.join("\n");
   }
   return extensionId ? `${sourceInstallCommand} ${extensionId}` : sourceInstallCommand;
 }
@@ -3248,6 +4438,37 @@ function getCurrentExtensionId(): string {
   } catch {
     return "";
   }
+}
+
+function isChromeWebStoreInstall(): boolean {
+  return getCurrentExtensionId() === CHROME_WEB_STORE_EXTENSION_ID;
+}
+
+function syncAuthOnboardingAutoReconnect(enabled: boolean): void {
+  if (!enabled) {
+    if (authOnboardingAutoReconnectTimer !== null) {
+      window.clearInterval(authOnboardingAutoReconnectTimer);
+      authOnboardingAutoReconnectTimer = null;
+    }
+    authOnboardingAutoReconnectInFlight = false;
+    return;
+  }
+
+  if (authOnboardingAutoReconnectTimer !== null) {
+    return;
+  }
+
+  authOnboardingAutoReconnectTimer = window.setInterval(() => {
+    if (authOnboardingAutoReconnectInFlight || document.visibilityState !== "visible") {
+      return;
+    }
+    authOnboardingAutoReconnectInFlight = true;
+    scheduleInitialize()
+      .catch(() => undefined)
+      .finally(() => {
+        authOnboardingAutoReconnectInFlight = false;
+      });
+  }, AUTH_ONBOARDING_AUTO_RECONNECT_INTERVAL_MS);
 }
 
 function renderAuthOnboardingRuntimeStep(
@@ -3485,7 +4706,7 @@ function renderNativeTextDialog(strings: ReturnType<typeof getUiStrings>): strin
         <header class="native-dialog-header">
           <div>
             <h2 id="native-text-dialog-title">${escapeHtml(dialog.title)}</h2>
-            <p>${escapeHtml(dialog.description)}</p>
+            <p class="native-dialog-description">${renderNativeTextDialogDescription(dialog.description)}</p>
           </div>
           <button class="icon-button native-dialog-close" type="button" data-native-text-cancel aria-label="${escapeAttribute(dialog.cancelLabel)}">
             ${renderUiIcon("x")}
@@ -3515,6 +4736,21 @@ function renderNativeTextDialog(strings: ReturnType<typeof getUiStrings>): strin
       </form>
     </div>
   `;
+}
+
+function renderNativeTextDialogDescription(description: string): string {
+  const urlPattern = /https:\/\/[^\s]+/gu;
+  let rendered = "";
+  let cursor = 0;
+  for (const match of description.matchAll(urlPattern)) {
+    const url = match[0];
+    const index = match.index ?? 0;
+    rendered += escapeHtml(description.slice(cursor, index));
+    rendered += `<a href="${escapeAttribute(url)}" target="_blank" rel="noreferrer">${escapeHtml(url)}</a>`;
+    cursor = index + url.length;
+  }
+  rendered += escapeHtml(description.slice(cursor));
+  return rendered;
 }
 
 function renderNativeConfirmationDialog(): string {
@@ -3970,7 +5206,7 @@ function renderSlashCommandPopover(
         ? slashOptions
             .map(
               (option, index) =>
-                `<button class="suggestion ${option.kind} ${option.active ? "active" : ""} ${
+                `<button class="suggestion ${option.kind} ${option.kind === "profile" && option.active ? "active" : ""} ${
                   index === activeIndex ? "keyboard-active" : ""
                 }" data-slash-option-id="${escapeAttribute(
                   option.id,
@@ -3994,6 +5230,14 @@ function renderSlashCommandPopover(
 }
 
 function renderSlashCommandIcon(option: SlashCommandOption): string {
+  if (option.kind === "create-profile") {
+    return `
+      <span class="suggestion-icon ${option.kind}" aria-hidden="true">
+        ${renderUiIcon("plus")}
+      </span>
+    `;
+  }
+
   const visual = option.visual;
   const color = normalizeProfileColorForUi(visual?.color);
   return `
@@ -4014,12 +5258,21 @@ function renderComposerCommandPills(): string {
 
 function renderComposerDictationPanel(strings: ReturnType<typeof getUiStrings>): string {
   const doneLabel = strings.actions.done;
+  const showProgress = composerVoiceInputPhase === "starting" || composerVoiceInputPhase === "stopping";
+  const progressLabel = getComposerDictationProgressLabel();
   return `
-    <div class="composer-dictation-panel" role="group" aria-label="${escapeAttribute(strings.actions.voiceInput)}">
+    <div class="composer-dictation-panel ${showProgress ? "progress" : "listening"}" role="group" aria-label="${escapeAttribute(strings.actions.voiceInput)}">
       <span class="composer-dictation-plus" aria-hidden="true">${renderUiIcon("plus")}</span>
-      <div class="composer-dictation-waveform" aria-hidden="true">
-        ${renderComposerVoiceWaveform()}
-      </div>
+      ${
+        showProgress
+          ? `<div class="composer-dictation-progress" role="status" aria-live="polite">
+              <span class="composer-dictation-progress-track" aria-hidden="true"><span></span></span>
+              <span>${escapeHtml(progressLabel)}</span>
+            </div>`
+          : `<div class="composer-dictation-waveform" aria-hidden="true">
+              ${renderComposerVoiceWaveform()}
+            </div>`
+      }
       <button
         id="voice-dictation-cancel"
         class="composer-dictation-action"
@@ -4031,11 +5284,19 @@ function renderComposerDictationPanel(strings: ReturnType<typeof getUiStrings>):
         id="voice-dictation-confirm"
         class="composer-dictation-action confirm"
         type="button"
+        ${showProgress ? "disabled" : ""}
         title="${escapeAttribute(doneLabel)}"
         aria-label="${escapeAttribute(doneLabel)}"
       >${renderUiIcon("check")}</button>
     </div>
   `;
+}
+
+function getComposerDictationProgressLabel(): string {
+  if (composerVoiceInputPhase === "stopping") {
+    return isKoreanUiLocale() ? "전사 결과를 정리하는 중" : "Finalizing dictation";
+  }
+  return isKoreanUiLocale() ? "음성 인식을 연결하는 중" : "Connecting dictation";
 }
 
 function renderComposerVoiceWaveform(): string {
@@ -4093,12 +5354,18 @@ function renderAttachmentMenu(strings: ReturnType<typeof getUiStrings>): string 
         .map(
           (item) => `
             <button
-              class="attachment-menu-item"
+              class="attachment-menu-item ${item.kind === "toggle" ? "is-toggle" : ""}"
               data-attachment-menu-action="${escapeAttribute(item.action)}"
+              ${item.action === "toggle-plan-mode" ? `aria-pressed="${state.settings.planModeEnabled ? "true" : "false"}"` : ""}
               role="menuitem"
             >
               ${renderAttachmentMenuIcon(item.icon)}
               <span>${escapeHtml(item.label)}</span>
+              ${
+                item.kind === "toggle"
+                  ? `<span class="attachment-menu-switch ${state.settings.planModeEnabled ? "on" : ""}" aria-hidden="true"><span></span></span>`
+                  : ""
+              }
             </button>
           `,
         )
@@ -4110,11 +5377,568 @@ function renderAttachmentMenu(strings: ReturnType<typeof getUiStrings>): string 
 function renderAttachmentMenuIcon(icon: ReturnType<typeof listAttachmentMenuItems>[number]["icon"]): string {
   const icons: Record<typeof icon, UiIconName> = {
     paperclip: "paperclip",
+    "list-checks": "list-checks",
     video: "video",
     scan: "scan",
     bookmark: "bookmark",
   };
   return renderUiIcon(icons[icon], "attachment-menu-icon");
+}
+
+function renderComposerPlanModeBadge(): string {
+  const label = state.uiLocale === "ko" ? "계획" : "Plan";
+  const dismissLabel = state.uiLocale === "ko" ? "플랜 모드 끄기" : "Turn off plan mode";
+  return `
+    <span class="composer-plan-mode-badge" title="${escapeAttribute(label)}" aria-label="${escapeAttribute(label)}">
+      <span class="composer-plan-mode-badge-copy">
+        ${renderUiIcon("list-checks")}
+        <span>${escapeHtml(label)}</span>
+      </span>
+      <button
+        type="button"
+        class="composer-plan-mode-dismiss"
+        data-plan-mode-dismiss
+        aria-label="${escapeAttribute(dismissLabel)}"
+        title="${escapeAttribute(dismissLabel)}"
+      >
+        ${renderUiIcon("x")}
+      </button>
+    </span>
+  `;
+}
+
+async function setPlanModeEnabled(nextEnabled: boolean, options: { focusComposer?: boolean; silent?: boolean } = {}): Promise<void> {
+  state.attachmentMenuOpen = false;
+  state.browserActionPermissionMenuOpen = false;
+  state.settings = await chrome.runtime.sendMessage({
+    type: "settings.update",
+    settings: { planModeEnabled: nextEnabled },
+  });
+  if (!options.silent) {
+    state.actionStatus =
+      state.uiLocale === "ko"
+        ? nextEnabled
+          ? "플랜 모드를 켰습니다."
+          : "플랜 모드를 껐습니다."
+        : nextEnabled
+          ? "Plan mode is on."
+          : "Plan mode is off.";
+  }
+  render();
+  if (options.focusComposer) {
+    focusComposerAtEnd();
+  }
+}
+
+function getPlanModeStartFailureMessage(): string {
+  return state.uiLocale === "ko"
+    ? "플랜 모드를 시작하지 못했습니다. Codex app-server의 플랜 협업 모드 지원 상태와 현재 요청 내용을 확인한 뒤 다시 시도해 주세요."
+    : "Plan mode could not start. Check Codex app-server plan collaboration support and retry with a concrete request.";
+}
+
+function isPlanModeStartFailureMessage(message: string): boolean {
+  return message.startsWith("plan_mode_start_failed:");
+}
+
+function unwrapPlanModeStartFailureMessage(message: string): string {
+  return message.slice("plan_mode_start_failed:".length).trim();
+}
+
+function formatPlanModeStartFailureMessage(message: string): string {
+  const detail = unwrapPlanModeStartFailureMessage(message);
+  const base = getPlanModeStartFailureMessage();
+  return detail ? `${base} ${detail}` : base;
+}
+
+function getPlanModeRuntimeErrorMessage(error: unknown): string | null {
+  const message = toErrorMessage(error).trim();
+  if (!message || !isPlanModeStartFailureMessage(message)) {
+    return null;
+  }
+  return formatPlanModeStartFailureMessage(message);
+}
+
+function renderPlanInputPanel(strings: ReturnType<typeof getUiStrings>): string {
+  void strings;
+  const request = state.pendingPlanInputRequest;
+  if (!request?.questions.length) {
+    return "";
+  }
+  const labels = getPlanInputLabels();
+  const activeIndex = clampPlanInputIndex(state.planInputActiveIndex, request.questions.length);
+  const question = request.questions[activeIndex];
+  if (!question) {
+    return "";
+  }
+  const draft = getPlanInputAnswerDraft(question.id);
+  const options = question.options ?? [];
+  const customPlaceholder = question.isOther ? labels.customRequired : labels.customPlaceholder;
+  return `
+    <section class="plan-input-panel" aria-live="polite">
+      <div class="plan-input-header">
+        <div>
+          <p class="plan-input-kicker">${escapeHtml(question.header || labels.defaultHeader)}</p>
+          <h2>${escapeHtml(question.question)}</h2>
+        </div>
+        <div class="plan-input-progress" aria-label="${escapeAttribute(labels.progress(activeIndex + 1, request.questions.length))}">
+          <button
+            type="button"
+            class="plan-input-nav"
+            data-plan-input-prev
+            ${activeIndex <= 0 ? "disabled" : ""}
+            aria-label="${escapeAttribute(labels.previous)}"
+          >${renderUiIcon("chevron-right")}</button>
+          <span>${escapeHtml(labels.progress(activeIndex + 1, request.questions.length))}</span>
+          <button
+            type="button"
+            class="plan-input-nav"
+            data-plan-input-next
+            ${activeIndex >= request.questions.length - 1 ? "disabled" : ""}
+            aria-label="${escapeAttribute(labels.next)}"
+          >${renderUiIcon("chevron-right")}</button>
+        </div>
+      </div>
+      ${
+        options.length
+          ? `<div class="plan-input-options">
+              ${options
+                .map(
+                  (option, optionIndex) => `
+                    <button
+                      type="button"
+                      class="plan-input-option ${draft.selectedIndex === optionIndex && !draft.custom.trim() ? "selected" : ""}"
+                      data-plan-input-option="${optionIndex}"
+                    >
+                      <span class="plan-input-option-number">${optionIndex + 1}.</span>
+                      <span>
+                        <strong>${escapeHtml(option.label)}</strong>
+                        ${option.description ? `<small>${escapeHtml(option.description)}</small>` : ""}
+                      </span>
+                      ${draft.selectedIndex === optionIndex && !draft.custom.trim() ? renderUiIcon("check") : ""}
+                    </button>
+                  `,
+                )
+                .join("")}
+            </div>`
+          : ""
+      }
+      <label class="plan-input-custom">
+        <span>${escapeHtml(labels.customLabel)}</span>
+        <textarea
+          id="plan-input-custom"
+          rows="2"
+          placeholder="${escapeAttribute(customPlaceholder)}"
+          ${question.isSecret ? `autocomplete="off" spellcheck="false"` : ""}
+        >${escapeHtml(draft.custom)}</textarea>
+      </label>
+      <div class="plan-input-footer">
+        <button type="button" class="plan-input-dismiss" data-plan-input-dismiss>${escapeHtml(labels.dismiss)}</button>
+        <button type="button" class="plan-input-continue" data-plan-input-continue>
+          ${escapeHtml(activeIndex >= request.questions.length - 1 ? labels.submit : labels.continue)}
+        </button>
+      </div>
+    </section>
+  `;
+}
+
+function getPlanInputLabels(): {
+  defaultHeader: string;
+  customLabel: string;
+  customPlaceholder: string;
+  customRequired: string;
+  dismiss: string;
+  continue: string;
+  submit: string;
+  previous: string;
+  next: string;
+  progress: (current: number, total: number) => string;
+} {
+  if (state.uiLocale === "ko") {
+    return {
+      defaultHeader: "플랜 질문",
+      customLabel: "직접 입력",
+      customPlaceholder: "다른 방향이나 추가 조건을 입력하세요.",
+      customRequired: "원하는 답변을 직접 입력하세요.",
+      dismiss: "닫기",
+      continue: "계속",
+      submit: "전달",
+      previous: "이전 질문",
+      next: "다음 질문",
+      progress: (current, total) => `${current} / ${total}`,
+    };
+  }
+  return {
+    defaultHeader: "Plan question",
+    customLabel: "Custom answer",
+    customPlaceholder: "Tell Codex what to do differently.",
+    customRequired: "Type your answer.",
+    dismiss: "Dismiss",
+    continue: "Continue",
+    submit: "Send",
+    previous: "Previous question",
+    next: "Next question",
+    progress: (current, total) => `${current} of ${total}`,
+  };
+}
+
+function clampPlanInputIndex(index: number, length: number): number {
+  if (length <= 0) {
+    return 0;
+  }
+  return Math.min(Math.max(0, Math.floor(index)), length - 1);
+}
+
+function getPlanInputAnswerDraft(questionId: string): PlanInputAnswerDraft {
+  const existing = state.planInputAnswers[questionId];
+  if (existing) {
+    return existing;
+  }
+  return { selectedIndex: null, custom: "" };
+}
+
+function applyPlanUserInputRequest(event: SidepanelBridgeEvent): void {
+  const questions = (event.questions ?? [])
+    .map((question) => ({
+      id: question.id.trim(),
+      header: question.header.trim(),
+      question: question.question.trim(),
+      ...(question.isOther ? { isOther: true } : {}),
+      ...(question.isSecret ? { isSecret: true } : {}),
+      ...(question.options?.length
+        ? {
+            options: question.options
+              .map((option) => ({
+                label: option.label.trim(),
+                description: option.description.trim(),
+              }))
+              .filter((option) => option.label),
+          }
+        : {}),
+    }))
+    .filter((question) => question.id && question.question);
+  if (!questions.length || !event.requestId) {
+    return;
+  }
+  if (state.currentConversationId && event.threadId?.trim()) {
+    rememberConversationThreadId(state.currentConversationId, event.threadId.trim());
+    if (!state.threadId) {
+      state.threadId = event.threadId.trim();
+    }
+    promptActivitiesByConversationId.delete(state.currentConversationId);
+  }
+  if (event.threadId?.trim() && event.turnId?.trim()) {
+    state.activeTurn = {
+      threadId: event.threadId.trim(),
+      turnId: event.turnId.trim(),
+    };
+  }
+  state.promptActivity = null;
+  state.activeView = "chat";
+  state.pendingPlanInputRequest = {
+    requestId: event.requestId,
+    threadId: event.threadId ?? "",
+    turnId: event.turnId ?? "",
+    itemId: event.itemId ?? "",
+    questions,
+  };
+  state.planInputActiveIndex = 0;
+  state.planInputAnswers = Object.fromEntries(
+    questions.map((question) => [
+      question.id,
+      {
+        selectedIndex: question.options?.length ? 0 : null,
+        custom: "",
+      },
+    ]),
+  );
+  revealPlanInputPanel();
+}
+
+function applyLocalPlanClarificationRequest(input: {
+  question: string;
+  originalMessage: string;
+}): void {
+  const question = input.question.trim();
+  if (!question) {
+    return;
+  }
+  const questions: PlanUserInputQuestion[] = [
+    {
+      id: "plan-target",
+      header: isKoreanUiLocale() ? "계획 대상" : "Plan target",
+      question,
+      options: isKoreanUiLocale()
+        ? [
+            {
+              label: "Chrome 확장 작업",
+              description: "현재 Chromex 기능 개선, 오류 수정, 검증 계획을 만듭니다.",
+            },
+            {
+              label: "글쓰기 플랜",
+              description: "글, 스레드, 문서 작성 순서와 자료 조사 계획을 만듭니다.",
+            },
+            {
+              label: "디버깅 플랜",
+              description: "원인 파악, 수정, 테스트, 배포 전 확인 순서로 나눕니다.",
+            },
+          ]
+        : [
+            {
+              label: "Chrome extension work",
+              description: "Plan feature, bug fix, and verification steps for Chromex.",
+            },
+            {
+              label: "Writing plan",
+              description: "Plan research, drafting, and revision for writing work.",
+            },
+            {
+              label: "Debugging plan",
+              description: "Plan diagnosis, implementation, testing, and release checks.",
+            },
+          ],
+    },
+  ];
+  state.promptActivity = null;
+  state.activeView = "chat";
+  state.pendingPlanInputRequest = {
+    requestId: `local-plan-${Date.now()}`,
+    threadId: "",
+    turnId: "",
+    itemId: "",
+    questions,
+    local: true,
+    originalMessage: input.originalMessage.trim(),
+  };
+  state.planInputActiveIndex = 0;
+  state.planInputAnswers = Object.fromEntries(
+    questions.map((entry) => [
+      entry.id,
+      {
+        selectedIndex: entry.options?.length ? 0 : null,
+        custom: "",
+      },
+    ]),
+  );
+  revealPlanInputPanel();
+}
+
+function clearPlanUserInputRequest(): void {
+  state.pendingPlanInputRequest = null;
+  state.planInputActiveIndex = 0;
+  state.planInputAnswers = {};
+}
+
+function getActivePlanInputQuestion(): PlanUserInputQuestion | null {
+  const request = state.pendingPlanInputRequest;
+  if (!request?.questions.length) {
+    return null;
+  }
+  const activeIndex = clampPlanInputIndex(state.planInputActiveIndex, request.questions.length);
+  state.planInputActiveIndex = activeIndex;
+  return request.questions[activeIndex] ?? null;
+}
+
+function selectPlanInputOption(optionIndex: number): void {
+  const question = getActivePlanInputQuestion();
+  if (!question) {
+    return;
+  }
+  state.planInputAnswers = {
+    ...state.planInputAnswers,
+    [question.id]: {
+      selectedIndex: Math.max(0, Math.floor(optionIndex)),
+      custom: "",
+    },
+  };
+  renderSync();
+}
+
+function updateActivePlanInputCustomAnswer(value: string): void {
+  const question = getActivePlanInputQuestion();
+  if (!question) {
+    return;
+  }
+  const current = getPlanInputAnswerDraft(question.id);
+  state.planInputAnswers = {
+    ...state.planInputAnswers,
+    [question.id]: {
+      ...current,
+      custom: value,
+    },
+  };
+}
+
+function movePlanInputQuestion(delta: -1 | 1): void {
+  const request = state.pendingPlanInputRequest;
+  if (!request?.questions.length) {
+    return;
+  }
+  state.planInputActiveIndex = clampPlanInputIndex(state.planInputActiveIndex + delta, request.questions.length);
+  renderSync();
+}
+
+async function continuePlanInputRequest(): Promise<void> {
+  const request = state.pendingPlanInputRequest;
+  if (!request?.questions.length) {
+    return;
+  }
+  if (state.planInputActiveIndex < request.questions.length - 1) {
+    state.planInputActiveIndex += 1;
+    renderSync();
+    return;
+  }
+  await submitPlanInputResponse(buildPlanInputAnswers(request.questions));
+}
+
+async function dismissPlanInputRequest(): Promise<void> {
+  await submitPlanInputResponse({});
+}
+
+async function submitPlanInputResponse(answers: Record<string, { answers: string[] }>): Promise<void> {
+  const request = state.pendingPlanInputRequest;
+  if (!request) {
+    return;
+  }
+  clearPlanUserInputRequest();
+  renderSync();
+  if (request.local) {
+    const answerText = extractPlanInputAnswerText(answers);
+    if (!answerText) {
+      render();
+      return;
+    }
+    const planPrompt = buildLocalPlanClarificationPrompt(request.originalMessage ?? "", answerText);
+    await sendPrompt(planPrompt, {
+      displayMessage: answerText,
+    });
+    return;
+  }
+  try {
+    await sendRuntimeMessage<{ ok: true }>({
+      type: "plan.user_input.respond",
+      payload: {
+        requestId: request.requestId,
+        answers,
+      },
+    });
+  } catch (error) {
+    state.actionStatus = toUserFacingRuntimeError(error);
+    render();
+  }
+}
+
+function extractPlanInputAnswerText(answers: Record<string, { answers: string[] }>): string {
+  return Object.values(answers)
+    .flatMap((answer) => answer.answers)
+    .map((answer) => answer.trim())
+    .filter(Boolean)
+    .join("\n")
+    .trim();
+}
+
+function buildLocalPlanClarificationPrompt(originalMessage: string, answerText: string): string {
+  const baseMessage = originalMessage.trim() || (isKoreanUiLocale() ? "계획을 세워줘." : "Create a plan.");
+  if (isKoreanUiLocale()) {
+    return [
+      baseMessage,
+      "",
+      "플랜 대상/조건:",
+      answerText,
+      "",
+      "위 조건을 기준으로 질문만 반복하지 말고, 실행 가능한 플랜을 3-7단계로 작성해줘. 마지막에는 사용자가 실행할지 수정할지 판단할 수 있게 요약해줘.",
+    ].join("\n");
+  }
+  return [
+    baseMessage,
+    "",
+    "Plan target / constraints:",
+    answerText,
+    "",
+    "Based on the target above, do not ask another generic clarification question. Produce a concrete 3-7 step plan and end with a short accept-or-revise summary.",
+  ].join("\n");
+}
+
+function buildPlanInputAnswers(questions: PlanUserInputQuestion[]): Record<string, { answers: string[] }> {
+  const answers: Record<string, { answers: string[] }> = {};
+  for (const question of questions) {
+    const draft = getPlanInputAnswerDraft(question.id);
+    const custom = draft.custom.trim();
+    if (custom) {
+      answers[question.id] = { answers: [custom] };
+      continue;
+    }
+    const option = typeof draft.selectedIndex === "number" ? question.options?.[draft.selectedIndex] : undefined;
+    answers[question.id] = { answers: option?.label ? [option.label] : [] };
+  }
+  return answers;
+}
+
+async function acceptTurnPlan(messageId: string | undefined): Promise<void> {
+  const message = findTurnPlanMessage(messageId);
+  if (!message?.plan) {
+    return;
+  }
+  markTurnPlanAccepted(message.id);
+  scheduleConversationPersist();
+  const labels = getTurnPlanDecisionLabels();
+  if (state.settings.planModeEnabled) {
+    await setPlanModeEnabled(false, { silent: true });
+  }
+  await sendPrompt(labels.acceptMessage, { displayMessage: labels.acceptMessage });
+}
+
+function reviseTurnPlan(messageId: string | undefined): void {
+  const message = findTurnPlanMessage(messageId);
+  if (!message?.plan) {
+    return;
+  }
+  const labels = getTurnPlanDecisionLabels();
+  state.composerDraft = labels.reviseDraft;
+  state.actionStatus = labels.reviseStatus;
+  render();
+  focusComposerAtEnd();
+}
+
+function findTurnPlanMessage(messageId: string | undefined): ConversationMessage | undefined {
+  const normalizedMessageId = (messageId ?? "").trim();
+  if (!normalizedMessageId) {
+    return undefined;
+  }
+  return state.messages.find((message) => message.id === normalizedMessageId && message.role === "assistant" && message.plan);
+}
+
+function markTurnPlanAccepted(messageId: string): void {
+  state.messages = state.messages.map((message) => {
+    if (message.id !== messageId || !message.plan) {
+      return message;
+    }
+    return {
+      ...message,
+      plan: {
+        ...message.plan,
+        accepted: true,
+      },
+    };
+  });
+}
+
+function revealPlanInputPanel(): void {
+  queueMicrotask(() => {
+    const planPanel = document.querySelector<HTMLElement>(".plan-input-panel");
+    if (!planPanel) {
+      return;
+    }
+    planPanel.scrollIntoView({
+      block: "nearest",
+      behavior: "smooth",
+    });
+    const customInput = planPanel.querySelector<HTMLTextAreaElement>("#plan-input-custom");
+    if (customInput) {
+      customInput.focus({
+        preventScroll: true,
+      });
+    }
+  });
 }
 
 function renderPinnedActionSuggestions(strings: ReturnType<typeof getUiStrings>, disabled = false): string {
@@ -4157,7 +5981,29 @@ function getPinnedSuggestionCards(): ActionCard[] {
     attachments: state.fileAttachments,
     locale: state.uiLocale,
   });
-  return mergeProfileAndSiteSuggestionCards([...imageCards, ...profileCards], [...customCards, ...state.actionCards], 4);
+  const selectionFactCheckCards = state.selectedPageTextContext ? [createSelectionFactCheckActionCard()] : [];
+  return mergeProfileAndSiteSuggestionCards(
+    [...selectionFactCheckCards, ...imageCards, ...profileCards],
+    [...customCards, ...state.actionCards],
+    4,
+  );
+}
+
+function createSelectionFactCheckActionCard(): ActionCard {
+  return {
+    id: SELECTION_FACT_CHECK_ACTION_ID,
+    title: isKoreanUiLocale() ? "팩트체크" : "Fact-check",
+    description: "",
+    kind: "prompt",
+    prompt: createSelectionFactCheckPrompt(),
+  };
+}
+
+function createSelectionFactCheckPrompt(): string {
+  if (isKoreanUiLocale()) {
+    return "선택한 텍스트를 현재 페이지 맥락 기준으로 팩트체크해줘. 사실 / 주장 / 추정 / 검증 필요 / 확인할 소스 섹션으로 나눠서 정리해줘.";
+  }
+  return "Fact-check the selected text against the current page context. Organize the answer into Facts / Claims / Assumptions / Needs verification / Sources to check.";
 }
 
 function renderSuggestionCardIcon(card: ActionCard): string {
@@ -4225,6 +6071,186 @@ function renderActionCardTitle(strings: ReturnType<typeof getUiStrings>, card: A
   return localizedTitle?.trim() || card.title;
 }
 
+function shouldRenderConferenceModePanel(): boolean {
+  return state.conferenceMode.viewActive;
+}
+
+function renderConferenceModePanel(): string {
+  if (!shouldRenderConferenceModePanel()) {
+    return "";
+  }
+
+  const labels = stringsForState().realtimeInterpreter;
+  const title = getConferenceModeMenuLabel();
+  const settingsLabel = labels.settings;
+  const status = getConferenceModeStatusLabel();
+  const hasEntries = state.conferenceMode.entries.length > 0;
+  const sessionRunning = isConferenceModeAudioSessionRunning();
+  const actionButton =
+    sessionRunning
+      ? `<button id="conference-mode-stop" class="conference-mode-button danger" type="button" ${
+          state.conferenceMode.stopping ? "disabled" : ""
+        }>${escapeHtml(labels.stop)}</button>`
+      : `<button id="conference-mode-start" class="conference-mode-button primary" type="button" ${
+          state.conferenceMode.stopping ? "disabled" : ""
+        }>${escapeHtml(labels.start)}</button>`;
+  const clearButton = hasEntries
+    ? `<button id="conference-mode-clear" class="conference-mode-button" type="button">${escapeHtml(labels.clear)}</button>`
+    : "";
+  const livePlaybackEnabled = state.realtimeInterpreter.livePlaybackEnabled;
+  const livePlaybackLabel = labels.livePlayback;
+  const livePlaybackHint = livePlaybackEnabled ? labels.livePlaybackOnHint : labels.livePlaybackOffHint;
+  const livePlaybackStateLabel = livePlaybackEnabled ? labels.on : labels.off;
+  const livePlaybackToggle = `<button
+    id="conference-live-playback-toggle"
+    class="conference-mode-switch ${livePlaybackEnabled ? "enabled" : ""}"
+    type="button"
+    role="switch"
+    aria-checked="${livePlaybackEnabled ? "true" : "false"}"
+    title="${escapeAttribute(livePlaybackHint)}"
+    ${sessionRunning ? "disabled" : ""}
+  >
+    <span class="conference-mode-switch-copy">
+      <span>${escapeHtml(livePlaybackLabel)}</span>
+      <small>${escapeHtml(livePlaybackStateLabel)}</small>
+    </span>
+    <span class="conference-mode-switch-track" aria-hidden="true">
+      <span class="conference-mode-switch-thumb"></span>
+    </span>
+  </button>`;
+  const settingsButton = `<button
+    id="conference-mode-settings-toggle"
+    class="realtime-interpreter-icon-button realtime-interpreter-settings-toggle conference-mode-settings-toggle"
+    type="button"
+    aria-label="${escapeAttribute(settingsLabel)}"
+    aria-haspopup="dialog"
+    aria-controls="conference-mode-settings-popover"
+    aria-expanded="${state.realtimeInterpreter.settingsOpen ? "true" : "false"}"
+  >
+    ${renderUiIcon("settings")}
+  </button>`;
+
+  return `
+    <section class="conference-mode-panel" aria-label="${escapeAttribute(title)}">
+      <div class="conference-mode-header">
+        <div class="conference-mode-title-row">
+          <span class="conference-mode-icon" aria-hidden="true">${renderUiIcon("audio-lines")}</span>
+          <div>
+            <h2>${escapeHtml(title)}</h2>
+            <p>${escapeHtml(status)}</p>
+          </div>
+        </div>
+        <div class="conference-mode-actions">
+          ${settingsButton}
+          ${livePlaybackToggle}
+          ${clearButton}
+          ${actionButton}
+        </div>
+      </div>
+      <div
+        id="conference-mode-settings-popover"
+        class="realtime-interpreter-settings-popover conference-mode-settings-popover"
+        role="dialog"
+        aria-label="${escapeAttribute(settingsLabel)}"
+        ${state.realtimeInterpreter.settingsOpen ? "" : "hidden"}
+      >
+        ${state.realtimeInterpreter.settingsOpen ? renderRealtimeInterpreterControls() : ""}
+      </div>
+      ${
+        state.conferenceMode.error
+          ? `<p class="conference-mode-error">${escapeHtml(state.conferenceMode.error)}</p>`
+          : ""
+      }
+      ${
+        state.conferenceMode.active
+          ? `<div class="conference-mode-waveform" aria-hidden="true">${renderComposerVoiceWaveform()}</div>`
+          : ""
+      }
+      <div class="conference-mode-list" id="conference-transcript-scroll">
+        ${renderConferenceModeTranscriptListContents()}
+      </div>
+    </section>
+  `;
+}
+
+function renderConferenceModeTranscriptListContents(): string {
+  const labels = stringsForState().realtimeInterpreter;
+  const emptyText = labels.conferenceEmpty;
+  const pendingTranslationText = labels.pendingTranslation;
+  const entries = state.conferenceMode.entries;
+  const partialSource = state.conferenceMode.partialSourceText.trim();
+  const partialTranslation = state.conferenceMode.partialTranslationText.trim();
+  const hasPartial = Boolean(partialSource || partialTranslation);
+  const rows = entries
+    .map(
+      (entry) => `
+        <article class="conference-mode-entry">
+          ${
+            entry.sourceText
+              ? `<p class="conference-mode-entry-text source">${escapeHtml(entry.sourceText)}</p>`
+              : ""
+          }
+          ${
+            entry.translationText
+              ? `<p class="conference-mode-entry-text translation">${escapeHtml(entry.translationText)}</p>`
+              : `<span class="conference-mode-translation-pending">${escapeHtml(pendingTranslationText)}</span>`
+          }
+        </article>
+      `,
+    )
+    .join("");
+  const partialRow = hasPartial
+    ? `
+      <article class="conference-mode-entry partial">
+        ${partialSource ? `<p class="conference-mode-entry-text source">${escapeHtml(partialSource)}</p>` : ""}
+        ${
+          partialTranslation
+            ? `<p class="conference-mode-entry-text translation">${escapeHtml(partialTranslation)}</p>`
+            : `<span class="conference-mode-translation-pending">${escapeHtml(pendingTranslationText)}</span>`
+        }
+      </article>
+    `
+    : "";
+
+  return `
+    ${rows}
+    ${partialRow}
+    ${!rows && !partialRow ? `<p class="conference-mode-empty">${escapeHtml(emptyText)}</p>` : ""}
+  `;
+}
+
+function updateConferenceModeTranscriptDom(): boolean {
+  if (state.activeView !== "conference") {
+    return false;
+  }
+  const list = root.querySelector<HTMLElement>("#conference-transcript-scroll");
+  if (!list) {
+    return false;
+  }
+  list.innerHTML = renderConferenceModeTranscriptListContents();
+  scrollConferenceTranscriptToBottom({ onlyIfPinned: true });
+  return true;
+}
+
+function renderOrPatchConferenceModeTranscript(): void {
+  if (!updateConferenceModeTranscriptDom()) {
+    render();
+  }
+}
+
+function isConferenceModeAudioSessionRunning(): boolean {
+  return Boolean(
+    state.conferenceMode.active ||
+      state.conferenceMode.starting ||
+      state.conferenceMode.stopping ||
+      conferenceModePeer ||
+      conferenceModeStream ||
+      conferenceModeDataChannel ||
+      (realtimeTranslationOwner === "conference" &&
+        (realtimeInterpreterPeer || realtimeInterpreterStream || realtimeInterpreterDataChannel)),
+  );
+}
+
 function renderChatView(strings: ReturnType<typeof getUiStrings>): string {
   const renderableMessages = state.messages.filter(shouldRenderConversationMessage);
   const { visibleMessages, hiddenCount } = getChatMessageWindow(renderableMessages, state.chatMessageWindowSize);
@@ -4274,6 +6300,400 @@ function renderChatView(strings: ReturnType<typeof getUiStrings>): string {
       </div>
     </div>
   `;
+}
+
+function renderConferenceModeView(strings: ReturnType<typeof getUiStrings>): string {
+  const title = strings.realtimeInterpreter.unifiedTitle;
+  return `
+    <div class="conference-view" aria-label="${escapeAttribute(title)}">
+      <div class="conference-view-shell" style="--conference-transcript-ratio: ${escapeAttribute(
+        conferencePaneSplitRatio.toFixed(3),
+      )};">
+        ${renderConferenceModePanel()}
+        <div
+          class="conference-pane-resizer"
+          role="separator"
+          aria-orientation="horizontal"
+          aria-label="${escapeAttribute(strings.realtimeInterpreter.resizeConferencePanes)}"
+          tabindex="0"
+        ></div>
+        ${renderConferenceQuestionStream()}
+      </div>
+    </div>
+  `;
+}
+
+function renderConferenceQuestionStream(): string {
+  const labels = stringsForState().realtimeInterpreter;
+  const renderableMessages = state.messages.filter(shouldRenderConversationMessage);
+  const { visibleMessages, hiddenCount } = getChatMessageWindow(renderableMessages, state.chatMessageWindowSize);
+  const promptActivityHtml = renderPromptActivity();
+  const { beforePromptActivityMessages, afterPromptActivityMessages } = partitionPromptActivityMessages(visibleMessages);
+  const emptyText = labels.conferenceQuestionEmpty;
+
+  return `
+    <section class="conference-chat-section" aria-label="${escapeAttribute(labels.conferenceQuestionPanel)}">
+      <div class="conference-chat-stream" data-scroll-key="conference-chat-scroll">
+        ${
+          visibleMessages.length || promptActivityHtml
+            ? `
+              <div class="message-stream conference-message-stream">
+                ${
+                  hiddenCount > 0
+                    ? `<div class="older-messages-sentinel" data-older-messages-hidden="${hiddenCount}" aria-hidden="true"></div>`
+                    : ""
+                }
+                ${beforePromptActivityMessages.map((message) => renderConversationMessage(message)).join("")}
+                ${promptActivityHtml}
+                ${afterPromptActivityMessages.map((message) => renderConversationMessage(message)).join("")}
+              </div>
+            `
+            : `<p class="conference-chat-empty">${escapeHtml(emptyText)}</p>`
+        }
+      </div>
+    </section>
+  `;
+}
+
+function renderRealtimeInterpreterView(strings: ReturnType<typeof getUiStrings>): string {
+  const labels = strings.realtimeInterpreter;
+  const title = labels.title;
+  const settingsLabel = labels.settings;
+  const hasEntries = state.realtimeInterpreter.entries.length > 0;
+  const actionButton =
+    state.realtimeInterpreter.active || state.realtimeInterpreter.starting
+      ? `<button id="realtime-interpreter-stop" class="realtime-interpreter-button danger" type="button" ${
+          state.realtimeInterpreter.stopping ? "disabled" : ""
+        }>${escapeHtml(labels.stop)}</button>`
+      : `<button id="realtime-interpreter-start" class="realtime-interpreter-button primary" type="button" ${
+          state.realtimeInterpreter.stopping ? "disabled" : ""
+        }>${escapeHtml(labels.start)}</button>`;
+  const clearButton = hasEntries
+    ? `<button id="realtime-interpreter-clear" class="realtime-interpreter-button" type="button">${escapeHtml(labels.clear)}</button>`
+    : "";
+
+  return `
+    <div class="realtime-interpreter-view" aria-label="${escapeAttribute(title)}">
+      <section class="realtime-interpreter-session">
+        <div class="realtime-interpreter-header">
+          <div class="realtime-interpreter-title-row">
+            <span class="realtime-interpreter-icon" aria-hidden="true">${renderUiIcon("audio-lines")}</span>
+            <div>
+              <h2>${escapeHtml(title)}</h2>
+              <p class="realtime-interpreter-status">${escapeHtml(getRealtimeInterpreterStatusLabel())}</p>
+            </div>
+          </div>
+          <div class="realtime-interpreter-session-controls">
+            <button
+              id="realtime-interpreter-settings-toggle"
+              class="realtime-interpreter-icon-button realtime-interpreter-settings-toggle"
+              type="button"
+              aria-label="${escapeAttribute(settingsLabel)}"
+              aria-haspopup="dialog"
+              aria-controls="realtime-interpreter-settings-popover"
+              aria-expanded="${state.realtimeInterpreter.settingsOpen ? "true" : "false"}"
+            >
+              ${renderUiIcon("settings")}
+            </button>
+            ${clearButton}
+            ${actionButton}
+          </div>
+        </div>
+        <div
+          id="realtime-interpreter-settings-popover"
+          class="realtime-interpreter-settings-popover"
+          role="dialog"
+          aria-label="${escapeAttribute(settingsLabel)}"
+          ${state.realtimeInterpreter.settingsOpen ? "" : "hidden"}
+        >
+          ${state.realtimeInterpreter.settingsOpen ? renderRealtimeInterpreterControls() : ""}
+        </div>
+        ${
+          state.realtimeInterpreter.error
+            ? `<p class="realtime-interpreter-error">${escapeHtml(state.realtimeInterpreter.error)}</p>`
+            : ""
+        }
+        ${
+          state.realtimeInterpreter.active
+            ? `<div class="realtime-interpreter-waveform" aria-hidden="true">${renderComposerVoiceWaveform()}</div>`
+            : ""
+        }
+      </section>
+      <div class="realtime-interpreter-workspace" style="--realtime-interpreter-transcript-ratio: ${escapeAttribute(
+        realtimeInterpreterPaneSplitRatio.toFixed(3),
+      )};">
+        <div class="realtime-interpreter-transcript-scroll" id="realtime-interpreter-scroll" data-scroll-key="realtime-interpreter-scroll">
+          ${renderRealtimeInterpreterTranscriptScrollContents()}
+        </div>
+        <div
+          class="realtime-interpreter-pane-resizer"
+          role="separator"
+          aria-orientation="horizontal"
+          aria-label="${escapeAttribute(labels.resizePanes)}"
+          tabindex="0"
+        ></div>
+        ${renderRealtimeInterpreterQuestionStream()}
+      </div>
+    </div>
+  `;
+}
+
+function renderRealtimeInterpreterTranscriptScrollContents(): string {
+  const labels = stringsForState().realtimeInterpreter;
+  const emptyText = labels.empty;
+  const entries = state.realtimeInterpreter.entries;
+  const partialSource = state.realtimeInterpreter.partialSourceText.trim();
+  const partialTranslation = state.realtimeInterpreter.partialTranslationText.trim();
+  const hasPartial = Boolean(partialSource || partialTranslation);
+  const rows = entries
+    .map(
+      (entry) => `
+        <article class="realtime-interpreter-entry">
+          ${entry.sourceText ? `<p class="realtime-interpreter-entry-source">${escapeHtml(entry.sourceText)}</p>` : ""}
+          ${
+            entry.translationText
+              ? `<p class="realtime-interpreter-entry-translation">${escapeHtml(entry.translationText)}</p>`
+              : ""
+          }
+        </article>
+      `,
+    )
+    .join("");
+  const liveCaptionHtml = hasPartial ? renderRealtimeInterpreterLiveCaptions() : "";
+
+  return `
+    ${liveCaptionHtml}
+    <section class="realtime-interpreter-list">
+      ${rows}
+      ${!rows && !hasPartial ? `<p class="realtime-interpreter-empty">${escapeHtml(emptyText)}</p>` : ""}
+    </section>
+  `;
+}
+
+function updateRealtimeInterpreterTranscriptDom(): boolean {
+  if (state.activeView !== "interpreter") {
+    return false;
+  }
+  const scroll = root.querySelector<HTMLElement>("#realtime-interpreter-scroll");
+  if (!scroll) {
+    return false;
+  }
+  scroll.innerHTML = renderRealtimeInterpreterTranscriptScrollContents();
+  scrollRealtimeInterpreterTranscriptToBottom({ onlyIfPinned: true });
+  return true;
+}
+
+function renderOrPatchRealtimeInterpreterTranscript(): void {
+  if (!updateRealtimeInterpreterTranscriptDom()) {
+    render();
+  }
+}
+
+function renderRealtimeInterpreterQuestionStream(): string {
+  const labels = stringsForState().realtimeInterpreter;
+  const renderableMessages = state.messages.filter(shouldRenderConversationMessage);
+  const { visibleMessages, hiddenCount } = getChatMessageWindow(renderableMessages, state.chatMessageWindowSize);
+  const promptActivityHtml = renderPromptActivity();
+  const { beforePromptActivityMessages, afterPromptActivityMessages } = partitionPromptActivityMessages(visibleMessages);
+  const emptyText = labels.questionEmpty;
+
+  return `
+    <section class="realtime-interpreter-chat-section" aria-label="${escapeAttribute(labels.questionPanel)}">
+      <div class="realtime-interpreter-chat-stream" data-scroll-key="realtime-interpreter-chat-scroll">
+        ${
+          visibleMessages.length || promptActivityHtml
+            ? `
+              <div class="message-stream realtime-interpreter-message-stream">
+                ${
+                  hiddenCount > 0
+                    ? `<div class="older-messages-sentinel" data-older-messages-hidden="${hiddenCount}" aria-hidden="true"></div>`
+                    : ""
+                }
+                ${beforePromptActivityMessages.map((message) => renderConversationMessage(message)).join("")}
+                ${promptActivityHtml}
+                ${afterPromptActivityMessages.map((message) => renderConversationMessage(message)).join("")}
+              </div>
+            `
+            : `<p class="realtime-interpreter-chat-empty">${escapeHtml(emptyText)}</p>`
+        }
+      </div>
+    </section>
+  `;
+}
+
+function renderRealtimeInterpreterLiveCaptions(): string {
+  const sourceText = state.realtimeInterpreter.partialSourceText.trim();
+  const translationText = state.realtimeInterpreter.partialTranslationText.trim();
+  if (!sourceText && !translationText) {
+    return "";
+  }
+  const labels = stringsForState().realtimeInterpreter;
+  const sourceLabel = labels.originalCaptions;
+  const translationLabel = labels.translatedCaptions;
+  const sourcePlaceholder = labels.sourceSpeechPlaceholder;
+  const translationPlaceholder = labels.translationPlaceholder;
+
+  return `
+    <section class="realtime-interpreter-caption-card" aria-label="${escapeAttribute(labels.captionRegion)}">
+      <div class="realtime-interpreter-caption-source">
+        <span>${escapeHtml(sourceLabel)}</span>
+        <p>${escapeHtml(sourceText || sourcePlaceholder)}</p>
+      </div>
+      <div class="realtime-interpreter-caption-translation">
+        <span>${escapeHtml(translationLabel)}</span>
+        <p>${escapeHtml(translationText || translationPlaceholder)}</p>
+      </div>
+    </section>
+  `;
+}
+
+function renderRealtimeInterpreterControls(): string {
+  const controlsDisabled = state.realtimeInterpreter.active || state.realtimeInterpreter.starting;
+  const languageDisabled = state.realtimeInterpreter.starting;
+  const disabledAttribute = controlsDisabled ? "disabled" : "";
+  const labels = stringsForState().realtimeInterpreter;
+  const isKorean = isKoreanUiLocale();
+  const languageOptions = REALTIME_INTERPRETER_TARGET_LANGUAGES.map((language) => {
+    const label = isKorean ? language.ko : language.en;
+    return `<option value="${escapeAttribute(language.value)}" ${
+      state.realtimeInterpreter.targetLanguage === language.value ? "selected" : ""
+    }>${escapeHtml(label)}</option>`;
+  }).join("");
+  const microphoneOptions = getRealtimeInterpreterMicrophoneOptions()
+    .map(
+      (device) => `<option value="${escapeAttribute(device.deviceId)}" ${
+        state.realtimeInterpreter.microphoneDeviceId === device.deviceId ? "selected" : ""
+      }>${escapeHtml(device.label)}</option>`,
+    )
+    .join("");
+  const microphoneDisabled = controlsDisabled || state.realtimeInterpreter.inputSource !== "microphone";
+  const displaySelected = state.realtimeInterpreter.inputSource === "display";
+  const microphoneSelected = state.realtimeInterpreter.inputSource === "microphone";
+  const outputVolume = clampRealtimeInterpreterOutputVolume(state.realtimeInterpreter.outputVolume);
+  const outputVolumePercent = Math.round(outputVolume * 100);
+
+  return `
+    <section class="realtime-interpreter-controls" aria-label="${escapeAttribute(labels.controls)}">
+      <label class="realtime-interpreter-control">
+        <span>${escapeHtml(labels.translateTo)}</span>
+        <select id="realtime-interpreter-language" ${languageDisabled ? "disabled" : ""}>
+          ${languageOptions}
+        </select>
+      </label>
+      <div class="realtime-interpreter-control">
+        <span>${escapeHtml(labels.inputAudio)}</span>
+        <div class="realtime-interpreter-source-switch" role="group" aria-label="${escapeAttribute(labels.inputAudioChoice)}">
+          <button id="realtime-interpreter-source-display" type="button" class="${displaySelected ? "selected" : ""}" data-interpreter-source="display" ${disabledAttribute}>
+            ${escapeHtml(labels.tabScreen)}
+          </button>
+          <button id="realtime-interpreter-source-microphone" type="button" class="${microphoneSelected ? "selected" : ""}" data-interpreter-source="microphone" ${disabledAttribute}>
+            ${escapeHtml(labels.microphone)}
+          </button>
+        </div>
+      </div>
+      <label class="realtime-interpreter-control">
+        <span>${escapeHtml(labels.captureMicrophone)}</span>
+        <div class="realtime-interpreter-inline-control">
+          <select id="realtime-interpreter-microphone" ${microphoneDisabled ? "disabled" : ""}>
+            ${microphoneOptions}
+          </select>
+          <button id="realtime-interpreter-refresh-devices" class="realtime-interpreter-icon-button realtime-interpreter-refresh-button" type="button" ${controlsDisabled ? "disabled" : ""} title="${escapeAttribute(labels.refreshMicrophones)}">
+            ${renderUiIcon("refresh")}
+          </button>
+        </div>
+      </label>
+      <div class="realtime-interpreter-control realtime-interpreter-cost-note" aria-label="${escapeAttribute(labels.costGuideTitle)}">
+        <span>${escapeHtml(labels.costGuideTitle)}</span>
+        <strong>${escapeHtml(labels.costGuideRate)}</strong>
+        <small>${escapeHtml(labels.costGuideBody)}</small>
+      </div>
+      <label class="realtime-interpreter-control realtime-interpreter-volume-control">
+        <span>${escapeHtml(labels.outputVolume)}</span>
+        <div class="realtime-interpreter-volume-row">
+          <input
+            id="realtime-interpreter-output-volume"
+            type="range"
+            min="0"
+            max="100"
+            step="5"
+            value="${escapeAttribute(String(outputVolumePercent))}"
+            aria-label="${escapeAttribute(labels.outputVolume)}"
+          />
+          <output id="realtime-interpreter-output-volume-value" for="realtime-interpreter-output-volume">${escapeHtml(
+            `${outputVolumePercent}%`,
+          )}</output>
+        </div>
+        <small>${escapeHtml(labels.outputVolumeHelp)}</small>
+      </label>
+    </section>
+  `;
+}
+
+function getRealtimeInterpreterMicrophoneOptions(): RealtimeInterpreterMicrophoneDevice[] {
+  const fallbackLabel = stringsForState().realtimeInterpreter.defaultMicrophone;
+  const options: RealtimeInterpreterMicrophoneDevice[] = [{ deviceId: "", label: fallbackLabel }];
+  const seen = new Set([""]);
+  for (const device of state.realtimeInterpreter.microphoneDevices) {
+    if (seen.has(device.deviceId)) {
+      continue;
+    }
+    seen.add(device.deviceId);
+    options.push(device);
+  }
+  return options;
+}
+
+function getRealtimeInterpreterTargetLanguageLabel(value: string): string {
+  const option = REALTIME_INTERPRETER_TARGET_LANGUAGES.find((language) => language.value === value);
+  if (!option) {
+    return value.toUpperCase();
+  }
+  return isKoreanUiLocale() ? option.ko : option.en;
+}
+
+function clampRealtimeInterpreterOutputVolume(value: number): number {
+  if (!Number.isFinite(value)) {
+    return DEFAULT_REALTIME_INTERPRETER_OUTPUT_VOLUME;
+  }
+  return Math.min(1, Math.max(0, value));
+}
+
+function applyRealtimeInterpreterOutputVolume(): void {
+  if (!realtimeInterpreterAudio) {
+    return;
+  }
+  realtimeInterpreterAudio.volume = clampRealtimeInterpreterOutputVolume(state.realtimeInterpreter.outputVolume);
+}
+
+function sendRealtimeInterpreterTargetLanguageUpdate(language: string): void {
+  if (!realtimeInterpreterDataChannel || realtimeInterpreterDataChannel.readyState !== "open") {
+    return;
+  }
+  realtimeInterpreterDataChannel.send(
+    JSON.stringify({
+      type: "session.update",
+      session: {
+        audio: {
+          output: {
+            language,
+          },
+        },
+      },
+    }),
+  );
+}
+
+function updateRealtimeInterpreterTargetLanguage(language: string): void {
+  const nextLanguage = language.trim();
+  if (!nextLanguage || state.realtimeInterpreter.targetLanguage === nextLanguage) {
+    return;
+  }
+  state.realtimeInterpreter.targetLanguage = nextLanguage;
+  state.realtimeInterpreter.error = "";
+  if (state.realtimeInterpreter.active || state.conferenceMode.active) {
+    sendRealtimeInterpreterTargetLanguageUpdate(nextLanguage);
+  }
+  render();
 }
 
 function partitionPromptActivityMessages(messages: ConversationMessage[]): {
@@ -4501,7 +6921,7 @@ function renderPromptActivity(): string {
     <article class="message-row assistant prompt-activity-row" aria-live="polite">
       <div class="message-card assistant prompt-activity-card">
         <div class="prompt-activity-main">
-          <span class="typing-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+          ${renderPromptActivityIndicator(activity.phase)}
           <span class="prompt-activity-copy">
             <strong>${escapeHtml(label)}</strong>
             <small>${escapeHtml(detail)}</small>
@@ -4512,12 +6932,50 @@ function renderPromptActivity(): string {
   `;
 }
 
+function renderPromptActivityIndicator(phase: PromptActivityPhase): string {
+  if (phase === "responding" || phase === "waiting-for-codex") {
+    return `<span class="prompt-activity-dots typing-dots" aria-hidden="true"><i></i><i></i><i></i></span>`;
+  }
+  return `<span class="prompt-activity-icon" aria-hidden="true">${renderUiIcon(resolvePromptActivityIcon(phase), "prompt-activity-lucide-icon")}</span>`;
+}
+
+function resolvePromptActivityIcon(phase: PromptActivityPhase): UiIconName {
+  switch (phase) {
+    case "collecting-context":
+      return "globe";
+    case "compacting":
+      return "archive";
+    case "preparing-image":
+    case "editing-image":
+    case "rendering-image-preview":
+      return "image";
+    case "routing":
+    case "reconnecting":
+    case "preparing":
+      return "zap";
+    case "responding":
+    case "waiting-for-codex":
+    default:
+      return "message";
+  }
+}
+
 function getCurrentPromptActivityForRender(): PromptActivityState | null {
-  return getEffectivePromptActivityForActiveWork({
+  const effectiveActivity = getEffectivePromptActivityForActiveWork({
     current: state.promptActivity,
     activeTurn: isCurrentTurnActive() ? state.activeTurn : null,
     streamingAssistantMessageIds: state.streamingAssistantMessageIds,
   });
+  if (effectiveActivity) {
+    return effectiveActivity;
+  }
+  const pendingClientRequestId = getCurrentPendingPromptRequestId();
+  return pendingClientRequestId
+    ? {
+        clientRequestId: pendingClientRequestId,
+        phase: "waiting-for-codex",
+      }
+    : null;
 }
 
 function createVoiceTranscriptMessageId(role: string | undefined): string {
@@ -4536,41 +6994,50 @@ function renderConversationMessage(message: ConversationMessage): string {
   const structuredInputHtml =
     message.role === "user" ? renderConversationMessageStructuredInputs(message.structuredInputs) : "";
   const traceHtml = renderMessageTrace(message.id, message.trace);
+  const planHtml = message.role === "assistant" ? renderTurnPlanDecisionCard(message.plan) : "";
   const editing = message.role === "user" && state.editingMessageId === message.id;
   const editingClass = editing ? "editing" : "";
   const voiceClass = message.delivery === "voice" ? "voice-message" : "";
+  const steerClass = message.role === "user" && message.steer ? "steer-message" : "";
   const imageResultClass = isImageResultAssistantMessage(message) ? "image-result" : "";
   const actionsHtml = renderMessageActions(message, strings);
   const profileHtml = message.role === "user" ? renderMessageProfileBadge(message.profile) : "";
   const userMetaHtml = message.role === "user" ? renderMessageMetaPills(profileHtml, structuredInputHtml) : "";
+  const userContextHtml = message.role === "user" ? renderConversationMessageContextCard(message.context) : "";
+  const steerMetaHtml = message.role === "user" && message.steer ? renderTurnSteerMessageMeta() : "";
   const voiceMetaHtml = message.delivery === "voice" ? renderVoiceMessageMeta(message) : "";
   const hasTextBody = editing || message.delivery === "voice" || Boolean(message.text.trim());
   const messageBodyHtml =
-    isImageResultAssistantMessage(message)
+    !hasTextBody
+      ? ""
+      : isImageResultAssistantMessage(message)
       ? ""
       : message.delivery === "voice"
       ? renderVoiceConversationBody(message)
       : `<div class="message-content">${renderMessageContentHtml(message.text, {
           enableYouTubeTimestampLinks: shouldRenderYouTubeTimestampLinksForMessage(message),
         })}</div>`;
-  const cardHtml = hasTextBody || traceHtml || imageHtml || userMetaHtml
+  const cardHtml = hasTextBody || planHtml || traceHtml || imageHtml || userMetaHtml || userContextHtml
     ? `
-    <div class="message-card ${message.role} ${editingClass} ${voiceClass} ${imageResultClass}">
+    <div class="message-card ${message.role} ${editingClass} ${voiceClass} ${steerClass} ${imageResultClass}">
       ${userMetaHtml}
-      ${traceHtml}
+      ${userContextHtml}
+      ${planHtml}
       ${
         editing
           ? renderMessageEditComposer(message, strings)
           : messageBodyHtml
       }
       ${imageHtml}
+      ${traceHtml}
     </div>
   `
     : "";
   if (message.role === "user") {
     return `
-      <article class="message-row user ${voiceClass}" data-message-id="${escapeAttribute(message.id)}">
-        <div class="message-user-stack ${editingClass}">
+      <article class="message-row user ${voiceClass} ${steerClass}" data-message-id="${escapeAttribute(message.id)}">
+        <div class="message-user-stack ${editingClass} ${steerClass}">
+          ${steerMetaHtml}
           ${attachmentHtml}
           ${cardHtml}
           ${voiceMetaHtml}
@@ -4594,6 +7061,36 @@ function renderMessageMetaPills(profileHtml: string, structuredInputHtml: string
     return "";
   }
   return `<div class="message-meta-pills">${pills}</div>`;
+}
+
+function renderTurnSteerMessageMeta(): string {
+  const label = getTurnSteerMessageLabel();
+  return `
+    <div class="message-steer-meta" title="${escapeAttribute(label)}">
+      <span class="message-steer-meta-icon" aria-hidden="true">${renderUiIcon("corner-down-right")}</span>
+      <span>${escapeHtml(label)}</span>
+    </div>
+  `;
+}
+
+function getTurnSteerMessageLabel(): string {
+  return getTranslatedUiLocale(state.uiLocale) === "ko" ? "유도된 대화" : "Steered conversation";
+}
+
+function renderConversationMessageContextCard(context: ConversationMessage["context"] | undefined): string {
+  if (context?.source !== "selection" || !context.selectionText?.trim()) {
+    return "";
+  }
+  const label = context.title || context.domain || context.platform || stringsForState().labels.currentTab;
+  return `
+    <div class="message-context-card selection" title="${escapeAttribute(context.url ?? "")}">
+      <div class="message-context-card-header">
+        ${renderSelectedPageContextIcon(context)}
+        <span>${escapeHtml(label)}</span>
+      </div>
+      <blockquote>“${escapeHtml(truncateLabel(context.selectionText, 520))}”</blockquote>
+    </div>
+  `;
 }
 
 function renderConversationMessageStructuredInputs(
@@ -4626,8 +7123,12 @@ function renderStructuredInputIcon(input: ConversationMessageStructuredInput): s
   if (input.iconUrl && isSafeMessageImageUrl(input.iconUrl)) {
     return `<span class="summary-chip-icon image" aria-hidden="true"><img src="${escapeAttribute(input.iconUrl)}" alt="" loading="lazy" /></span>`;
   }
-  const icon = input.type === "skill" || input.path.startsWith("plugin://") ? "code" : "globe";
+  const icon = input.type === "skill" || getStructuredInputPath(input).startsWith("plugin://") ? "code" : "globe";
   return `<span class="summary-chip-icon" aria-hidden="true">${renderUiIcon(icon)}</span>`;
+}
+
+function getStructuredInputPath(input: { path?: unknown }): string {
+  return typeof input.path === "string" ? input.path : "";
 }
 
 function renderConversationNoticeMessage(message: ConversationMessage): string {
@@ -4695,13 +7196,17 @@ function renderConversationMessageAttachmentFile(attachment: ConversationMessage
 
   return `
     <div class="message-attachment-file" role="listitem">
-      <span class="message-attachment-file-icon" aria-hidden="true">${renderMessageActionIcon("file")}</span>
+      <span class="message-attachment-file-icon" aria-hidden="true">${renderConversationMessageAttachmentFileIcon(attachment)}</span>
       <span class="message-attachment-file-text">
         <strong>${escapeHtml(attachment.name)}</strong>
         <small>${escapeHtml(meta.join(" · "))}</small>
       </span>
     </div>
   `;
+}
+
+function renderConversationMessageAttachmentFileIcon(attachment: ConversationMessageAttachment): string {
+  return attachment.kind === "audio" ? renderUiIcon("audio-lines") : renderMessageActionIcon("file");
 }
 
 function renderConversationMessageAttachmentRole(attachment: ConversationMessageAttachment): string {
@@ -4720,6 +7225,8 @@ function formatConversationAttachmentKindLabel(attachment: ConversationMessageAt
   switch (attachment.kind) {
     case "image":
       return labels.image;
+    case "audio":
+      return labels.audio;
     case "pdf":
       return labels.pdf;
     case "docx":
@@ -4757,10 +7264,12 @@ function renderMessageTrace(messageId: string, trace: ConversationMessage["trace
     messageTraceOpenByMessageId.set(messageId, true);
   }
   const shouldOpen = messageTraceOpenByMessageId.get(messageId) ?? shouldOpenByDefault;
+  const summaryKind = resolveTraceSummaryKind(items);
   return `
     <details class="message-trace-text"${shouldOpen ? " open" : ""} data-message-trace-id="${escapeAttribute(messageId)}">
       <summary class="message-trace-summary">
-        <span>${escapeHtml(formatTraceSummary(items, stringsForState().trace, formatTraceCount))}</span>
+        <span class="message-trace-summary-icon" aria-hidden="true">${renderTraceKindIcon(summaryKind, "message-trace-summary-lucide-icon")}</span>
+        <span class="message-trace-summary-text">${escapeHtml(formatTraceSummary(items, stringsForState().trace, formatTraceCount))}</span>
         <span class="message-trace-caret" aria-hidden="true">${renderUiIcon("chevron-down")}</span>
       </summary>
       <div class="message-trace-lines" role="list">
@@ -4781,6 +7290,135 @@ function renderMessageTraceItem(item: NonNullable<ConversationMessage["trace"]>[
       </span>
     </div>
   `;
+}
+
+function renderTurnPlanDecisionCard(plan: ConversationMessage["plan"] | undefined): string {
+  if (!plan?.steps.length) {
+    return "";
+  }
+  const labels = getTurnPlanDecisionLabels();
+  const explanation = plan.explanation?.trim() ?? "";
+  const accepted = plan.accepted === true;
+  return `
+    <section class="turn-plan-card ${accepted ? "accepted" : ""}" aria-label="${escapeAttribute(labels.title)}">
+      <div class="turn-plan-card-header">
+        <span class="turn-plan-card-icon" aria-hidden="true">${renderUiIcon("list-checks")}</span>
+        <div>
+          <p>${escapeHtml(labels.kicker)}</p>
+          <h3>${escapeHtml(labels.title)}</h3>
+        </div>
+      </div>
+      ${explanation ? `<p class="turn-plan-card-explanation">${escapeHtml(explanation)}</p>` : ""}
+      <ol class="turn-plan-card-steps">
+        ${plan.steps
+          .map(
+            (step) => `
+              <li class="${escapeAttribute(normalizeTurnPlanStepStatusClass(step.status))}">
+                <span>${escapeHtml(step.step)}</span>
+              </li>
+            `,
+          )
+          .join("")}
+      </ol>
+      <div class="turn-plan-card-footer">
+        <span>${escapeHtml(accepted ? labels.accepted : labels.prompt)}</span>
+        ${
+          accepted
+            ? ""
+            : `
+              <div class="turn-plan-card-actions">
+                <button type="button" class="turn-plan-card-button" data-turn-plan-revise="${escapeAttribute(createTurnTraceMessageId(plan.threadId, plan.turnId))}">
+                  ${escapeHtml(labels.revise)}
+                </button>
+                <button type="button" class="turn-plan-card-button primary" data-turn-plan-accept="${escapeAttribute(createTurnTraceMessageId(plan.threadId, plan.turnId))}">
+                  ${escapeHtml(labels.accept)}
+                </button>
+              </div>
+            `
+        }
+      </div>
+    </section>
+  `;
+}
+
+function getTurnPlanDecisionLabels(): {
+  kicker: string;
+  title: string;
+  prompt: string;
+  accepted: string;
+  accept: string;
+  revise: string;
+  acceptMessage: string;
+  reviseDraft: string;
+  reviseStatus: string;
+} {
+  if (state.uiLocale === "ko") {
+    return {
+      kicker: "플랜 모드",
+      title: "이 계획으로 진행할까요?",
+      prompt: "수락하면 플랜 모드를 끄고 다음 메시지에서 바로 실행합니다.",
+      accepted: "수락됨. 다음 메시지는 실행 모드로 전송됩니다.",
+      accept: "수락하고 실행",
+      revise: "수정 요청",
+      acceptMessage: "이 계획대로 진행해줘.",
+      reviseDraft: "이 계획을 다음 요구사항에 맞게 수정해줘: ",
+      reviseStatus: "추가 요구사항을 입력하면 플랜 모드로 계획을 다시 조정합니다.",
+    };
+  }
+  return {
+    kicker: "Plan mode",
+    title: "Proceed with this plan?",
+    prompt: "Accepting turns plan mode off and sends the next message as execution.",
+    accepted: "Accepted. The next message will run in execution mode.",
+    accept: "Accept and run",
+    revise: "Request changes",
+    acceptMessage: "Proceed with this plan.",
+    reviseDraft: "Revise this plan with the following requirements: ",
+    reviseStatus: "Add requirements to revise the plan while plan mode stays on.",
+  };
+}
+
+function normalizeTurnPlanStepStatusClass(status: string): string {
+  const normalized = status.trim().toLowerCase();
+  if (normalized === "completed" || normalized === "done") {
+    return "completed";
+  }
+  if (normalized === "running" || normalized === "in_progress" || normalized === "in-progress") {
+    return "running";
+  }
+  return "pending";
+}
+
+function resolveTraceSummaryKind(items: ConversationMessageTraceItem[]): ConversationMessageTraceItem["kind"] {
+  const priority: ConversationMessageTraceItem["kind"][] = [
+    "web",
+    "command",
+    "file",
+    "browser",
+    "image",
+    "tool",
+    "reasoning",
+    "response",
+  ];
+  return (
+    priority.find((kind) => items.some((item) => item.kind === kind && item.status === "running")) ??
+    priority.find((kind) => items.some((item) => item.kind === kind)) ??
+    "tool"
+  );
+}
+
+function renderTraceKindIcon(kind: ConversationMessageTraceItem["kind"], className = "message-trace-lucide-icon"): string {
+  const iconByKind: Record<ConversationMessageTraceItem["kind"], UiIconName> = {
+    browser: "panel",
+    command: "code",
+    file: "file-text",
+    image: "image",
+    reasoning: "zap",
+    response: "message",
+    tool: "code",
+    web: "search",
+  };
+  return renderUiIcon(iconByKind[kind], className);
 }
 
 function formatTraceCount(count: number, label: string): string {
@@ -4888,6 +7526,19 @@ function findPreviousUserMessage(beforeIndex: number): ConversationMessage | nul
 }
 
 function createMessageContextSnapshot(): ConversationMessage["context"] | undefined {
+  if (state.selectedPageTextContext) {
+    return {
+      source: "selection",
+      selectionText: state.selectedPageTextContext.text,
+      ...(state.selectedPageTextContext.contextText ? { contextText: state.selectedPageTextContext.contextText } : {}),
+      platform: state.selectedPageTextContext.domain,
+      url: state.selectedPageTextContext.url,
+      title: state.selectedPageTextContext.title,
+      domain: state.selectedPageTextContext.domain,
+      ...(state.selectedPageTextContext.favIconUrl ? { favIconUrl: state.selectedPageTextContext.favIconUrl } : {}),
+      ...(typeof state.selectedPageTextContext.tabId === "number" ? { tabId: state.selectedPageTextContext.tabId } : {}),
+    };
+  }
   const youtubeTab = getYouTubeContextTabReference();
   if (!youtubeTab) {
     return undefined;
@@ -5176,9 +7827,19 @@ function renderContextView(strings: ReturnType<typeof getUiStrings>): string {
 }
 
 function renderSkillsView(strings: ReturnType<typeof getUiStrings>): string {
+  const skills = getFilteredCodexSkills();
+  const showPlaywrightRuntimeSkill = shouldShowPlaywrightRuntimeSkill(strings);
+  const hasRenderableSkills = showPlaywrightRuntimeSkill || skills.length > 0;
+  const searchControl = renderSettingsSearchControl(
+    "settings-skill-search",
+    state.skillSettingsSearchQuery,
+    strings.labels.codexSkills,
+    formatSettingsSearchPlaceholder(strings.labels.codexSkills, strings),
+  );
+
   return `
     <div class="view-scroll context-view skills-view" data-scroll-key="skills-view">
-      ${renderBackToChatHeader(strings, "skills")}
+      ${renderViewStickyTop(strings, "skills", searchControl)}
       <section class="surface stack">
         <div class="stack-header">
           <h2>${escapeHtml(strings.labels.codexSkills)}</h2>
@@ -5187,10 +7848,10 @@ function renderSkillsView(strings: ReturnType<typeof getUiStrings>): string {
         </div>
         <p class="stack-copy">${escapeHtml(strings.help.codexSkills)}</p>
         <div class="codex-skill-list">
-          ${renderPlaywrightRuntimeSkill(strings)}
-          ${state.appServerSkills.map((skill) => renderCodexSkillToggle(skill)).join("")}
+          ${showPlaywrightRuntimeSkill ? renderPlaywrightRuntimeSkill(strings) : ""}
+          ${skills.map((skill) => renderCodexSkillToggle(skill)).join("")}
         </div>
-        ${state.appServerSkills.length ? "" : `<p class="empty-state">${escapeHtml(strings.help.emptySkills)}</p>`}
+        ${hasRenderableSkills ? "" : `<p class="empty-state">${escapeHtml(strings.help.emptySkills)}</p>`}
       </section>
     </div>
   `;
@@ -5199,10 +7860,17 @@ function renderSkillsView(strings: ReturnType<typeof getUiStrings>): string {
 function renderPluginMcpView(strings: ReturnType<typeof getUiStrings>): string {
   const apps = getRenderableConnectedApps();
   const plugins = getRenderableAppServerPlugins();
+  const mcpServers = getRenderableMcpServers();
+  const searchControl = renderSettingsSearchControl(
+    "settings-plugin-mcp-search",
+    state.pluginMcpSettingsSearchQuery,
+    strings.labels.pluginMcp,
+    formatSettingsSearchPlaceholder(strings.labels.pluginMcp, strings),
+  );
 
   return `
     <div class="view-scroll context-view plugins-view" data-scroll-key="plugins-view">
-      ${renderBackToChatHeader(strings, "plugins")}
+      ${renderViewStickyTop(strings, "plugins", searchControl)}
       <section class="surface stack">
         <div class="stack-header">
           <h2>${escapeHtml(strings.labels.apps)}</h2>
@@ -5231,16 +7899,26 @@ function renderPluginMcpView(strings: ReturnType<typeof getUiStrings>): string {
           <button id="reload-mcp-servers" class="ghost-button small">${escapeHtml(strings.actions.reload)}</button>
         </div>
         <div class="codex-skill-list">
-          ${state.mcpServers.map((server) => renderMcpServerRow(server, strings)).join("")}
+          ${mcpServers.map((server) => renderMcpServerRow(server, strings)).join("")}
         </div>
-        ${state.mcpServers.length ? "" : `<p class="empty-state">${escapeHtml(strings.help.emptyMcpServers)}</p>`}
+        ${mcpServers.length ? "" : `<p class="empty-state">${escapeHtml(strings.help.emptyMcpServers)}</p>`}
       </section>
     </div>
   `;
 }
 
 function getRenderableConnectedApps(): CodexAppOption[] {
-  return state.connectedApps.filter((app) => app.isAccessible && app.isEnabled);
+  return state.connectedApps.filter(
+    (app) =>
+      app.isAccessible &&
+      app.isEnabled &&
+      settingsSearchMatches(state.pluginMcpSettingsSearchQuery, [
+        app.name,
+        app.description,
+        app.path,
+        app.token,
+      ]),
+  );
 }
 
 function isConnectedAppMentionAvailable(app: CodexAppOption): boolean {
@@ -5248,11 +7926,97 @@ function isConnectedAppMentionAvailable(app: CodexAppOption): boolean {
 }
 
 function getRenderableAppServerPlugins(): CodexPluginOption[] {
-  return state.appServerPlugins.filter((plugin) => plugin.installed && plugin.enabled);
+  return state.appServerPlugins.filter((plugin) => {
+    const isRenderablePlugin = plugin.installed && plugin.enabled;
+    return (
+      isRenderablePlugin &&
+      settingsSearchMatches(state.pluginMcpSettingsSearchQuery, [
+        plugin.name,
+        plugin.description,
+        plugin.marketplaceName,
+        plugin.path,
+        plugin.token,
+        ...plugin.capabilities,
+      ])
+    );
+  });
 }
 
 function isAppServerPluginMentionAvailable(plugin: CodexPluginOption): boolean {
   return isPluginMentionRouteable(plugin, state.connectedApps);
+}
+
+function getFilteredCodexSkills(): CodexSkillOption[] {
+  return state.appServerSkills.filter((skill) =>
+    settingsSearchMatches(state.skillSettingsSearchQuery, [
+      skill.name,
+      skill.description,
+      skill.path,
+      skill.scope,
+      skill.cwd,
+      skill.token,
+    ]),
+  );
+}
+
+function shouldShowPlaywrightRuntimeSkill(strings: ReturnType<typeof getUiStrings>): boolean {
+  const runtime = state.playwrightRuntime;
+  return settingsSearchMatches(state.skillSettingsSearchQuery, [
+    strings.labels.playwrightBrowserControl,
+    strings.help.playwrightRuntimeSkill,
+    runtime.message,
+    runtime.packageName ?? "",
+    runtime.packageVersion,
+    runtime.browserExecutablePath,
+  ]);
+}
+
+function getRenderableMcpServers(): CodexMcpServerOption[] {
+  return state.mcpServers.filter((server) =>
+    settingsSearchMatches(state.pluginMcpSettingsSearchQuery, [
+      server.name,
+      server.description,
+      server.path,
+      server.token,
+      server.authStatus,
+      ...server.tools.map((tool) => `${tool.name} ${tool.description}`),
+    ]),
+  );
+}
+
+function settingsSearchMatches(query: string, values: Array<string | undefined | null>): boolean {
+  const normalizedQuery = normalizeSettingsSearchText(query);
+  if (!normalizedQuery) {
+    return true;
+  }
+  return values.some((value) => normalizeSettingsSearchText(value).includes(normalizedQuery));
+}
+
+function normalizeSettingsSearchText(value: string | undefined | null): string {
+  return (value ?? "").toLocaleLowerCase().replace(/\s+/g, " ").trim();
+}
+
+function formatSettingsSearchPlaceholder(label: string, strings: ReturnType<typeof getUiStrings>): string {
+  return getTranslatedUiLocale(state.uiLocale) === "ko"
+    ? `${label} ${strings.actions.search}`
+    : `${strings.actions.search} ${label}`;
+}
+
+function renderSettingsSearchControl(id: string, value: string, label: string, placeholder: string): string {
+  return `
+    <label class="settings-search-control" for="${escapeAttribute(id)}">
+      <span aria-hidden="true">${renderUiIcon("search")}</span>
+      <input
+        id="${escapeAttribute(id)}"
+        type="search"
+        autocomplete="off"
+        spellcheck="false"
+        aria-label="${escapeAttribute(label)}"
+        placeholder="${escapeAttribute(placeholder)}"
+        value="${escapeAttribute(value)}"
+      />
+    </label>
+  `;
 }
 
 function renderBackToChatHeader(
@@ -5265,6 +8029,19 @@ function renderBackToChatHeader(
         <span aria-hidden="true">${renderUiIcon("arrow-left")}</span>
         <span>${escapeHtml(strings.settingsPanel.backToChat)}</span>
       </button>
+    </div>
+  `;
+}
+
+function renderViewStickyTop(
+  strings: ReturnType<typeof getUiStrings>,
+  view: "skills" | "plugins",
+  body: string,
+): string {
+  return `
+    <div class="view-sticky-top ${escapeAttribute(view)}">
+      ${renderBackToChatHeader(strings, view)}
+      ${body}
     </div>
   `;
 }
@@ -5490,7 +8267,7 @@ function renderWorkspaceView(strings: ReturnType<typeof getUiStrings>): string {
               strings.labels.language,
               strings.settings.uiLanguage,
               renderLanguageSelect(),
-              {},
+              { expanded: true },
             ),
             renderSettingsRow(
               "theme",
@@ -5505,19 +8282,15 @@ function renderWorkspaceView(strings: ReturnType<typeof getUiStrings>): string {
               strings.settingsPanel.profileDescription,
               `<div class="profile-settings-control">
                 ${selectedProfile ? renderProfileVisualBadge(selectedProfile) : `<span class="profile-visual-badge empty" aria-hidden="true"></span>`}
-                <label class="settings-select-shell">
-                  <select id="profile-select" aria-label="${escapeAttribute(strings.labels.profile)}">
-                    ${state.profiles
-                      .map(
-                        (profile) =>
-                          `<option value="${profile.id}" ${
-                            profile.id === state.selectedProfileId ? "selected" : ""
-                          }>${escapeHtml(profile.name)}</option>`,
-                      )
-                      .join("")}
-                  </select>
-                  <span aria-hidden="true">${renderUiIcon("chevron-down")}</span>
-                </label>
+                ${renderSettingsSelectControl({
+                  id: "profile-select",
+                  ariaLabel: strings.labels.profile,
+                  value: state.selectedProfileId,
+                  options: state.profiles.map((profile) => ({
+                    value: profile.id,
+                    label: profile.name,
+                  })),
+                })}
                 <div class="profile-settings-actions">
                   <button id="create-profile" class="settings-compact-button" type="button">${escapeHtml(
                     strings.actions.createProfile,
@@ -5542,25 +8315,15 @@ function renderWorkspaceView(strings: ReturnType<typeof getUiStrings>): string {
               { expanded: true },
             ),
             renderSettingsRow(
-              strings.labels.currentModel,
-              strings.settingsPanel.modelDescription,
-              `<label class="settings-select-shell ${state.modelCatalogState !== "ready" || !state.models.length ? "disabled" : ""}">
-                <select id="model-select" aria-label="${escapeAttribute(strings.labels.currentModel)}" ${state.modelCatalogState !== "ready" || !state.models.length ? "disabled" : ""}>
-                  ${
-                    state.modelCatalogState === "ready" && state.models.length
-                      ? state.models
-                          .map(
-                            (model) =>
-                              `<option value="${escapeAttribute(model.id)}" ${
-                                model.id === (selectedModelOption?.id ?? "") ? "selected" : ""
-                              }>${escapeHtml(model.label)}${model.isDefault ? ` (${escapeHtml(strings.labels.defaultModel)})` : ""}</option>`,
-                          )
-                          .join("")
-                      : `<option value="">${escapeHtml(renderModelChipLabel(strings, selectedModelOption))}</option>`
-                  }
-                </select>
-                <span aria-hidden="true">${renderUiIcon("chevron-down")}</span>
-              </label>`,
+              "image-hover-button",
+              strings.settings.imagePromptHoverButton,
+              strings.settingsPanel.imagePromptHoverButtonDescription,
+              renderSettingsSwitch(
+                "setting-image-hover-button",
+                state.settings.imagePromptHoverButtonEnabled,
+                strings.settings.imagePromptHoverButton,
+              ),
+              {},
             ),
             renderSettingsRow(
               strings.settings.rememberChats,
@@ -5570,7 +8333,9 @@ function renderWorkspaceView(strings: ReturnType<typeof getUiStrings>): string {
             renderSettingsRow(
               "chat-history",
               strings.labels.recentChats,
-              strings.settingsPanel.chatHistoryDescription,
+              state.recentChats.length
+                ? `${strings.settingsPanel.chatHistoryDescription} (${state.recentChats.length})`
+                : strings.settingsPanel.chatHistoryDescription,
               `<button class="settings-compact-button danger" type="button" data-clear-chat-history="settings" ${
                 state.recentChats.length ? "" : "disabled"
               }>${escapeHtml(strings.actions.clearRecentChats)}</button>`,
@@ -5606,6 +8371,12 @@ function renderWorkspaceView(strings: ReturnType<typeof getUiStrings>): string {
                 <span class="settings-status-pill accent">${escapeHtml(renderAccountBadge())}</span>
                 ${renderAccountEmailPill()}
                 ${state.rateLimits ? `<span class="settings-status-pill">${escapeHtml(renderRateLimitBadge(state.rateLimits))}</span>` : ""}
+                ${
+                  state.accountStatus?.openAiApiKeyConfigured
+                    ? `<span class="settings-status-pill neutral">${escapeHtml(strings.status.apiKeyConnected)}</span>
+                      <button id="disconnect-api-key" class="danger">${escapeHtml(strings.actions.disconnectApiKey)}</button>`
+                    : ""
+                }
                 ${!isLoggedIn ? `<button id="chatgpt-login">${escapeHtml(strings.actions.chatgptLogin)}</button>` : ""}
                 <button id="apikey-login">${escapeHtml(strings.actions.apiKeyFallback)}</button>
                 ${isLoggedIn ? `<button id="logout">${escapeHtml(strings.actions.logout)}</button>` : ""}
@@ -5660,23 +8431,8 @@ function renderWorkspaceView(strings: ReturnType<typeof getUiStrings>): string {
         )}
 
         ${renderSettingsCard(
-          "permissions",
-          sections[2]?.label ?? strings.permissions.generic,
-          strings.settingsPanel.permissionsDescription,
-          [
-            renderSettingsRow(
-              "browser-actions",
-              strings.settings.allowBrowserActions,
-              strings.permissions.currentPageAction,
-              renderBrowserActionPermissionSettings(strings),
-              { expanded: true },
-            ),
-          ],
-        )}
-
-        ${renderSettingsCard(
           "voice",
-          sections[3]?.label ?? strings.labels.voice,
+          sections[2]?.label ?? strings.labels.voice,
           strings.settingsPanel.voiceDescription,
           [
             renderSettingsRow(
@@ -5690,23 +8446,42 @@ function renderWorkspaceView(strings: ReturnType<typeof getUiStrings>): string {
               renderSettingsSwitch("setting-voice-navigation", state.settings.allowVoiceNavigation, strings.settings.voiceNavigation),
             ),
             renderSettingsRow(
-              strings.labels.voice,
-              strings.settingsPanel.voiceSelectDescription,
-              `<label class="settings-select-shell">
-                <select id="voice-select" aria-label="${escapeAttribute(strings.labels.voice)}">
-                  <option value="">${escapeHtml(strings.settings.systemDefault)}</option>
-                  ${state.voiceOptions
-                    .map(
-                      (voice) =>
-                        `<option value="${escapeAttribute(voice.id)}" ${
-                          voice.id === state.settings.preferredVoice ? "selected" : ""
-                        }>${escapeHtml(voice.label)}</option>`,
-                    )
-                    .join("")}
-                </select>
-                <span aria-hidden="true">${renderUiIcon("chevron-down")}</span>
-              </label>`,
+              "voice-input-source",
+              getVoiceInputSourceSettingsTitle(),
+              getVoiceInputSourceSettingsDescription(),
+              renderVoiceInputSourceControl(),
+              { expanded: true },
             ),
+            renderSettingsRow(
+              getDictationShortcutSettingsTitle(),
+              getDictationShortcutSettingsDescription(),
+              `<button id="open-dictation-shortcuts" class="settings-compact-button" type="button">${escapeHtml(
+                getDictationShortcutSettingsActionLabel(),
+              )}</button>`,
+            ),
+            ...(shouldShowRealtimeVoiceControls()
+              ? [
+                  renderSettingsRow(
+                    "voice-select",
+                    strings.labels.voice,
+                    strings.settingsPanel.voiceSelectDescription,
+                    renderSettingsSelectControl({
+                      id: "voice-select",
+                      ariaLabel: strings.labels.voice,
+                      value: state.settings.preferredVoice,
+                      className: "voice-select-shell",
+                      options: [
+                        { value: "", label: strings.settings.systemDefault },
+                        ...state.voiceOptions.map((voice) => ({
+                          value: voice.id,
+                          label: voice.label,
+                        })),
+                      ],
+                    }),
+                    { expanded: true },
+                  ),
+                ]
+              : []),
           ],
         )}
 
@@ -5727,7 +8502,6 @@ function renderCustomSiteSuggestionSettings(strings: ReturnType<typeof getUiStri
     state.settings.customSiteSuggestions,
   ).slice(0, 6);
   const disabledAttribute = siteKey ? "" : "disabled";
-  const placeholder = strings.prompts.customSiteSuggestion;
   const emptyLabel = strings.status.customSiteSuggestionEmpty;
 
   return `
@@ -5736,18 +8510,9 @@ function renderCustomSiteSuggestionSettings(strings: ReturnType<typeof getUiStri
         ${renderSiteSuggestionIcon(state.currentTabReference)}
         <span>${escapeHtml(siteLabel)}</span>
       </div>
-      <form class="custom-site-suggestion-form" id="custom-site-suggestion-form">
-        <input
-          id="custom-site-suggestion-input"
-          type="text"
-          maxlength="280"
-          placeholder="${escapeAttribute(placeholder)}"
-          ${disabledAttribute}
-        />
-        <button class="settings-compact-button primary" type="submit" ${disabledAttribute}>${escapeHtml(
-          strings.actions.addSiteSuggestion,
-        )}</button>
-      </form>
+      <button id="create-custom-site-suggestion" class="settings-compact-button primary" type="button" ${disabledAttribute}>${escapeHtml(
+        strings.actions.addSiteSuggestion,
+      )}</button>
       <div class="custom-site-suggestion-list">
         ${
           suggestions.length
@@ -5755,7 +8520,17 @@ function renderCustomSiteSuggestionSettings(strings: ReturnType<typeof getUiStri
                 .map(
                   (suggestion) => `
                     <div class="custom-site-suggestion-item">
-                      <span>${escapeHtml(suggestion.prompt)}</span>
+                      <span class="custom-site-suggestion-copy">
+                        <strong>${escapeHtml(suggestion.command)}</strong>
+                        <small>${escapeHtml(suggestion.prompt)}</small>
+                      </span>
+                      <button
+                        class="settings-compact-button icon-only"
+                        type="button"
+                        data-edit-custom-site-suggestion="${escapeAttribute(suggestion.id)}"
+                        title="${escapeAttribute(strings.actions.edit)}"
+                        aria-label="${escapeAttribute(strings.actions.edit)}"
+                      >${renderUiIcon("pencil")}</button>
                       <button
                         class="settings-compact-button danger icon-only"
                         type="button"
@@ -5774,6 +8549,81 @@ function renderCustomSiteSuggestionSettings(strings: ReturnType<typeof getUiStri
   `;
 }
 
+function createCustomSiteSuggestionEditorState(
+  mode: "create" | "edit",
+  suggestionId?: string,
+): CustomSiteSuggestionEditorState | null {
+  const tab = state.currentTabReference;
+  const siteKey = tab ? resolveCustomSiteSuggestionKey(tab.url) : null;
+  if (!tab || !siteKey) {
+    return null;
+  }
+  const suggestion = suggestionId
+    ? listCustomSiteSuggestionsForTab(tab, state.settings.customSiteSuggestions).find((item) => item.id === suggestionId)
+    : null;
+  return {
+    mode,
+    siteKey,
+    siteLabel: suggestion?.siteLabel ?? siteKey,
+    command: suggestion?.command ?? "",
+    prompt: suggestion?.prompt ?? "",
+    ...(suggestion?.id ? { suggestionId: suggestion.id } : {}),
+    ...(suggestion?.createdAt ? { createdAt: suggestion.createdAt } : {}),
+  };
+}
+
+function renderCustomSiteSuggestionEditorModal(strings: ReturnType<typeof getUiStrings>): string {
+  const editor = state.customSiteSuggestionEditor;
+  if (!editor) {
+    return "";
+  }
+
+  const title =
+    editor.mode === "create"
+      ? strings.customSiteSuggestionEditor.createTitle
+      : strings.customSiteSuggestionEditor.editTitle;
+  return `
+    <div class="profile-editor-backdrop" role="presentation" data-custom-site-suggestion-editor-backdrop>
+      <section class="profile-editor-modal custom-site-suggestion-editor-modal" role="dialog" aria-modal="true" aria-labelledby="custom-site-suggestion-editor-title">
+        <header class="profile-editor-header">
+          <div class="profile-editor-title-row">
+            ${renderSiteSuggestionIcon(state.currentTabReference)}
+            <h2 id="custom-site-suggestion-editor-title">${escapeHtml(title)}</h2>
+          </div>
+          <button id="close-custom-site-suggestion-editor" class="icon-button" type="button" aria-label="${escapeAttribute(strings.actions.closeProfileEditor)}">
+            ${renderUiIcon("x")}
+          </button>
+        </header>
+
+        <div class="profile-editor-body">
+          <p class="custom-site-suggestion-editor-site">${escapeHtml(editor.siteLabel)}</p>
+          ${
+            editor.error
+              ? `<p class="profile-editor-error" role="alert">${escapeHtml(editor.error)}</p>`
+              : ""
+          }
+          <label class="profile-editor-field">
+            <span>${escapeHtml(strings.customSiteSuggestionEditor.commandLabel)}</span>
+            <input id="custom-site-suggestion-command" class="profile-editor-input" type="text" value="${escapeAttribute(editor.command)}" placeholder="${escapeAttribute(strings.customSiteSuggestionEditor.commandPlaceholder)}" maxlength="80" />
+          </label>
+          <label class="profile-editor-field">
+            <span>${escapeHtml(strings.customSiteSuggestionEditor.promptLabel)}</span>
+            <textarea id="custom-site-suggestion-prompt" class="profile-editor-textarea" rows="6" maxlength="2000" placeholder="${escapeAttribute(strings.customSiteSuggestionEditor.promptPlaceholder)}">${escapeHtml(editor.prompt)}</textarea>
+          </label>
+        </div>
+
+        <footer class="profile-editor-actions">
+          <span></span>
+          <div>
+            <button id="cancel-custom-site-suggestion-editor" class="settings-compact-button" type="button">${escapeHtml(strings.actions.closeProfileEditor)}</button>
+            <button id="save-custom-site-suggestion-editor" class="settings-compact-button primary" type="button">${escapeHtml(strings.actions.save)}</button>
+          </div>
+        </footer>
+      </section>
+    </div>
+  `;
+}
+
 function ensureComposerProfileSelection(): string {
   const resolved = resolveComposerProfileSelection({
     selectedProfileId: state.selectedProfileId,
@@ -5783,6 +8633,13 @@ function ensureComposerProfileSelection(): string {
   state.selectedProfileId = resolved.selectedProfileId;
   state.composerCommandPills = resolved.composerCommandPills;
   return state.selectedProfileId;
+}
+
+function resolvePromptProfileId(profileId: string | null | undefined): string {
+  if (profileId?.trim()) {
+    return normalizeSelectedProfileIdForProfiles(profileId, state.profiles);
+  }
+  return ensureComposerProfileSelection();
 }
 
 function selectProfileForComposer(profileId: string, options: { visible: boolean }): string {
@@ -5836,9 +8693,9 @@ async function submitPendingProfileQuestion(answerOverride?: string): Promise<vo
   await sendPrompt(answer);
 }
 
-function createMessageProfileSnapshot(): ConversationMessageProfile | undefined {
-  ensureComposerProfileSelection();
-  const profile = getSelectedProfile();
+function createMessageProfileSnapshot(profileId?: string): ConversationMessageProfile | undefined {
+  const resolvedProfileId = resolvePromptProfileId(profileId);
+  const profile = state.profiles.find((candidate) => candidate.id === resolvedProfileId) ?? null;
   if (!profile || profile.id === DEFAULT_PROFILE_ID) {
     return undefined;
   }
@@ -5903,7 +8760,7 @@ function renderProfileEditorModal(strings: ReturnType<typeof getUiStrings>): str
   const suggestions = [0, 1, 2].map((index) => editor.suggestedPrompts[index] ?? "");
   return `
     <div class="profile-editor-backdrop" role="presentation" data-profile-editor-backdrop>
-      <section class="profile-editor-modal" role="dialog" aria-modal="true" aria-labelledby="profile-editor-title">
+      <section class="profile-editor-modal ${editor.visualPickerOpen ? "has-visual-picker" : ""}" role="dialog" aria-modal="true" aria-labelledby="profile-editor-title">
         <header class="profile-editor-header">
           <div class="profile-editor-title-row">
             <div class="profile-editor-visual-anchor">
@@ -6090,6 +8947,28 @@ async function startCodexOauthLogin(): Promise<void> {
   }
 }
 
+async function ensureChatgptAuthForCodexPrompt(): Promise<boolean> {
+  if (state.accountStatus?.authMode !== "apikey") {
+    return true;
+  }
+
+  const message = isKoreanUiLocale()
+    ? "통역 API 키는 실시간 통역에만 사용됩니다. 채팅은 ChatGPT OAuth로 실행해야 하므로 ChatGPT 계정 연결을 먼저 열었습니다. 연결을 완료한 뒤 다시 보내주세요."
+    : "The translation API key is used only for realtime translation. Chat still runs through ChatGPT OAuth, so Chromex opened ChatGPT account connection first. Finish that connection, then send again.";
+  state.initError = message;
+  state.actionStatus = message;
+  render();
+  try {
+    await sendRuntimeMessage({ type: "account.login.start", loginType: "chatgpt" });
+    await scheduleInitialize();
+  } catch (error) {
+    state.initError = toUserFacingRuntimeError(error);
+    state.actionStatus = "";
+    render();
+  }
+  return false;
+}
+
 function closeNativeTextDialog(): void {
   state.nativeTextDialog = null;
   render();
@@ -6114,7 +8993,10 @@ async function submitNativeTextDialog(): Promise<void> {
   render();
 
   try {
-    await sendRuntimeMessage({ type: "account.login.start", loginType: "apiKey", apiKey: value, confirmed: true });
+    const saveForRealtimeTranslation = isRealtimeTranslationApiKeyDialog(dialog) || dialog.kind === "api-key";
+    if (saveForRealtimeTranslation) {
+      await saveRealtimeTranslationApiKey(value);
+    }
     await scheduleInitialize();
     const afterSubmit = dialog.afterSubmit;
     state.initError = "";
@@ -6126,6 +9008,14 @@ async function submitNativeTextDialog(): Promise<void> {
         afterSubmit.message,
         createRetrySendPromptOptions(afterSubmit.displayMessage, afterSubmit),
       );
+    } else if (afterSubmit?.kind === "retry-live-voice") {
+      await startRealtimeVoiceSession();
+    } else if (afterSubmit?.kind === "retry-composer-dictation") {
+      await startComposerVoiceInput({ target: afterSubmit.target });
+    } else if (afterSubmit?.kind === "retry-realtime-interpreter") {
+      await startRealtimeInterpreterMode();
+    } else if (afterSubmit?.kind === "retry-conference-mode") {
+      await startConferenceMode();
     }
   } catch (error) {
     state.nativeTextDialog = {
@@ -6137,11 +9027,66 @@ async function submitNativeTextDialog(): Promise<void> {
   }
 }
 
+function isRealtimeTranslationApiKeyDialog(dialog: NativeTextDialogState): boolean {
+  return dialog.afterSubmit?.kind === "retry-realtime-interpreter" || dialog.afterSubmit?.kind === "retry-conference-mode";
+}
+
+async function saveRealtimeTranslationApiKey(apiKey: string): Promise<void> {
+  await sendRuntimeMessage({
+    type: "translation.api_key.save",
+    apiKey,
+    confirmed: true,
+  });
+}
+
+async function disconnectRealtimeTranslationApiKey(): Promise<void> {
+  await sendRuntimeMessage({
+    type: "translation.api_key.clear",
+  });
+  if (state.accountStatus) {
+    state.accountStatus = {
+      ...state.accountStatus,
+      openAiApiKeyConfigured: false,
+    };
+  }
+  state.realtimeInterpreter.livePlaybackEnabled = false;
+  if (
+    state.conferenceMode.active ||
+    state.conferenceMode.starting ||
+    state.conferenceMode.stopping ||
+    conferenceModePeer ||
+    realtimeTranslationOwner === "conference"
+  ) {
+    await stopConferenceMode({
+      notifyBridge: true,
+      preserveEntries: true,
+      keepViewActive: true,
+    });
+  }
+  if (
+    state.realtimeInterpreter.active ||
+    state.realtimeInterpreter.starting ||
+    state.realtimeInterpreter.stopping ||
+    realtimeInterpreterPeer ||
+    realtimeInterpreterStream ||
+    realtimeInterpreterDataChannel
+  ) {
+    await stopRealtimeInterpreterMode({
+      preserveEntries: true,
+      keepViewActive: true,
+    });
+  }
+  await scheduleInitialize();
+  state.actionStatus = stringsForState().status.apiKeyDisconnected;
+  state.initError = "";
+  render();
+}
+
 type OAuthUsageFallbackResult = "not-applicable" | "declined" | "awaiting-api-key" | "switched";
 
 async function handleOAuthUsageFallbackRequest(
   error: unknown,
-  retry: NonNullable<NativeTextDialogState["afterSubmit"]>,
+  _retry: NonNullable<NativeTextDialogState["afterSubmit"]>,
 ): Promise<OAuthUsageFallbackResult> {
   if (
     !shouldOfferApiKeyFallbackForError({
@@ -6153,29 +9098,144 @@ async function handleOAuthUsageFallbackRequest(
     return "not-applicable";
   }
 
+  return "declined";
+}
+
+type RealtimeApiKeyRequirementResult = "ready" | "handled" | "retry";
+
+function getCurrentChatgptRealtimeAccountKey(): string | null {
+  if (state.accountStatus?.authMode !== "chatgpt") {
+    return null;
+  }
+  return `${state.accountStatus.email ?? ""}:${state.accountStatus.planType ?? ""}`;
+}
+
+function clearKnownChatgptRealtimeEndpointFailure(): void {
+  chatgptRealtimeEndpointFailureReason = null;
+  chatgptRealtimeEndpointFailureAccountKey = null;
+}
+
+function rememberChatgptRealtimeEndpointFailure(reason: string): void {
+  if (!isRealtimeVoiceApiKeyFallbackEndpointUnavailable(reason) || state.accountStatus?.authMode !== "chatgpt") {
+    return;
+  }
+  chatgptRealtimeEndpointFailureReason = reason;
+  chatgptRealtimeEndpointFailureAccountKey = getCurrentChatgptRealtimeAccountKey();
+}
+
+function getKnownChatgptRealtimeEndpointFailureReason(): string {
+  const currentAccountKey = getCurrentChatgptRealtimeAccountKey();
+  if (
+    !currentAccountKey ||
+    !chatgptRealtimeEndpointFailureReason ||
+    currentAccountKey !== chatgptRealtimeEndpointFailureAccountKey
+  ) {
+    return "";
+  }
+  return chatgptRealtimeEndpointFailureReason;
+}
+
+async function handleRealtimeApiKeyRequirement(options: {
+  source: "live" | "dictation";
+  target?: ComposerVoiceInputTarget;
+  reason?: string;
+}): Promise<RealtimeApiKeyRequirementResult> {
+  if (state.accountStatus?.authMode === "apikey") {
+    return "ready";
+  }
+
   const strings = stringsForState();
-  const approved = await requestNativeConfirmation(strings.prompts.oauthUsageFallbackMessage, {
-    title: strings.prompts.oauthUsageFallbackTitle,
-    confirmLabel: strings.prompts.oauthUsageFallbackUseApiKey,
-  });
-  if (!approved) {
-    return "declined";
-  }
+  const message = getRealtimeApiKeyRequiredMessage(options.source, options.reason);
+  state.initError = message;
+  state.actionStatus = strings.status.chatgpt;
+  render();
+  return "handled";
+}
 
-  if (state.accountStatus?.openAiApiKeyConfigured) {
-    await sendRuntimeMessage({ type: "account.login.start", loginType: "apiKey", confirmed: true });
-    await scheduleInitialize();
-    state.actionStatus = strings.status.apiKeyFallbackSwitched;
-    state.initError = "";
-    return "switched";
-  }
+function isRealtimeVoiceApiKeyFallbackEndpointUnavailable(reason: string): boolean {
+  return /backend-api\/codex\/realtime\/calls/iu.test(reason) && /404 Not Found/iu.test(reason);
+}
 
-  state.actionStatus = strings.status.apiKeyFallbackNeedsKey;
-  openNativeTextDialog("api-key", {
-    description: strings.status.apiKeyFallbackNeedsKey,
-    afterSubmit: retry,
-  });
-  return "awaiting-api-key";
+function getRealtimeApiKeyRequiredMessage(source: "live" | "dictation" | "conference" = "live", reason = ""): string {
+  const isDictation = source === "dictation";
+  const isConference = source === "conference";
+  const endpointUnavailable = isRealtimeVoiceApiKeyFallbackEndpointUnavailable(reason);
+  return isKoreanUiLocale()
+    ? endpointUnavailable
+      ? isConference
+        ? "현재 ChatGPT 로그인으로는 Codex realtime 컨퍼런스 전사 엔드포인트가 열려 있지 않습니다. 이 계정에서 realtime 전사 권한이 열려 있는지 확인한 뒤 다시 시도해 주세요."
+        : isDictation
+        ? "현재 ChatGPT 로그인으로는 Codex realtime 전사 엔드포인트가 열려 있지 않습니다. 이 컴퓨터/탭 오디오 받아쓰기는 API 키 모드로 전환해야 계속 사용할 수 있습니다."
+        : "현재 ChatGPT 로그인으로는 Codex realtime 음성 엔드포인트가 열려 있지 않습니다. 이 라이브 음성 기능은 API 키 모드로 전환해야 계속 사용할 수 있습니다."
+      : isConference
+        ? "Codex app-server가 컨퍼런스 전사 realtime 연결을 거부했습니다. ChatGPT 계정 로그인 상태와 realtime 권한을 확인한 뒤 다시 시도해 주세요."
+        : isDictation
+        ? "Codex app-server가 이 컴퓨터/탭 오디오 전사 연결을 API 키 인증으로만 허용했습니다. ChatGPT 로그인으로는 먼저 WebRTC 전사를 시도하고, 서버가 거부할 때만 API 키 모드가 필요합니다."
+        : "Codex app-server가 이 realtime 연결을 API 키 인증으로만 허용했습니다. ChatGPT 로그인으로 WebRTC 연결을 다시 시도할 수 없으면 API 키 모드가 필요합니다."
+    : endpointUnavailable
+      ? isConference
+        ? "The current ChatGPT login could not open the Codex realtime conference transcription endpoint. Check whether this account has realtime transcription access, then try again."
+        : isDictation
+        ? "The current ChatGPT login could not open the Codex realtime transcription endpoint. Switch this computer or tab audio dictation path to API-key mode to continue."
+        : "The current ChatGPT login could not open the Codex realtime voice endpoint. Switch live voice to API-key mode to continue."
+      : isConference
+        ? "The Codex app-server rejected the conference realtime transcription connection. Check ChatGPT sign-in and realtime access, then try again."
+        : isDictation
+        ? "The Codex app-server only allowed this computer or tab audio transcription connection with API-key auth. Chromex first tries WebRTC with ChatGPT login; API-key mode is needed only if the server rejects that path."
+        : "The Codex app-server only allowed this realtime connection with API-key auth. If WebRTC with ChatGPT login cannot be retried, API-key mode is required.";
+}
+
+function isRealtimeVoiceInvalidApiKey(reason: string): boolean {
+  return /Incorrect API key|invalid_api_key|401 Unauthorized.*API key|auth error code:\s*invalid_api_key/iu.test(reason);
+}
+
+function getRealtimeInvalidApiKeyMessage(source: "live" | "dictation" | "conference" = "live"): string {
+  const target =
+    source === "conference"
+      ? isKoreanUiLocale()
+        ? "컨퍼런스 모드"
+        : "conference mode"
+      : source === "dictation"
+        ? isKoreanUiLocale()
+          ? "받아쓰기"
+          : "dictation"
+        : isKoreanUiLocale()
+          ? "라이브 음성"
+          : "live voice";
+  return isKoreanUiLocale()
+    ? `현재 Codex CLI가 잘못된 OpenAI API 키 모드로 로그인되어 ${target} 세션을 시작할 수 없습니다. ~/.codex/auth.json의 API 키 인증을 제거한 뒤 ChatGPT 계정으로 다시 로그인해 주세요.`
+    : `Codex CLI is currently signed in with an invalid OpenAI API key, so ${target} cannot start. Remove the API-key auth from ~/.codex/auth.json, then sign in with ChatGPT again.`;
+}
+
+function isRealtimeVoiceApiKeyRequired(reason: string): boolean {
+  return (
+    /requires? API[- ]?key|API[- ]?key auth|API[- ]?key authentication|API[- ]?key mode|realtime conversation requires API key auth/iu.test(
+      reason,
+    ) || isRealtimeVoiceApiKeyFallbackEndpointUnavailable(reason)
+  );
+}
+
+function isRealtimeVoiceStartupFatal(reason: string | null | undefined): boolean {
+  if (!reason) {
+    return false;
+  }
+  return /invalid_offer|failed to parse offer|failed to unmarshal SDP|backend-api\/codex\/realtime\/calls.*404 Not Found/iu.test(
+    reason,
+  ) || isRealtimeVoiceInvalidApiKey(reason);
+}
+
+function isRealtimeVoiceAvailableForAccount(): boolean {
+  return Boolean(state.accountStatus?.codexAuthenticated && state.accountStatus.authMode === "apikey");
+}
+
+function shouldShowRealtimeVoiceControls(): boolean {
+  return isRealtimeVoiceAvailableForAccount();
+}
+
+function getRealtimeVoiceSignInRequiredMessage(): string {
+  return isKoreanUiLocale()
+    ? "실시간 음성 기능을 사용하려면 Codex에 ChatGPT 계정 또는 API 키로 로그인해야 합니다."
+    : "Sign in to Codex with ChatGPT or an API key to use realtime voice.";
 }
 
 function requestNativeConfirmation(
@@ -6439,20 +9499,121 @@ function renderSettingsSwitch(id: string, checked: boolean, label: string): stri
 function renderLanguageSelect(): string {
   const selectedLanguage = normalizeUiLanguageSetting(state.settings.uiLanguage);
   const strings = getUiStrings(state.uiLocale);
+  return renderSettingsSelectControl({
+    id: "setting-ui-language",
+    ariaLabel: strings.settings.uiLanguage,
+    value: selectedLanguage,
+    options: listSupportedUiLanguageOptions().map((option) => ({
+      value: option.locale,
+      label: formatUiLanguageOptionLabel(option, state.uiLocale),
+    })),
+    className: "language-select-shell",
+    searchable: true,
+    searchPlaceholder: isKoreanUiLocale() ? "언어 검색" : "Search languages",
+  });
+}
+
+function renderSettingsSelectControl(input: {
+  id: SettingsSelectId;
+  ariaLabel: string;
+  value: string;
+  options: SettingsSelectOption[];
+  className?: string;
+  disabled?: boolean;
+  searchable?: boolean;
+  searchPlaceholder?: string;
+}): string {
+  const isOpen = state.settingsDropdownOpen === input.id && !input.disabled;
+  const searchQuery = isOpen && input.searchable ? state.settingsDropdownSearch.trim() : "";
+  const normalizedQuery = searchQuery.toLocaleLowerCase();
+  const filteredOptions =
+    normalizedQuery.length > 0
+      ? input.options.filter((option) =>
+          `${option.label} ${option.description ?? ""} ${option.value}`.toLocaleLowerCase().includes(normalizedQuery),
+        )
+      : input.options;
+  const selectedOption = input.options.find((option) => option.value === input.value) ?? input.options[0] ?? {
+    value: "",
+    label: input.value,
+  };
+  const shellClasses = [
+    "settings-select-shell",
+    "custom-select-shell",
+    input.className ?? "",
+    input.disabled ? "disabled" : "",
+    isOpen ? "open" : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+  const listboxId = `${input.id}-listbox`;
+
   return `
-    <label class="settings-select-shell language-select-shell">
-      <select id="setting-ui-language" aria-label="${escapeAttribute(strings.settings.uiLanguage)}">
-        ${listSupportedUiLanguageOptions()
-          .map(
-            (option) =>
-              `<option value="${escapeAttribute(option.locale)}" ${
-                option.locale === selectedLanguage ? "selected" : ""
-              }>${escapeHtml(formatUiLanguageOptionLabel(option, state.uiLocale))}</option>`,
-          )
-          .join("")}
-      </select>
-      <span aria-hidden="true">${renderUiIcon("chevron-down")}</span>
-    </label>
+    <div class="${shellClasses}" data-settings-select-root="${escapeAttribute(input.id)}">
+      <button
+        id="${escapeAttribute(input.id)}"
+        class="settings-select-button"
+        type="button"
+        data-settings-select-trigger="${escapeAttribute(input.id)}"
+        aria-haspopup="listbox"
+        aria-expanded="${isOpen ? "true" : "false"}"
+        aria-controls="${escapeAttribute(listboxId)}"
+        aria-label="${escapeAttribute(input.ariaLabel)}"
+        ${input.disabled ? "disabled" : ""}
+      >
+        <span class="settings-select-value">${escapeHtml(selectedOption.label)}</span>
+        <span class="settings-select-caret" aria-hidden="true">${renderUiIcon("chevron-down")}</span>
+      </button>
+      ${
+        isOpen
+          ? `<div class="settings-select-menu" id="${escapeAttribute(listboxId)}" role="listbox" aria-label="${escapeAttribute(input.ariaLabel)}">
+              ${
+                input.searchable
+                  ? `<label class="settings-select-search">
+                      <span class="settings-select-search-icon" aria-hidden="true">${renderUiIcon("search")}</span>
+                      <input
+                        id="${escapeAttribute(input.id)}-search"
+                        type="search"
+                        data-settings-select-search="${escapeAttribute(input.id)}"
+                        value="${escapeAttribute(searchQuery)}"
+                        placeholder="${escapeAttribute(input.searchPlaceholder ?? "")}"
+                        autocomplete="off"
+                      />
+                    </label>`
+                  : ""
+              }
+              <div class="settings-select-options">
+                ${
+                  filteredOptions.length
+                    ? filteredOptions
+                        .map(
+                          (option) => `
+                            <button
+                              class="settings-select-option ${option.value === input.value ? "selected" : ""}"
+                              type="button"
+                              role="option"
+                              aria-selected="${option.value === input.value ? "true" : "false"}"
+                              data-settings-select-id="${escapeAttribute(input.id)}"
+                              data-settings-select-option="${escapeAttribute(option.value)}"
+                            >
+                              <span class="settings-select-option-copy">
+                                <strong>${escapeHtml(option.label)}</strong>
+                                ${option.description ? `<small>${escapeHtml(option.description)}</small>` : ""}
+                              </span>
+                              ${
+                                option.value === input.value
+                                  ? `<span class="settings-select-check" aria-hidden="true">${renderUiIcon("check")}</span>`
+                                  : `<span class="settings-select-check placeholder" aria-hidden="true"></span>`
+                              }
+                            </button>`,
+                        )
+                        .join("")
+                    : `<p class="settings-select-empty">${escapeHtml(isKoreanUiLocale() ? "검색 결과가 없습니다." : "No results")}</p>`
+                }
+              </div>
+            </div>`
+          : ""
+      }
+    </div>
   `;
 }
 
@@ -6668,6 +9829,7 @@ function renderWorkspaceDiagnostics(strings: ReturnType<typeof getUiStrings>): s
 function hasComposerContextReferences(): boolean {
   return Boolean(
     getCurrentTabReference() ||
+      state.selectedPageTextContext ||
       state.attachments.size ||
       state.fileAttachments.length ||
       state.structuredInputs.length,
@@ -6675,8 +9837,12 @@ function hasComposerContextReferences(): boolean {
 }
 
 function renderAttachedContextSummary(strings: ReturnType<typeof getUiStrings>): string {
-  const currentTab = getCurrentTabReference();
-  const currentTabChip = currentTab
+  const transcriptQuestionContextActive = isTranscriptQuestionContextActive();
+  const currentTab = transcriptQuestionContextActive ? null : getCurrentTabReference();
+  const selectionCard = state.selectedPageTextContext && state.attachments.has("selection")
+    ? [renderSelectedPageTextComposerCard(state.selectedPageTextContext, strings)]
+    : [];
+  const currentTabChip = currentTab && !state.selectedPageTextContext
     ? [renderPassiveTabReferenceChip(currentTab, strings.labels.currentTab, formatCurrentTabReferenceLabel(currentTab))]
     : [];
   const chips = Array.from(state.attachments).flatMap((attachment) => {
@@ -6712,7 +9878,7 @@ function renderAttachedContextSummary(strings: ReturnType<typeof getUiStrings>):
       </span>`,
   );
 
-  const contextReferences = [...currentTabChip, ...chips, ...structured];
+  const contextReferences = [...selectionCard, ...currentTabChip, ...chips, ...structured];
   const sections: string[] = [];
   if (contextReferences.length) {
     sections.push(`
@@ -6991,6 +10157,35 @@ function renderPassiveTabReferenceChip(tab: OpenTabContext, title: string, label
   `;
 }
 
+function renderSelectedPageTextComposerCard(
+  context: SelectedPageTextContext,
+  strings: ReturnType<typeof getUiStrings>,
+): string {
+  const label = context.title || context.domain || strings.labels.currentTab;
+  return `
+    <button
+      class="summary-chip selected-page-context-chip"
+      data-remove-selected-page-context
+      title="${escapeAttribute(strings.actions.removeAttachment)}"
+      aria-label="${escapeAttribute(strings.actions.removeAttachment)}"
+    >
+      ${renderSelectedPageContextIcon(context)}
+      <span class="selected-page-context-copy">
+        <strong>${escapeHtml(truncateLabel(label, 34))}</strong>
+        <small>“${escapeHtml(truncateLabel(context.text, 96))}”</small>
+      </span>
+      <span class="summary-chip-dismiss">${renderUiIcon("x")}</span>
+    </button>
+  `;
+}
+
+function renderSelectedPageContextIcon(context: { favIconUrl?: string; title?: string }): string {
+  if (context.favIconUrl && isSafeMessageImageUrl(context.favIconUrl)) {
+    return `<span class="selected-page-context-icon image"><img src="${escapeAttribute(context.favIconUrl)}" alt="" loading="lazy" /></span>`;
+  }
+  return `<span class="selected-page-context-icon">${renderUiIcon("globe")}</span>`;
+}
+
 function renderTabReferenceIcon(tab: OpenTabContext, label = formatTabReferenceLabel(tab)): string {
   if (tab.favIconUrl) {
     return `<span class="tab-reference-icon image"><img src="${escapeAttribute(tab.favIconUrl)}" alt="" loading="lazy" /></span>`;
@@ -7038,12 +10233,148 @@ function defaultPromptForContext(strings: ReturnType<typeof getUiStrings>): stri
 }
 
 function buildConversationContextHint(): string {
-  return state.messages
+  if (isConferenceModeQuestionContextActive()) {
+    const conferenceEntriesForPrompt =
+      state.conferenceMode.partialSourceText.trim() || state.conferenceMode.partialTranslationText.trim()
+        ? [
+            ...state.conferenceMode.entries,
+            {
+              id: "conference-transcript-partial",
+              sourceText: state.conferenceMode.partialSourceText,
+              translationText: state.conferenceMode.partialTranslationText,
+              createdAt: Date.now(),
+            },
+          ]
+        : state.conferenceMode.entries;
+    return buildTranscriptSourceOnlyContextHint("Live conference transcript context:", conferenceEntriesForPrompt);
+  }
+  const realtimeInterpreterHint = isRealtimeInterpreterQuestionContextActive()
+    ? buildRealtimeInterpreterContextHint(getRealtimeInterpreterEntriesForPrompt())
+    : "";
+
+  const conversationHint = state.messages
     .filter((message) => !message.notice && message.text.trim())
     .slice(-8)
     .map((message) => `${message.role}: ${message.text}`)
     .join("\n")
     .slice(-3000);
+  const conferenceEntriesForPrompt =
+    state.conferenceMode.partialSourceText.trim() || state.conferenceMode.partialTranslationText.trim()
+      ? [
+          ...state.conferenceMode.entries,
+          {
+            id: "conference-transcript-partial",
+            sourceText: state.conferenceMode.partialSourceText,
+            translationText: state.conferenceMode.partialTranslationText,
+            createdAt: Date.now(),
+          },
+        ]
+      : state.conferenceMode.entries;
+  const conferenceHint = buildTranscriptSourceOnlyContextHint("Live conference transcript context:", conferenceEntriesForPrompt);
+  const hints: string[] = [];
+  if (state.selectedPageTextContext) {
+    hints.push(
+      [
+        "Selected page text context:",
+        `Title: ${state.selectedPageTextContext.title}`,
+        `URL: ${state.selectedPageTextContext.url}`,
+        `Text: ${state.selectedPageTextContext.text}`,
+        ...(state.selectedPageTextContext.contextText
+          ? [`Context:\n${state.selectedPageTextContext.contextText}`]
+          : []),
+      ].join("\n"),
+    );
+  }
+  if (conferenceHint) {
+    hints.push(conferenceHint);
+  }
+  if (realtimeInterpreterHint) {
+    hints.push(realtimeInterpreterHint);
+  }
+  if (conversationHint) {
+    hints.push(conversationHint);
+  }
+  return hints.join("\n\n").trim().slice(-6000);
+}
+
+function getRealtimeInterpreterEntriesForPrompt(): RealtimeInterpreterTranscriptEntry[] {
+  const partialSourceText = state.realtimeInterpreter.partialSourceText.trim();
+  const partialTranslationText = state.realtimeInterpreter.partialTranslationText.trim();
+  if (!partialSourceText && !partialTranslationText) {
+    return state.realtimeInterpreter.entries;
+  }
+  return [
+    ...state.realtimeInterpreter.entries,
+    {
+      id: "realtime-interpreter-partial",
+      sourceText: partialSourceText,
+      translationText: partialTranslationText,
+      createdAt: Date.now(),
+    },
+  ];
+}
+
+function buildRealtimeInterpreterContextHint(entries: RealtimeInterpreterTranscriptEntry[]): string {
+  return buildTranscriptSourceOnlyContextHint("Realtime interpreter original transcript context:", entries);
+}
+
+function buildTranscriptSourceOnlyContextHint(
+  label: string,
+  entries: Array<{ sourceText: string; translationText?: string }>,
+): string {
+  const lines = entries
+    .filter((entry) => entry.sourceText.trim())
+    .slice(-24)
+    .map((entry, index) => `${index + 1}. Original: ${entry.sourceText.trim()}`);
+
+  if (!lines.length) {
+    return "";
+  }
+
+  return `${label}\n${lines.join("\n")}`.slice(-6000);
+}
+
+function isConferenceModeQuestionContextActive(): boolean {
+  return (
+    state.conferenceMode.viewActive &&
+    (state.conferenceMode.active ||
+      state.conferenceMode.starting ||
+      state.conferenceMode.stopping ||
+      state.conferenceMode.entries.some((entry) => entry.sourceText.trim()) ||
+      Boolean(state.conferenceMode.partialSourceText.trim()))
+  );
+}
+
+function isRealtimeInterpreterQuestionContextActive(): boolean {
+  return (
+    state.realtimeInterpreter.viewActive &&
+    (state.realtimeInterpreter.active ||
+      state.realtimeInterpreter.starting ||
+      state.realtimeInterpreter.stopping ||
+      state.realtimeInterpreter.entries.some((entry) => entry.sourceText.trim()) ||
+      Boolean(state.realtimeInterpreter.partialSourceText.trim()))
+  );
+}
+
+function isTranscriptQuestionContextActive(): boolean {
+  return isConferenceModeQuestionContextActive() || isRealtimeInterpreterQuestionContextActive();
+}
+
+function resolveActiveTranscriptViewForPrompt(): MainView {
+  if (isConferenceModeQuestionContextActive()) {
+    return "conference";
+  }
+  if (isRealtimeInterpreterQuestionContextActive()) {
+    return "interpreter";
+  }
+  return "chat";
+}
+
+function createPromptSelectedTextContextPayload(): SelectedPageTextContext | undefined {
+  if (!state.selectedPageTextContext || !state.attachments.has("selection")) {
+    return undefined;
+  }
+  return { ...state.selectedPageTextContext };
 }
 
 async function ingestSelectedFiles(fileList: FileList | File[]): Promise<void> {
@@ -7064,7 +10395,8 @@ async function ingestSelectedFiles(fileList: FileList | File[]): Promise<void> {
   const acceptedByFingerprint = new Map<string, (typeof plan.accepted)[number]>(
     plan.accepted.map((attachment) => [createAttachmentFingerprint(attachment), attachment] as const),
   );
-  const nextAttachments: UserFileAttachment[] = [];
+  const pendingAttachments: UserFileAttachment[] = [];
+  const fileReadJobs: Array<{ id: string; file: File }> = [];
 
   for (const file of files) {
     const key = createAttachmentFingerprint({
@@ -7077,20 +10409,42 @@ async function ingestSelectedFiles(fileList: FileList | File[]): Promise<void> {
       continue;
     }
 
-    nextAttachments.push({
-      id: `file-${Date.now()}-${nextAttachments.length + state.fileAttachments.length}`,
+    const id = `file-${Date.now()}-${pendingAttachments.length + state.fileAttachments.length}`;
+    pendingAttachments.push({
+      id,
       name: accepted.name,
       mimeType: accepted.mimeType,
       sizeBytes: accepted.sizeBytes,
       lastModified: accepted.lastModified,
-      base64: await readFileAsBase64(file),
+      base64: "",
       kind: accepted.kind,
     });
+    fileReadJobs.push({ id, file });
   }
 
-  state.fileAttachments = [...state.fileAttachments, ...nextAttachments];
+  if (pendingAttachments.length) {
+    state.fileAttachments = [...state.fileAttachments, ...pendingAttachments];
+    state.actionStatus = getFileAttachmentReadingStatus(pendingAttachments.length);
+    render();
+  }
+
+  for (const job of fileReadJobs) {
+    const base64 = await readFileAsBase64(job.file);
+    state.fileAttachments = state.fileAttachments.map((attachment) =>
+      attachment.id === job.id ? { ...attachment, base64 } : attachment,
+    );
+    render();
+  }
+
   state.actionStatus = summarizeRejectedFiles(plan.rejected, stringsForState());
   render();
+}
+
+function getFileAttachmentReadingStatus(count: number): string {
+  if (isKoreanUiLocale()) {
+    return count > 1 ? `파일 ${count}개를 첨부하는 중입니다.` : "파일을 첨부하는 중입니다.";
+  }
+  return count > 1 ? `Attaching ${count} files.` : "Attaching file.";
 }
 
 async function ingestImageAnnotationReferenceFiles(fileList: FileList | File[]): Promise<void> {
@@ -8104,6 +11458,7 @@ function clearFileAttachments(): void {
 function clearVisualPromptAttachments(): void {
   state.attachments.delete("image");
   state.attachments.delete("selection");
+  state.selectedPageTextContext = null;
   state.currentReadStrategy = "auto";
   clearFileAttachments();
 }
@@ -8113,6 +11468,7 @@ function dismissCurrentTabContext(): void {
   state.attachments.delete("current-page");
   state.attachments.delete("selection");
   state.attachments.delete("image");
+  state.selectedPageTextContext = null;
   state.currentReadStrategy = "auto";
 }
 
@@ -8122,6 +11478,7 @@ function clearTransientComposerContext(): void {
   state.historyQuery = "";
   state.currentReadStrategy = "auto";
   state.structuredInputs = [];
+  state.selectedPageTextContext = null;
   clearFileAttachments();
 }
 
@@ -8628,7 +11985,7 @@ function isCurrentTurnActive(): boolean {
 }
 
 function isCurrentPromptWorkActive(): boolean {
-  return isCurrentTurnActive() || Boolean(state.promptActivity) || state.streamingAssistantMessageIds.size > 0;
+  return isCurrentTurnActive() || Boolean(state.promptActivity) || isCurrentPromptRequestPending() || state.streamingAssistantMessageIds.size > 0;
 }
 
 function canSendCurrentComposerMessage(
@@ -8640,6 +11997,9 @@ function canSendCurrentComposerMessage(
   if (currentWorkActive && !steerTurnActive) {
     return false;
   }
+  if (hasPendingFileAttachmentReads()) {
+    return false;
+  }
 
   return canSendComposerMessage({
     draft,
@@ -8648,6 +12008,10 @@ function canSendCurrentComposerMessage(
     streamingAssistantActive: state.streamingAssistantMessageIds.size > 0,
     submissionStartingActive: promptSubmissionBootstrapInFlight,
   });
+}
+
+function hasPendingFileAttachmentReads(): boolean {
+  return state.fileAttachments.some((attachment) => !attachment.base64.trim() && !attachment.sourceUrl?.trim());
 }
 
 function canStartMessageReplayInteraction(): boolean {
@@ -8922,13 +12286,16 @@ function getSlashOptionsForState(): SlashCommandOption[] {
     return [];
   }
 
-  return listSlashCommandOptions(
+  const options = listSlashCommandOptions(
     state.slashQuery,
     [],
     state.profiles,
     state.uiLocale,
     state.selectedProfileId,
-  ).slice(0, 12);
+  );
+  const createProfileOption = options.find((option) => option.kind === "create-profile");
+  const profileOptions = options.filter((option) => option.kind === "profile").slice(0, createProfileOption ? 11 : 12);
+  return createProfileOption ? [...profileOptions, createProfileOption] : profileOptions;
 }
 
 function isComposerDropdownOpen(): boolean {
@@ -8943,10 +12310,16 @@ function isComposerDropdownOpen(): boolean {
 }
 
 async function applySlashOption(option: SlashCommandOption): Promise<void> {
-  const selectedProfileId = selectProfileForComposer(option.profileId, { visible: option.profileId !== DEFAULT_PROFILE_ID });
   state.composerDraft = removeActiveSlashToken(state.composerDraft);
   state.slashQuery = null;
   state.slashActiveIndex = 0;
+  if (option.kind === "create-profile") {
+    state.activeView = "workspace";
+    openProfileEditor("create");
+    return;
+  }
+
+  const selectedProfileId = selectProfileForComposer(option.profileId, { visible: option.profileId !== DEFAULT_PROFILE_ID });
   void sendRuntimeMessage({ type: "profile.select", profileId: selectedProfileId }).catch((error) => {
     state.initError = toUserFacingRuntimeError(error, stringsForState().errors.init);
     render();
@@ -9012,7 +12385,9 @@ async function acceptActiveSlashOptionFromComposer(): Promise<boolean> {
   }
   await applySlashOption(option);
   renderSync();
-  restoreComposerFocus(true);
+  if (option.kind !== "create-profile") {
+    restoreComposerFocus(true);
+  }
   return true;
 }
 
@@ -9076,7 +12451,7 @@ function structuredInputRoleLabel(input: CodexStructuredInput, strings: ReturnTy
   if (input.type === "skill") {
     return strings.roles.skill;
   }
-  return input.path.startsWith("plugin://") ? strings.roles.plugin : strings.roles.app;
+  return getStructuredInputPath(input).startsWith("plugin://") ? strings.roles.plugin : strings.roles.app;
 }
 
 function renderReadModeButton(mode: ReadStrategy | "auto", label: string): string {
@@ -9114,6 +12489,8 @@ function syncDocumentLanguage(): void {
         ? `${strings.panelDocumentTitle} · ${strings.tabs.skills}`
         : state.activeView === "plugins"
           ? `${strings.panelDocumentTitle} · ${strings.tabs.pluginMcp}`
+          : state.activeView === "interpreter"
+            ? `${strings.panelDocumentTitle} · ${getConferenceModeMenuLabel()}`
       : `${strings.panelDocumentTitle} · ${strings.tabs.chat}`;
   syncDocumentTheme();
 }
@@ -9193,6 +12570,131 @@ function restoreScrollPositions(positions: Record<string, { scrollTop: number; s
     }
     node.scrollTop = snapshot.scrollTop;
   });
+}
+
+function scrollConferenceTranscriptToBottom(options: { onlyIfPinned?: boolean } = {}): void {
+  if (state.activeView !== "conference") {
+    return;
+  }
+  if (options.onlyIfPinned && !conferenceTranscriptStickToBottom) {
+    return;
+  }
+  const node = root.querySelector<HTMLElement>("#conference-transcript-scroll");
+  if (!node) {
+    return;
+  }
+  node.scrollTop = Math.max(0, node.scrollHeight - node.clientHeight);
+}
+
+function scrollRealtimeInterpreterTranscriptToBottom(options: { onlyIfPinned?: boolean } = {}): void {
+  if (state.activeView !== "interpreter") {
+    return;
+  }
+  if (options.onlyIfPinned && !realtimeInterpreterTranscriptStickToBottom) {
+    return;
+  }
+  const node = root.querySelector<HTMLElement>("#realtime-interpreter-scroll");
+  if (!node) {
+    return;
+  }
+  node.scrollTop = Math.max(0, node.scrollHeight - node.clientHeight);
+}
+
+function handleConferenceTranscriptScroll(event: Event): void {
+  conferenceTranscriptStickToBottom = isScrollNearBottom(event.currentTarget as HTMLElement);
+}
+
+function handleRealtimeInterpreterTranscriptScroll(event: Event): void {
+  realtimeInterpreterTranscriptStickToBottom = isScrollNearBottom(event.currentTarget as HTMLElement);
+}
+
+function isScrollNearBottom(node: HTMLElement): boolean {
+  return node.scrollHeight - node.scrollTop - node.clientHeight <= TRANSCRIPT_AUTOSCROLL_BOTTOM_THRESHOLD_PX;
+}
+
+function bindConferencePaneResizer(): void {
+  bindVerticalPaneResizer({
+    resizerSelector: ".conference-pane-resizer",
+    shellSelector: ".conference-view-shell",
+    cssVariable: "--conference-transcript-ratio",
+    getRatio: () => conferencePaneSplitRatio,
+    setRatio: (ratio) => {
+      conferencePaneSplitRatio = ratio;
+    },
+  });
+}
+
+function bindRealtimeInterpreterPaneResizer(): void {
+  bindVerticalPaneResizer({
+    resizerSelector: ".realtime-interpreter-pane-resizer",
+    shellSelector: ".realtime-interpreter-workspace",
+    cssVariable: "--realtime-interpreter-transcript-ratio",
+    getRatio: () => realtimeInterpreterPaneSplitRatio,
+    setRatio: (ratio) => {
+      realtimeInterpreterPaneSplitRatio = ratio;
+    },
+  });
+}
+
+function bindVerticalPaneResizer(options: {
+  resizerSelector: string;
+  shellSelector: string;
+  cssVariable: string;
+  getRatio: () => number;
+  setRatio: (ratio: number) => void;
+}): void {
+  const resizer = root.querySelector<HTMLElement>(options.resizerSelector);
+  const shell = root.querySelector<HTMLElement>(options.shellSelector);
+  if (!resizer || !shell) {
+    return;
+  }
+
+  const applyRatio = (ratio: number) => {
+    const nextRatio = clampTranscriptPaneSplitRatio(ratio);
+    options.setRatio(nextRatio);
+    shell.style.setProperty(options.cssVariable, nextRatio.toFixed(3));
+  };
+
+  resizer.addEventListener("keydown", (event) => {
+    if (event.key !== "ArrowUp" && event.key !== "ArrowDown") {
+      return;
+    }
+    event.preventDefault();
+    applyRatio(options.getRatio() + (event.key === "ArrowUp" ? -0.04 : 0.04));
+  });
+
+  resizer.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) {
+      return;
+    }
+    event.preventDefault();
+    resizer.setPointerCapture?.(event.pointerId);
+    const shellRect = shell.getBoundingClientRect();
+    const updateFromClientY = (clientY: number) => {
+      if (shellRect.height <= 0) {
+        return;
+      }
+      applyRatio((clientY - shellRect.top) / shellRect.height);
+    };
+    const handlePointerMove = (moveEvent: PointerEvent) => {
+      updateFromClientY(moveEvent.clientY);
+    };
+    const handlePointerUp = (upEvent: PointerEvent) => {
+      resizer.releasePointerCapture?.(upEvent.pointerId);
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", handlePointerUp);
+    };
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", handlePointerUp);
+    updateFromClientY(event.clientY);
+  });
+}
+
+function clampTranscriptPaneSplitRatio(value: number): number {
+  if (!Number.isFinite(value)) {
+    return 0.5;
+  }
+  return Math.min(TRANSCRIPT_PANE_SPLIT_MAX, Math.max(TRANSCRIPT_PANE_SPLIT_MIN, value));
 }
 
 function forceChatScrollToBottom(container = root.querySelector<HTMLElement>("#chat-scroll")): void {
@@ -9420,8 +12922,132 @@ function bindPluginMcpControls(rootElement: HTMLElement): void {
   });
 }
 
+function bindSettingsSearchInput(id: string, updateValue: (value: string) => void): void {
+  root.querySelector<HTMLInputElement>(`#${id}`)?.addEventListener("input", (event) => {
+    const input = event.currentTarget as HTMLInputElement;
+    const cursorPosition = input.selectionStart ?? input.value.length;
+    updateValue(input.value);
+    renderSync();
+    restoreSettingsSearchFocus(id, cursorPosition);
+  });
+}
+
+function restoreSettingsSearchFocus(id: string, cursorPosition: number): void {
+  const input = root.querySelector<HTMLInputElement>(`#${id}`);
+  if (!input) {
+    return;
+  }
+  const nextCursorPosition = Math.min(cursorPosition, input.value.length);
+  input.focus({ preventScroll: true });
+  input.setSelectionRange(nextCursorPosition, nextCursorPosition);
+}
+
+function normalizeSettingsSelectId(value: unknown): SettingsSelectId | null {
+  return typeof value === "string" && SETTINGS_SELECT_IDS.has(value as SettingsSelectId)
+    ? (value as SettingsSelectId)
+    : null;
+}
+
+function openSettingsSelect(id: SettingsSelectId): void {
+  const nextOpen = state.settingsDropdownOpen === id ? "" : id;
+  state.attachmentMenuOpen = false;
+  state.appMenuOpen = false;
+  state.browserActionPermissionMenuOpen = false;
+  state.composerModelMenuOpen = false;
+  state.mentionQuery = null;
+  state.mentionActiveIndex = 0;
+  state.slashQuery = null;
+  state.settingsDropdownOpen = nextOpen;
+  state.settingsDropdownSearch = "";
+  renderSync();
+  if (nextOpen === "setting-ui-language") {
+    window.setTimeout(() => {
+      root.querySelector<HTMLInputElement>("#setting-ui-language-search")?.focus({ preventScroll: true });
+    }, 0);
+  }
+}
+
+function updateSettingsSelectSearch(id: SettingsSelectId, value: string, cursorPosition: number): void {
+  state.settingsDropdownOpen = id;
+  state.settingsDropdownSearch = value;
+  renderSync();
+  const input = root.querySelector<HTMLInputElement>(`#${CSS.escape(id)}-search`);
+  if (!input) {
+    return;
+  }
+  const nextCursorPosition = Math.min(cursorPosition, input.value.length);
+  input.focus({ preventScroll: true });
+  input.setSelectionRange(nextCursorPosition, nextCursorPosition);
+}
+
+async function selectSettingsDropdownOption(id: SettingsSelectId, value: string): Promise<void> {
+  state.settingsDropdownOpen = "";
+  state.settingsDropdownSearch = "";
+  switch (id) {
+    case "profile-select": {
+      const selectedProfileId = selectProfileForComposer(value, { visible: value !== DEFAULT_PROFILE_ID });
+      await sendRuntimeMessage({ type: "profile.select", profileId: selectedProfileId });
+      scheduleConversationPersist();
+      render();
+      return;
+    }
+    case "model-select": {
+      state.selectedModel = value;
+      syncSelectedReasoningEffort();
+      await persistSelectedModelControls();
+      scheduleConversationPersist();
+      render();
+      return;
+    }
+    case "setting-voice-input-source": {
+      const voiceInputAudioSource = normalizeVoiceInputAudioSource(value);
+      state.settings = await chrome.runtime.sendMessage({
+        type: "settings.update",
+        settings: { voiceInputAudioSource },
+      });
+      state.settings = {
+        ...state.settings,
+        voiceInputAudioSource: normalizeVoiceInputAudioSource(state.settings.voiceInputAudioSource),
+      };
+      render();
+      return;
+    }
+    case "setting-ui-language": {
+      const uiLanguage = normalizeUiLanguageSetting(value);
+      state.settings = await chrome.runtime.sendMessage({
+        type: "settings.update",
+        settings: { uiLanguage },
+      });
+      state.settings = {
+        ...state.settings,
+        uiLanguage: normalizeUiLanguageSetting(state.settings.uiLanguage),
+        uiTheme: normalizeUiThemeSetting(state.settings.uiTheme),
+        preferredVoice: normalizeCodexRealtimeVoice(state.settings.preferredVoice),
+      };
+      state.uiLocale = resolveUiLocale(state.settings.uiLanguage, getBrowserUiLanguage());
+      syncDocumentLanguage();
+      state.profiles = localizeBuiltinProfiles(state.profiles, state.uiLocale);
+      render();
+      return;
+    }
+    case "voice-select": {
+      state.settings = await chrome.runtime.sendMessage({
+        type: "settings.update",
+        settings: { preferredVoice: normalizeCodexRealtimeVoice(value) },
+      });
+      state.settings = {
+        ...state.settings,
+        preferredVoice: normalizeCodexRealtimeVoice(state.settings.preferredVoice),
+      };
+      render();
+      return;
+    }
+  }
+}
+
 function bindEvents(): void {
   const strings = getUiStrings(state.uiLocale);
+  ensureFloatingSurfaceLayoutBindings();
   resizeComposerTextarea();
 
   root.querySelector<HTMLElement>("#chat-scroll")?.addEventListener("scroll", handleChatScroll, {
@@ -9449,12 +13075,38 @@ function bindEvents(): void {
     render();
   });
 
-  root.querySelector<HTMLSelectElement>("#profile-select")?.addEventListener("change", async (event) => {
-    const target = event.currentTarget as HTMLSelectElement;
-    const selectedProfileId = selectProfileForComposer(target.value, { visible: target.value !== DEFAULT_PROFILE_ID });
-    await sendRuntimeMessage({ type: "profile.select", profileId: selectedProfileId });
-    scheduleConversationPersist();
-    render();
+  root.querySelectorAll<HTMLButtonElement>("[data-settings-select-trigger]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const id = normalizeSettingsSelectId(button.dataset.settingsSelectTrigger);
+      if (!id || button.disabled) {
+        return;
+      }
+      openSettingsSelect(id);
+    });
+  });
+
+  root.querySelectorAll<HTMLInputElement>("[data-settings-select-search]").forEach((input) => {
+    input.addEventListener("input", () => {
+      const id = normalizeSettingsSelectId(input.dataset.settingsSelectSearch);
+      if (!id) {
+        return;
+      }
+      updateSettingsSelectSearch(id, input.value, input.selectionStart ?? input.value.length);
+    });
+  });
+
+  root.querySelectorAll<HTMLButtonElement>("[data-settings-select-option]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const id = normalizeSettingsSelectId(button.dataset.settingsSelectId);
+      if (!id) {
+        return;
+      }
+      await selectSettingsDropdownOption(id, button.dataset.settingsSelectOption ?? "");
+    });
+  });
+
+  root.querySelector<HTMLButtonElement>("[data-plan-mode-dismiss]")?.addEventListener("click", () => {
+    void setPlanModeEnabled(false, { focusComposer: true });
   });
 
   root.querySelector<HTMLButtonElement>("#create-profile")?.addEventListener("click", () => {
@@ -9582,15 +13234,6 @@ function bindEvents(): void {
 
   root.querySelector<HTMLButtonElement>("[data-profile-question-dismiss]")?.addEventListener("click", () => {
     state.pendingProfileQuestion = null;
-    render();
-  });
-
-  root.querySelector<HTMLSelectElement>("#model-select")?.addEventListener("change", async (event) => {
-    const target = event.currentTarget as HTMLSelectElement;
-    state.selectedModel = target.value;
-    syncSelectedReasoningEffort();
-    await persistSelectedModelControls();
-    scheduleConversationPersist();
     render();
   });
 
@@ -9752,6 +13395,18 @@ function bindEvents(): void {
     });
   });
 
+  root.querySelectorAll<HTMLButtonElement>("[data-turn-plan-accept]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      await acceptTurnPlan(button.dataset.turnPlanAccept);
+    });
+  });
+
+  root.querySelectorAll<HTMLButtonElement>("[data-turn-plan-revise]").forEach((button) => {
+    button.addEventListener("click", () => {
+      reviseTurnPlan(button.dataset.turnPlanRevise);
+    });
+  });
+
   root.querySelectorAll<HTMLButtonElement>("[data-remove-attachment]").forEach((button) => {
     button.addEventListener("click", async () => {
       const attachment = button.dataset.removeAttachment as PromptRequestPayload["attachments"][number] | undefined;
@@ -9766,6 +13421,9 @@ function bindEvents(): void {
         state.historyItems = [];
         state.historyQuery = "";
       }
+      if (attachment === "selection") {
+        clearSelectedPageTextContext();
+      }
       scheduleConversationPersist();
       render();
     });
@@ -9773,6 +13431,12 @@ function bindEvents(): void {
 
   root.querySelector<HTMLButtonElement>("[data-remove-current-tab-context]")?.addEventListener("click", () => {
     dismissCurrentTabContext();
+    scheduleConversationPersist();
+    renderSync();
+  });
+
+  root.querySelector<HTMLButtonElement>("[data-remove-selected-page-context]")?.addEventListener("click", () => {
+    clearSelectedPageTextContext();
     scheduleConversationPersist();
     renderSync();
   });
@@ -9811,6 +13475,36 @@ function bindEvents(): void {
       }
       await handleAttachmentMenuAction(action);
     });
+  });
+
+  root.querySelectorAll<HTMLButtonElement>("[data-plan-input-option]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const optionIndex = Number(button.dataset.planInputOption);
+      if (!Number.isFinite(optionIndex)) {
+        return;
+      }
+      selectPlanInputOption(optionIndex);
+    });
+  });
+
+  root.querySelector<HTMLTextAreaElement>("#plan-input-custom")?.addEventListener("input", (event) => {
+    updateActivePlanInputCustomAnswer((event.currentTarget as HTMLTextAreaElement).value);
+  });
+
+  root.querySelector<HTMLButtonElement>("[data-plan-input-prev]")?.addEventListener("click", () => {
+    movePlanInputQuestion(-1);
+  });
+
+  root.querySelector<HTMLButtonElement>("[data-plan-input-next]")?.addEventListener("click", () => {
+    movePlanInputQuestion(1);
+  });
+
+  root.querySelector<HTMLButtonElement>("[data-plan-input-dismiss]")?.addEventListener("click", () => {
+    void dismissPlanInputRequest();
+  });
+
+  root.querySelector<HTMLButtonElement>("[data-plan-input-continue]")?.addEventListener("click", () => {
+    void continuePlanInputRequest();
   });
 
   root.querySelector<HTMLInputElement>("#file-attachment-input")?.addEventListener("change", async (event) => {
@@ -9853,6 +13547,14 @@ function bindEvents(): void {
     state.appMenuOpen = false;
     state.composerModelMenuOpen = false;
     state.browserActionPermissionMenuOpen = false;
+    if (state.activeView === "conference" || state.conferenceMode.viewActive) {
+      void startNewConferencePage();
+      return;
+    }
+    if (state.activeView === "interpreter" || state.realtimeInterpreter.viewActive) {
+      void stopRealtimeInterpreterMode({ preserveEntries: false, keepViewActive: false }).then(() => startNewChat());
+      return;
+    }
     void startNewChat();
   });
 
@@ -9891,18 +13593,17 @@ function bindEvents(): void {
       }
       if (action === "infographic") {
         await createInfographicFromCurrentPage();
+        return;
+      }
+      if (action === "page-comic") {
+        await createComicFromCurrentPage();
       }
     });
   });
 
   root.querySelectorAll<HTMLButtonElement>("[data-menu-view]").forEach((button) => {
     button.addEventListener("click", async () => {
-      state.appMenuOpen = false;
-      state.activeView = button.dataset.menuView as MainView;
-      renderSync();
-      if (state.activeView === "context" && (state.attachments.has("open-tabs") || state.selectedTabIds.length)) {
-        await loadTabs();
-      }
+      await switchMainViewFromMenu(button.dataset.menuView as MainView);
     });
   });
 
@@ -9921,17 +13622,15 @@ function bindEvents(): void {
       if (button.dataset.menuAction === "compact") {
         await compactCurrentConversation();
       }
+      if (button.dataset.menuAction === "conference-toggle") {
+        await toggleConferenceMode();
+      }
     });
   });
 
   root.querySelectorAll<HTMLButtonElement>("[data-view]").forEach((button) => {
     button.addEventListener("click", async () => {
-      state.appMenuOpen = false;
-      state.activeView = button.dataset.view as MainView;
-      renderSync();
-      if (state.activeView === "context" && (state.attachments.has("open-tabs") || state.selectedTabIds.length)) {
-        await loadTabs();
-      }
+      await switchMainViewFromMenu(button.dataset.view as MainView);
     });
   });
 
@@ -9990,6 +13689,15 @@ function bindEvents(): void {
       await sendRuntimeMessage({ type: "account.logout" });
       await scheduleInitialize();
       state.initError = "";
+    } catch (error) {
+      state.initError = toUserFacingRuntimeError(error);
+      render();
+    }
+  });
+
+  root.querySelector<HTMLButtonElement>("#disconnect-api-key")?.addEventListener("click", async () => {
+    try {
+      await disconnectRealtimeTranslationApiKey();
     } catch (error) {
       state.initError = toUserFacingRuntimeError(error);
       render();
@@ -10079,6 +13787,7 @@ function bindEvents(): void {
       nextComposerDraft: target.value,
       currentWorkActive: isCurrentPromptWorkActive(),
       liveActive: state.voiceEnabled,
+      liveAvailable: isRealtimeVoiceAvailableForAccount(),
       compositionInProgress: compositionActive,
     });
     state.composerDraft = target.value;
@@ -10162,6 +13871,7 @@ function bindEvents(): void {
       nextComposerDraft: target.value,
       currentWorkActive: isCurrentPromptWorkActive(),
       liveActive: state.voiceEnabled,
+      liveAvailable: isRealtimeVoiceAvailableForAccount(),
     });
     if (primaryActionChanged) {
       syncComposerPrimaryActionButton();
@@ -10176,6 +13886,8 @@ function bindEvents(): void {
     const keyInput = {
       key: event.key,
       shiftKey: event.shiftKey,
+      metaKey: event.metaKey,
+      ctrlKey: event.ctrlKey,
       isComposing: event.isComposing,
       keyCode: "keyCode" in event ? Number((event as KeyboardEvent & { keyCode?: number }).keyCode) : undefined,
       compositionInProgress: composerCompositionInProgress,
@@ -10290,7 +14002,9 @@ function bindEvents(): void {
 
       await applySlashOption(option);
       renderSync();
-      restoreComposerFocus();
+      if (option.kind !== "create-profile") {
+        restoreComposerFocus();
+      }
     });
   });
 
@@ -10356,6 +14070,14 @@ function bindEvents(): void {
       return;
     }
     await installSkillArchive(file);
+  });
+
+  bindSettingsSearchInput("settings-skill-search", (value) => {
+    state.skillSettingsSearchQuery = value;
+  });
+
+  bindSettingsSearchInput("settings-plugin-mcp-search", (value) => {
+    state.pluginMcpSettingsSearchQuery = value;
   });
 
   root.querySelectorAll<HTMLInputElement>("[data-app-id]").forEach((input) => {
@@ -10456,6 +14178,21 @@ function bindEvents(): void {
     void commitComposerVoiceInput();
   });
 
+  root.querySelector<HTMLButtonElement>("#open-dictation-shortcuts")?.addEventListener("click", () => {
+    void openDictationShortcutSettings();
+  });
+
+  bindConferenceModeControls();
+  bindRealtimeInterpreterControls();
+  root
+    .querySelector<HTMLElement>("#conference-transcript-scroll")
+    ?.addEventListener("scroll", handleConferenceTranscriptScroll, { passive: true });
+  root
+    .querySelector<HTMLElement>("#realtime-interpreter-scroll")
+    ?.addEventListener("scroll", handleRealtimeInterpreterTranscriptScroll, { passive: true });
+  bindConferencePaneResizer();
+  bindRealtimeInterpreterPaneResizer();
+
   root.querySelectorAll<HTMLButtonElement>(".action-card").forEach((button) => {
     button.addEventListener("click", () => {
       if (isQuickInteractionLockedForState()) {
@@ -10465,13 +14202,11 @@ function bindEvents(): void {
     });
   });
 
-  root.querySelectorAll<HTMLButtonElement>("[data-youtube-seek]").forEach((button) => {
-    button.addEventListener("click", () => {
-      const seconds = Number(button.dataset.youtubeSeek);
-      if (!Number.isFinite(seconds)) {
-        return;
-      }
-      void seekYouTubeTimestamp(seconds);
+  root.querySelectorAll<HTMLAnchorElement>("[data-local-file-path]").forEach((link) => {
+    link.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      void openLocalFileLink(link.dataset.localFilePath ?? "");
     });
   });
 
@@ -10504,7 +14239,7 @@ function bindEvents(): void {
       const result = await chrome.runtime.sendMessage({ type: "conversation.resume", conversationId });
       hydrateConversation(result.conversation);
       state.appMenuOpen = false;
-      state.activeView = "chat";
+      state.activeView = resolveMainViewForConversation(result.conversation);
       render();
       if (state.attachments.has("open-tabs") || state.selectedTabIds.length) {
         await loadTabs();
@@ -10532,15 +14267,31 @@ function bindEvents(): void {
 
   root.querySelector<HTMLButtonElement>("#load-tabs")?.addEventListener("click", () => void loadTabs());
 
-  root.querySelector<HTMLFormElement>("#custom-site-suggestion-form")?.addEventListener("submit", (event) => {
-    event.preventDefault();
-    void saveCustomSiteSuggestionFromSettings();
+  root.querySelector<HTMLButtonElement>("#create-custom-site-suggestion")?.addEventListener("click", () => {
+    openCustomSiteSuggestionEditor();
+  });
+
+  root.querySelectorAll<HTMLButtonElement>("[data-edit-custom-site-suggestion]").forEach((button) => {
+    button.addEventListener("click", () => {
+      openCustomSiteSuggestionEditor(button.dataset.editCustomSiteSuggestion);
+    });
   });
 
   root.querySelectorAll<HTMLButtonElement>("[data-delete-custom-site-suggestion]").forEach((button) => {
     button.addEventListener("click", () => {
       void deleteCustomSiteSuggestionFromSettings(button.dataset.deleteCustomSiteSuggestion);
     });
+  });
+
+  root.querySelector<HTMLButtonElement>("#close-custom-site-suggestion-editor")?.addEventListener("click", closeCustomSiteSuggestionEditor);
+  root.querySelector<HTMLButtonElement>("#cancel-custom-site-suggestion-editor")?.addEventListener("click", closeCustomSiteSuggestionEditor);
+  root.querySelector<HTMLElement>("[data-custom-site-suggestion-editor-backdrop]")?.addEventListener("click", (event) => {
+    if (event.target === event.currentTarget) {
+      closeCustomSiteSuggestionEditor();
+    }
+  });
+  root.querySelector<HTMLButtonElement>("#save-custom-site-suggestion-editor")?.addEventListener("click", () => {
+    void submitCustomSiteSuggestionEditor();
   });
 
   root.querySelector<HTMLButtonElement>("#search-history")?.addEventListener("click", async () => {
@@ -10572,6 +14323,14 @@ function bindEvents(): void {
     state.settings = await chrome.runtime.sendMessage({
       type: "settings.update",
       settings: { autoCompactConversations: (event.currentTarget as HTMLInputElement).checked },
+    });
+    render();
+  });
+
+  root.querySelector<HTMLInputElement>("#setting-image-hover-button")?.addEventListener("change", async (event) => {
+    state.settings = await chrome.runtime.sendMessage({
+      type: "settings.update",
+      settings: { imagePromptHoverButtonEnabled: (event.currentTarget as HTMLInputElement).checked },
     });
     render();
   });
@@ -10623,24 +14382,6 @@ function bindEvents(): void {
     });
   });
 
-  root.querySelector<HTMLSelectElement>("#setting-ui-language")?.addEventListener("change", async (event) => {
-    const uiLanguage = normalizeUiLanguageSetting((event.currentTarget as HTMLSelectElement).value);
-    state.settings = await chrome.runtime.sendMessage({
-      type: "settings.update",
-      settings: { uiLanguage },
-    });
-    state.settings = {
-      ...state.settings,
-      uiLanguage: normalizeUiLanguageSetting(state.settings.uiLanguage),
-      uiTheme: normalizeUiThemeSetting(state.settings.uiTheme),
-      preferredVoice: normalizeCodexRealtimeVoice(state.settings.preferredVoice),
-    };
-    state.uiLocale = resolveUiLocale(state.settings.uiLanguage, getBrowserUiLanguage());
-    syncDocumentLanguage();
-    state.profiles = localizeBuiltinProfiles(state.profiles, state.uiLocale);
-    render();
-  });
-
   root.querySelectorAll<HTMLButtonElement>("[data-theme-choice]").forEach((button) => {
     button.addEventListener("click", async () => {
       const uiTheme = normalizeUiThemeSetting(button.dataset.themeChoice);
@@ -10661,17 +14402,6 @@ function bindEvents(): void {
     });
   });
 
-  root.querySelector<HTMLSelectElement>("#voice-select")?.addEventListener("change", async (event) => {
-    state.settings = await chrome.runtime.sendMessage({
-      type: "settings.update",
-      settings: { preferredVoice: normalizeCodexRealtimeVoice((event.currentTarget as HTMLSelectElement).value) },
-    });
-    state.settings = {
-      ...state.settings,
-      preferredVoice: normalizeCodexRealtimeVoice(state.settings.preferredVoice),
-    };
-    render();
-  });
 }
 
 async function handleAttachmentMenuAction(action: AttachmentMenuAction): Promise<void> {
@@ -10682,6 +14412,10 @@ async function handleAttachmentMenuAction(action: AttachmentMenuAction): Promise
       renderSync();
       root.querySelector<HTMLInputElement>("#file-attachment-input")?.click();
       return;
+    case "toggle-plan-mode": {
+      await setPlanModeEnabled(!state.settings.planModeEnabled, { focusComposer: true });
+      return;
+    }
     case "attach-tabs":
       state.attachmentMenuOpen = false;
       state.browserActionPermissionMenuOpen = false;
@@ -10816,15 +14550,79 @@ async function refreshOpenTabSuggestions(options: { requestPermission: boolean }
   render();
 }
 
+type PromptSendResult = {
+  threadId?: string;
+  turnId?: string;
+  actionCards?: ActionCard[];
+  currentConversationId?: string;
+  planClarification?: {
+    question: string;
+    summary?: string;
+  };
+  workflow?: "image-edit" | "browser-action" | "generated-image";
+  assistantText?: string;
+  previewRef?: string;
+  previewRefs?: string[];
+  cancelled?: boolean;
+  error?: string;
+};
+
+type SendPromptOptions = {
+  resetThread?: boolean;
+  displayMessage?: string;
+  preserveComposerDraft?: boolean;
+  profileId?: string;
+};
+
+function clearOrRestoreComposerDraftAfterSubmit(
+  composer: HTMLTextAreaElement | null,
+  options: SendPromptOptions,
+  preservedComposerDraft: string,
+): void {
+  Object.assign(state, createPendingComposerDraftState());
+  if (options.preserveComposerDraft) {
+    restoreComposerDraftAfterProgrammaticSend(preservedComposerDraft, composer);
+    return;
+  }
+  if (composer) {
+    composer.value = "";
+  }
+}
+
+function getPromptRestoreDraft(
+  message: string,
+  preservedComposerDraft: string,
+  options: Pick<SendPromptOptions, "preserveComposerDraft">,
+): string {
+  return options.preserveComposerDraft ? preservedComposerDraft : message;
+}
+
+function restoreComposerDraftAfterProgrammaticSend(
+  preservedComposerDraft: string,
+  composer: HTMLTextAreaElement | null,
+): void {
+  state.composerDraft = preservedComposerDraft;
+  state.mentionQuery = null;
+  state.mentionActiveIndex = 0;
+  state.slashQuery = null;
+  state.slashActiveIndex = 0;
+  if (composer) {
+    composer.value = preservedComposerDraft;
+  }
+}
+
 async function sendPrompt(
   messageOverride?: string,
-  options: { resetThread?: boolean; displayMessage?: string } = {},
+  options: SendPromptOptions = {},
 ): Promise<void> {
   const composer = root.querySelector<HTMLTextAreaElement>("#composer");
   const strings = stringsForState();
   const composerText = composer?.value ?? state.composerDraft;
+  const preservedComposerDraft = options.preserveComposerDraft ? composerText : "";
   const isDirectComposerTextSend = messageOverride === undefined && composerText.trim().length > 0;
   const currentWorkActiveAtSubmit = isCurrentPromptWorkActive();
+  const activeTurnAtSubmit = state.activeTurn ? { ...state.activeTurn } : null;
+  const threadIdAtSubmit = state.threadId || activeTurnAtSubmit?.threadId || undefined;
   const message = (messageOverride ?? composer?.value ?? "").trim() || defaultPromptForContext(strings);
   const displayMessage = (options.displayMessage ?? message).trim();
   if (!canSendCurrentComposerMessage(message, { allowSteer: isDirectComposerTextSend })) {
@@ -10871,16 +14669,24 @@ async function sendPrompt(
     }
   }
 
+  if (!(await ensureChatgptAuthForCodexPrompt())) {
+    return;
+  }
+
   let conversationIdAtStart = state.currentConversationId;
   let userMessageId = "";
   let clientRequestId = "";
   let submittedComposerFileAttachments: UserFileAttachment[] = [];
+  const transcriptQuestionContextActiveAtSubmit = isTranscriptQuestionContextActive();
   promptSubmissionBootstrapInFlight = true;
 
   try {
     Object.assign(state, createPendingComposerDraftState());
-    state.activeView = "chat";
-    const activeProfileId = ensureComposerProfileSelection();
+    if (options.preserveComposerDraft) {
+      restoreComposerDraftAfterProgrammaticSend(preservedComposerDraft, composer);
+    }
+    state.activeView = transcriptQuestionContextActiveAtSubmit ? resolveActiveTranscriptViewForPrompt() : "chat";
+    const activeProfileId = resolvePromptProfileId(options.profileId);
     if (!state.currentConversationId) {
       const created = await sendRuntimeMessage<{ conversation: SavedConversation }>({
         type: "conversation.new",
@@ -10890,6 +14696,9 @@ async function sendPrompt(
       hydrateConversation(created.conversation);
     }
     conversationIdAtStart = state.currentConversationId;
+    if (conversationIdAtStart) {
+      conversationProfilesById.set(conversationIdAtStart, activeProfileId);
+    }
     if (options.resetThread) {
       state.threadId = "";
       state.activeTurn = null;
@@ -10897,12 +14706,13 @@ async function sendPrompt(
     const sendAsTurnSteer = shouldSendComposerAsTurnSteer({
       draft: message,
       resetThread: Boolean(options.resetThread),
-      threadId: state.threadId || undefined,
-      activeTurn: state.activeTurn,
+      threadId: threadIdAtSubmit,
+      activeTurn: activeTurnAtSubmit,
       currentWorkActive: currentWorkActiveAtSubmit,
       source: isDirectComposerTextSend ? "composer" : "programmatic",
     });
     sanitizeUnavailableCurrentPageState();
+    const transcriptQuestionContextActive = transcriptQuestionContextActiveAtSubmit;
     const nextAttachments = Array.from(state.attachments);
     const contextHint = buildConversationContextHint();
     const submittedFileAttachmentState = createSubmittedComposerFileAttachmentState(
@@ -10912,24 +14722,33 @@ async function sendPrompt(
     const submittedMessageFileAttachments = submittedFileAttachmentState.messageFileAttachments;
     const submittedRequestFileAttachments = submittedFileAttachmentState.requestFileAttachments;
     state.fileAttachments = submittedFileAttachmentState.composerFileAttachments;
-    const messageProfile = createMessageProfileSnapshot();
+    const messageProfile = createMessageProfileSnapshot(activeProfileId);
     const messageContext = createMessageContextSnapshot();
     const submittedMessageStructuredInputs = createConversationMessageStructuredInputs(state.structuredInputs);
     const submittedPromptStructuredInputs = getPromptStructuredInputs();
     userMessageId = `user-${Date.now()}`;
     clientRequestId = `prompt-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     setActivePromptUserMessageId(resolveActivePromptUserMessageIdForSend(userMessageId, sendAsTurnSteer));
-    state.promptActivity = {
-      clientRequestId,
-      phase: "preparing",
-    };
+    state.promptActivity = sendAsTurnSteer
+      ? null
+      : {
+          clientRequestId,
+          phase: "preparing",
+        };
     promptSubmissionBootstrapInFlight = false;
     promptRequestConversationIds.set(clientRequestId, conversationIdAtStart);
-    promptActivitiesByConversationId.set(conversationIdAtStart, state.promptActivity);
+    if (!sendAsTurnSteer) {
+      setPendingPromptRequest(conversationIdAtStart, clientRequestId);
+      const promptActivity = state.promptActivity;
+      if (promptActivity) {
+        promptActivitiesByConversationId.set(conversationIdAtStart, promptActivity);
+      }
+    }
     state.messages.push({
       id: userMessageId,
       role: "user",
       text: displayMessage || message,
+      ...(sendAsTurnSteer ? { steer: true } : {}),
       ...(submittedMessageFileAttachments.length ? { attachments: createConversationMessageAttachments(submittedMessageFileAttachments) } : {}),
       ...(submittedMessageStructuredInputs.length ? { structuredInputs: submittedMessageStructuredInputs } : {}),
       ...(messageProfile ? { profile: messageProfile } : {}),
@@ -10939,32 +14758,25 @@ async function sendPrompt(
     renderSync();
     scheduleConversationPersist();
 
+    const goalCommand = parseGoalCommand(message);
+    const runtimeMessage = goalCommand?.objective ?? message;
     const generatedImageAttachments = sendAsTurnSteer
       ? []
       : await createGeneratedImageFileAttachmentsForPrompt(
-          message,
+          runtimeMessage,
           contextHint,
           activeProfileId,
           submittedRequestFileAttachments,
         );
     const nextFileAttachments = [...submittedRequestFileAttachments, ...generatedImageAttachments];
 
-    const result = await sendRuntimeMessageWithConfirmation<{
-      threadId: string;
-      turnId: string;
-      actionCards: ActionCard[];
-      currentConversationId?: string;
-      workflow?: "image-edit" | "browser-action" | "generated-image";
-      assistantText?: string;
-      previewRef?: string;
-      previewRefs?: string[];
-      cancelled?: boolean;
-    }>({
+    const result = await sendRuntimeMessageWithConfirmation<PromptSendResult>({
       type: sendAsTurnSteer ? "turn.steer" : "prompt.send",
       payload: {
-        message,
+        message: runtimeMessage,
         conversationId: conversationIdAtStart,
         contextHint,
+        conversationContext: contextHint,
         clientRequestId,
         profileId: activeProfileId,
         model: state.selectedModel,
@@ -10972,17 +14784,20 @@ async function sendPrompt(
         serviceTier: state.selectedServiceTier || undefined,
         readStrategyOverride: state.currentReadStrategy,
         attachments: nextAttachments,
+        selectedTextContext: createPromptSelectedTextContextPayload(),
         fileAttachments: nextFileAttachments,
         structuredInputs: submittedPromptStructuredInputs,
         selectedTabIds: state.selectedTabIds,
         historyQuery: state.historyQuery,
         resetThread: options.resetThread,
-        suppressPageContext: isCurrentTabContextDismissed(),
+        suppressPageContext: transcriptQuestionContextActive || isCurrentTabContextDismissed(),
         conversationMessageCount: state.messages.length,
+        ...(state.settings.planModeEnabled && !sendAsTurnSteer ? { planMode: true } : {}),
+        ...(goalCommand && !sendAsTurnSteer ? { useGoal: true, goalObjective: goalCommand.objective } : {}),
       },
     });
     if (cancelledPromptRequestIds.delete(clientRequestId)) {
-      removePendingImageWorkflowMessage(clientRequestId);
+      removePendingImageWorkflowMessage(clientRequestId, { preservePartial: true });
       scheduleConversationPersist();
       return;
     }
@@ -10993,16 +14808,52 @@ async function sendPrompt(
           retryMessage: message,
         };
       }
-      removePendingImageWorkflowMessage(clientRequestId);
-      state.messages = state.messages.filter((entry) => entry.id !== userMessageId);
+      const preservedPartialImage = removePendingImageWorkflowMessage(clientRequestId, { preservePartial: true });
+      if (!preservedPartialImage) {
+        state.messages = state.messages.filter((entry) => entry.id !== userMessageId);
+      }
       state.promptActivity = null;
+      clearConversationActivity(conversationIdAtStart);
       clearActivePromptUserMessageId();
       state.streamingAssistantMessageIds.clear();
-      Object.assign(state, createRestoredComposerDraftState(message));
-      state.fileAttachments = submittedComposerFileAttachments;
-      if (composer) {
-        composer.value = message;
+      if (!preservedPartialImage) {
+        Object.assign(state, createRestoredComposerDraftState(getPromptRestoreDraft(message, preservedComposerDraft, options)));
+        state.fileAttachments = submittedComposerFileAttachments;
+        if (composer) {
+          composer.value = getPromptRestoreDraft(message, preservedComposerDraft, options);
+        }
       }
+      render();
+      return;
+    }
+    if (sendAsTurnSteer && isTurnSteerFailureResult(result)) {
+      handleTurnSteerFailureResult({
+        result,
+        message,
+        userMessageId,
+        clientRequestId,
+        conversationId: conversationIdAtStart,
+        composer,
+        submittedComposerFileAttachments,
+      });
+      return;
+    }
+    if (!sendAsTurnSteer && result.planClarification?.question?.trim()) {
+      state.currentConversationId = result.currentConversationId ?? state.currentConversationId;
+      state.actionCards = mergePromptResultActionCards(state.actionCards, result.actionCards ?? []);
+      state.promptActivity = null;
+      clearConversationActivity(conversationIdAtStart);
+      clearActivePromptUserMessageId();
+      state.streamingAssistantMessageIds.clear();
+      promptRequestConversationIds.delete(clientRequestId);
+      applyLocalPlanClarificationRequest({
+        question: result.planClarification.question,
+        originalMessage: message,
+      });
+      clearOrRestoreComposerDraftAfterSubmit(composer, options, preservedComposerDraft);
+      clearTransientComposerCommandPill();
+      clearTransientComposerContext();
+      scheduleConversationPersist();
       render();
       return;
     }
@@ -11029,10 +14880,26 @@ async function sendPrompt(
       promptRequestConversationIds.delete(clientRequestId);
       return;
     }
+    if (sendAsTurnSteer) {
+      state.threadId = result.threadId ?? state.threadId;
+      state.currentConversationId = result.currentConversationId ?? state.currentConversationId;
+      state.actionCards = mergePromptResultActionCards(state.actionCards, result.actionCards ?? []);
+      clearSteeringPromptActivity(clientRequestId, conversationIdAtStart);
+      clearOrRestoreComposerDraftAfterSubmit(composer, options, preservedComposerDraft);
+      clearTransientComposerCommandPill();
+      clearTransientComposerContext();
+      scheduleConversationPersist();
+      render();
+      return;
+    }
+    if (!result.threadId || !result.turnId) {
+      throw new Error(strings.errors.requestFailed);
+    }
     if (result.workflow === "image-edit") {
       state.currentConversationId = result.currentConversationId ?? state.currentConversationId;
-      state.actionCards = mergePromptResultActionCards(state.actionCards, result.actionCards);
+      state.actionCards = mergePromptResultActionCards(state.actionCards, result.actionCards ?? []);
       state.promptActivity = null;
+      clearConversationActivity(conversationIdAtStart);
       clearActivePromptUserMessageId();
       state.streamingAssistantMessageIds.clear();
       const imageAlt = stringsForState().images.edited;
@@ -11041,10 +14908,7 @@ async function sendPrompt(
         result.assistantText,
         result.previewRef ? createPendingConversationImage(result.previewRef, imageAlt) : undefined,
       );
-      if (composer) {
-        composer.value = "";
-      }
-      Object.assign(state, createPendingComposerDraftState());
+      clearOrRestoreComposerDraftAfterSubmit(composer, options, preservedComposerDraft);
       clearTransientComposerCommandPill();
       clearTransientComposerContext();
       state.activeTurn = null;
@@ -11057,8 +14921,9 @@ async function sendPrompt(
     }
     if (result.workflow === "generated-image") {
       state.currentConversationId = result.currentConversationId ?? state.currentConversationId;
-      state.actionCards = mergePromptResultActionCards(state.actionCards, result.actionCards);
+      state.actionCards = mergePromptResultActionCards(state.actionCards, result.actionCards ?? []);
       state.promptActivity = null;
+      clearConversationActivity(conversationIdAtStart);
       clearActivePromptUserMessageId();
       state.streamingAssistantMessageIds.clear();
       const previewRefs = normalizeImagePreviewRefs(result.previewRefs, result.previewRef);
@@ -11074,10 +14939,10 @@ async function sendPrompt(
             previewRef,
           );
         }
-        pendingImageWorkflowMessageIdsByRequest.delete(clientRequestId);
-        rememberCompletedImageWorkflowMessage(clientRequestId, messageId);
+        const finalizedMessageId = finalizeStreamedImageWorkflowMessage(clientRequestId, result.assistantText ?? null) ?? messageId;
+        rememberCompletedImageWorkflowMessage(clientRequestId, finalizedMessageId);
         if (missingPreviewRefs.length) {
-          void hydrateConversationImages(messageId, missingPreviewRefs, imageAlt);
+          void hydrateConversationImages(finalizedMessageId, missingPreviewRefs, imageAlt);
         }
       } else {
         const messageId = replacePendingImageWorkflowMessage(
@@ -11090,10 +14955,7 @@ async function sendPrompt(
         rememberCompletedImageWorkflowMessage(clientRequestId, messageId);
         void hydrateConversationImages(messageId, previewRefs, imageAlt);
       }
-      if (composer) {
-        composer.value = "";
-      }
-      Object.assign(state, createPendingComposerDraftState());
+      clearOrRestoreComposerDraftAfterSubmit(composer, options, preservedComposerDraft);
       clearTransientComposerCommandPill();
       clearTransientComposerContext();
       state.activeTurn = null;
@@ -11104,8 +14966,9 @@ async function sendPrompt(
     removePendingImageWorkflowMessage(clientRequestId);
     if (result.workflow === "browser-action") {
       state.currentConversationId = result.currentConversationId ?? state.currentConversationId;
-      state.actionCards = mergePromptResultActionCards(state.actionCards, result.actionCards);
+      state.actionCards = mergePromptResultActionCards(state.actionCards, result.actionCards ?? []);
       state.promptActivity = null;
+      clearConversationActivity(conversationIdAtStart);
       clearActivePromptUserMessageId();
       state.streamingAssistantMessageIds.clear();
       state.messages.push({
@@ -11113,10 +14976,7 @@ async function sendPrompt(
         role: "assistant",
         text: result.assistantText?.trim() || stringsForState().status.pageActionHandled,
       });
-      if (composer) {
-        composer.value = "";
-      }
-      Object.assign(state, createPendingComposerDraftState());
+      clearOrRestoreComposerDraftAfterSubmit(composer, options, preservedComposerDraft);
       clearTransientComposerCommandPill();
       clearTransientComposerContext();
       state.activeTurn = null;
@@ -11132,98 +14992,163 @@ async function sendPrompt(
     });
     completedTurnIds.delete(result.turnId);
     rememberAssistantResponseTurnGroup({ threadId: result.threadId, turnId: result.turnId }, `prompt:${clientRequestId}`);
-    state.promptActivity = null;
-    state.activeTurn = acceptedActiveTurn;
-    state.currentConversationId = result.currentConversationId ?? state.currentConversationId;
-    state.actionCards = mergePromptResultActionCards(state.actionCards, result.actionCards);
-    if (composer) {
-      composer.value = "";
+    if (result.assistantText?.trim()) {
+      cancelEmptyAssistantResponseNotice(result.threadId, result.turnId, resultConversationId);
+      clearEmptyAssistantResponseNoticeForTurn(result.threadId, result.turnId, resultConversationId);
+      upsertAssistantMessage(`assistant-result-${result.turnId}`, result.assistantText, false, {
+        threadId: result.threadId,
+        turnId: result.turnId,
+      });
+      clearResolvedEmptyAssistantResponseNotices(state.messages);
     }
-    Object.assign(state, createPendingComposerDraftState());
+    state.promptActivity = null;
+    state.activeTurn = sendAsTurnSteer ? state.activeTurn : acceptedActiveTurn;
+    state.currentConversationId = result.currentConversationId ?? state.currentConversationId;
+    state.actionCards = mergePromptResultActionCards(state.actionCards, result.actionCards ?? []);
+    clearOrRestoreComposerDraftAfterSubmit(composer, options, preservedComposerDraft);
     clearTransientComposerCommandPill();
     clearTransientComposerContext();
     scheduleConversationPersist();
     render();
   } catch (error) {
     promptSubmissionBootstrapInFlight = false;
+    const errorMessage = toUserFacingRuntimeError(error);
     if (cancelledPromptRequestIds.delete(clientRequestId)) {
-      removePendingImageWorkflowMessage(clientRequestId);
+      removePendingImageWorkflowMessage(clientRequestId, { preservePartial: true, reason: errorMessage });
       scheduleConversationPersist();
       return;
     }
-    removePendingImageWorkflowMessage(clientRequestId);
+    const preservedPartialImage = removePendingImageWorkflowMessage(clientRequestId, { preservePartial: true, reason: errorMessage });
     if (conversationIdAtStart !== state.currentConversationId) {
       clearConversationActivity(conversationIdAtStart);
       promptRequestConversationIds.delete(clientRequestId);
-      const errorMessage = toUserFacingRuntimeError(error);
-      getDetachedConversationMessages(conversationIdAtStart).push(createAssistantFailureMessage(errorMessage, state.uiLocale));
+      upsertAssistantFailureMessageInMessages(
+        getDetachedConversationMessages(conversationIdAtStart),
+        errorMessage,
+        createAssistantFailureMessageId(clientRequestId),
+      );
       await persistDetachedConversation(conversationIdAtStart);
       return;
     }
-    const oauthFallbackResult = await handleOAuthUsageFallbackRequest(
-      error,
-      createPromptRetryAfterOAuthFallback(message, displayMessage, options),
-    );
-    if (oauthFallbackResult === "switched" || oauthFallbackResult === "awaiting-api-key") {
-      state.messages = state.messages.filter((entry) => entry.id !== userMessageId);
-      state.promptActivity = null;
-      clearActivePromptUserMessageId();
-      state.streamingAssistantMessageIds.clear();
-      state.activeTurn = null;
-      Object.assign(state, createRestoredComposerDraftState(message));
-      state.fileAttachments = submittedComposerFileAttachments;
-      if (composer) {
-        composer.value = message;
+    if (!preservedPartialImage) {
+      const oauthFallbackResult = await handleOAuthUsageFallbackRequest(
+        error,
+        createPromptRetryAfterOAuthFallback(message, displayMessage, options),
+      );
+      if (oauthFallbackResult === "switched" || oauthFallbackResult === "awaiting-api-key") {
+        state.messages = state.messages.filter((entry) => entry.id !== userMessageId);
+        state.promptActivity = null;
+        clearActivePromptUserMessageId();
+        state.streamingAssistantMessageIds.clear();
+        state.activeTurn = null;
+        Object.assign(state, createRestoredComposerDraftState(getPromptRestoreDraft(message, preservedComposerDraft, options)));
+        state.fileAttachments = submittedComposerFileAttachments;
+        if (composer) {
+          composer.value = getPromptRestoreDraft(message, preservedComposerDraft, options);
+        }
+        scheduleConversationPersist();
+        render();
+        if (oauthFallbackResult === "switched") {
+          await sendPrompt(message, createRetrySendPromptOptions(displayMessage, options));
+        }
+        return;
       }
-      scheduleConversationPersist();
-      render();
-      if (oauthFallbackResult === "switched") {
-        await sendPrompt(message, createRetrySendPromptOptions(displayMessage, options));
-      }
-      return;
     }
     state.promptActivity = null;
+    clearConversationActivity(conversationIdAtStart);
     clearActivePromptUserMessageId();
     state.streamingAssistantMessageIds.clear();
-    const errorMessage = toUserFacingRuntimeError(error);
-    state.messages.push(createAssistantFailureMessage(errorMessage, state.uiLocale));
-    Object.assign(state, createPendingComposerDraftState());
-    if (composer) {
-      composer.value = "";
+    if (!preservedPartialImage) {
+      upsertAssistantFailureMessageInMessages(state.messages, errorMessage, createAssistantFailureMessageId(clientRequestId));
     }
+    clearOrRestoreComposerDraftAfterSubmit(composer, options, preservedComposerDraft);
     state.initError = errorMessage;
     state.activeTurn = null;
     scheduleConversationPersist();
     render();
+  } finally {
+    promptSubmissionBootstrapInFlight = false;
+    if (conversationIdAtStart && clientRequestId) {
+      clearPendingPromptRequest(conversationIdAtStart, clientRequestId);
+    }
   }
+}
+
+function isTurnSteerFailureResult(result: PromptSendResult | { cancelled: true }): result is PromptSendResult & { error: string } {
+  return Boolean(result && "error" in result && typeof result.error === "string" && result.error.trim());
+}
+
+function handleTurnSteerFailureResult(input: {
+  result: PromptSendResult & { error: string };
+  message: string;
+  userMessageId: string;
+  clientRequestId: string;
+  conversationId: string;
+  composer: HTMLTextAreaElement | null;
+  submittedComposerFileAttachments: UserFileAttachment[];
+}): void {
+  removePendingImageWorkflowMessage(input.clientRequestId);
+  state.messages = state.messages.filter((entry) => entry.id !== input.userMessageId);
+  clearSteeringPromptActivity(input.clientRequestId, input.conversationId);
+  Object.assign(state, createRestoredComposerDraftState(input.message));
+  state.fileAttachments = input.submittedComposerFileAttachments;
+  state.actionStatus = getTurnSteerFailureStatus(input.result.error);
+  if (input.composer) {
+    input.composer.value = input.message;
+  }
+  scheduleConversationPersist();
+  render();
+}
+
+function getTurnSteerFailureStatus(error: string): string {
+  const message = error.trim();
+  if (!message || /no active turn|already (?:finished|completed)|stale/i.test(message)) {
+    return stringsForState().status.turnSteerExpired;
+  }
+  return message;
+}
+
+function clearSteeringPromptActivity(clientRequestId: string, conversationId: string): void {
+  promptRequestConversationIds.delete(clientRequestId);
+  if (state.promptActivity?.clientRequestId === clientRequestId) {
+    state.promptActivity = null;
+  }
+  if (promptActivitiesByConversationId.get(conversationId)?.clientRequestId === clientRequestId) {
+    promptActivitiesByConversationId.delete(conversationId);
+  }
+  clearActivePromptUserMessageId();
 }
 
 function createPromptRetryAfterOAuthFallback(
   message: string,
   displayMessage: string,
-  options: { resetThread?: boolean },
+  options: SendPromptOptions,
 ): NonNullable<NativeTextDialogState["afterSubmit"]> {
   return {
     kind: "retry-prompt",
     message,
     displayMessage,
     ...(options.resetThread ? { resetThread: true } : {}),
+    ...(options.profileId ? { profileId: options.profileId } : {}),
   };
 }
 
 function createRetrySendPromptOptions(
   displayMessage: string,
-  options: { resetThread?: boolean },
-): { resetThread?: boolean; displayMessage?: string } {
+  options: SendPromptOptions,
+): SendPromptOptions {
   return {
     ...(displayMessage ? { displayMessage } : {}),
     ...(options.resetThread ? { resetThread: true } : {}),
+    ...(options.preserveComposerDraft ? { preserveComposerDraft: true } : {}),
+    ...(options.profileId ? { profileId: options.profileId } : {}),
   };
 }
 
 async function handleActionCard(actionId: string): Promise<void> {
   const selectedCard = getPinnedSuggestionCards().find((card) => card.id === actionId);
   const displayMessage = selectedCard ? renderActionCardTitle(stringsForState(), selectedCard) : undefined;
+  const preserveComposerDraft = shouldPreserveComposerDraftForActionCard(selectedCard, actionId);
   if (isYouTubeCurrentMomentAction(actionId)) {
     try {
       const result = await sendRuntimeMessageWithConfirmation<YouTubeCurrentMomentPromptResult>({
@@ -11234,7 +15159,7 @@ async function handleActionCard(actionId: string): Promise<void> {
       }
       clearVisualPromptAttachments();
       state.activeView = "chat";
-      await sendPrompt(result.prompt, createSendPromptDisplayOptions(displayMessage));
+      await sendPrompt(result.prompt, createSendPromptDisplayOptions(displayMessage, { preserveComposerDraft }));
     } catch (error) {
       state.initError = toUserFacingRuntimeError(error);
       render();
@@ -11257,7 +15182,7 @@ async function handleActionCard(actionId: string): Promise<void> {
       clearVisualPromptAttachments();
     }
     state.activeView = "chat";
-    await sendPrompt(selectedCard.prompt, createSendPromptDisplayOptions(displayMessage));
+    await sendPrompt(selectedCard.prompt, createSendPromptDisplayOptions(displayMessage, { preserveComposerDraft }));
     return;
   }
 
@@ -11316,8 +15241,33 @@ async function handleActionCard(actionId: string): Promise<void> {
   const prompt = prompts[actionId];
   if (prompt) {
     state.activeView = "chat";
-    await sendPrompt(prompt);
+    await sendPrompt(prompt, { preserveComposerDraft });
   }
+}
+
+function shouldPreserveComposerDraftForActionCard(card: ActionCard | undefined, actionId: string): boolean {
+  if (isYouTubeCurrentMomentAction(actionId)) {
+    return true;
+  }
+  return Boolean(card && getSuggestionCardSource(card) === "site");
+}
+
+function handleYouTubeTimestampClick(event: MouseEvent): void {
+  const target = event.target;
+  if (!(target instanceof Element)) {
+    return;
+  }
+  const button = target.closest<HTMLButtonElement>("[data-youtube-seek]");
+  if (!button || !root.contains(button)) {
+    return;
+  }
+  const seconds = Number(button.dataset.youtubeSeek);
+  if (!Number.isFinite(seconds)) {
+    return;
+  }
+  event.preventDefault();
+  event.stopPropagation();
+  void seekYouTubeTimestamp(seconds);
 }
 
 async function seekYouTubeTimestamp(seconds: number): Promise<void> {
@@ -11342,8 +15292,51 @@ async function seekYouTubeTimestamp(seconds: number): Promise<void> {
   }
 }
 
-function createSendPromptDisplayOptions(displayMessage: string | undefined): { displayMessage?: string } {
-  return displayMessage ? { displayMessage } : {};
+async function openLocalFileLink(path: string): Promise<void> {
+  const targetPath = path.trim();
+  if (!targetPath) {
+    return;
+  }
+  try {
+    const result = await sendRuntimeMessage<{ opened: true; path: string; folder: string }>({
+      type: "local.file.reveal",
+      path: targetPath,
+    });
+    state.actionStatus = formatLocalFileRevealedStatus(result.folder);
+    state.initError = "";
+    render();
+  } catch (error) {
+    state.initError = toUserFacingRuntimeError(error);
+    render();
+  }
+}
+
+function formatLocalFileRevealedStatus(folder: string): string {
+  return getTranslatedUiLocale(state.uiLocale) === "ko"
+    ? `파일 위치를 열었습니다: ${folder}`
+    : `Opened file location: ${folder}`;
+}
+
+function createSendPromptDisplayOptions(
+  displayMessage: string | undefined,
+  options: Pick<SendPromptOptions, "preserveComposerDraft"> = {},
+): SendPromptOptions {
+  return {
+    ...(displayMessage ? { displayMessage } : {}),
+    ...(options.preserveComposerDraft ? { preserveComposerDraft: true } : {}),
+  };
+}
+
+async function createComicFromCurrentPage(): Promise<void> {
+  if (!canStartCurrentComposerWorkflow()) {
+    return;
+  }
+  clearSelectedPageTextContext();
+  state.attachments.add("current-page");
+  state.currentReadStrategy = "hybrid";
+  state.activeView = "chat";
+  const label = getCurrentPageComicActionLabel();
+  await sendPrompt(getCurrentPageComicPrompt(), { displayMessage: label });
 }
 
 async function createInfographicFromCurrentPage(): Promise<void> {
@@ -11365,7 +15358,7 @@ async function createInfographicFromCurrentPage(): Promise<void> {
   const userMessageText = stringsForState().prompts.createInfographicFromPage;
   const userMessageId = `user-infographic-${Date.now()}`;
   const clientRequestId = `infographic-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  const messageProfile = createMessageProfileSnapshot();
+  const messageProfile = createMessageProfileSnapshot(activeProfileId);
   state.activeView = "chat";
   state.promptActivity = {
     clientRequestId,
@@ -11399,8 +15392,10 @@ async function createInfographicFromCurrentPage(): Promise<void> {
       conversationContext: buildInfographicConversationContext(state.messages),
     });
     if (isCancelledResult(result)) {
-      removePendingImageWorkflowMessage(clientRequestId);
-      state.messages = state.messages.filter((entry) => entry.id !== userMessageId);
+      const preservedPartialImage = removePendingImageWorkflowMessage(clientRequestId, { preservePartial: true });
+      if (!preservedPartialImage) {
+        state.messages = state.messages.filter((entry) => entry.id !== userMessageId);
+      }
       state.promptActivity = null;
       render();
       return;
@@ -11414,8 +15409,10 @@ async function createInfographicFromCurrentPage(): Promise<void> {
         await persistDetachedConversation(resultConversationId);
         return;
       }
-      removePendingImageWorkflowMessage(clientRequestId);
-      state.messages = state.messages.filter((entry) => entry.id !== userMessageId);
+      const preservedPartialImage = removePendingImageWorkflowMessage(clientRequestId, { preservePartial: true });
+      if (!preservedPartialImage) {
+        state.messages = state.messages.filter((entry) => entry.id !== userMessageId);
+      }
       state.promptActivity = null;
       render();
       return;
@@ -11442,12 +15439,12 @@ async function createInfographicFromCurrentPage(): Promise<void> {
           previewRef,
         );
       }
-      pendingImageWorkflowMessageIdsByRequest.delete(clientRequestId);
-      rememberCompletedImageWorkflowMessage(clientRequestId, messageId);
+      const finalizedMessageId = finalizeStreamedImageWorkflowMessage(clientRequestId, null) ?? messageId;
+      rememberCompletedImageWorkflowMessage(clientRequestId, finalizedMessageId);
       scheduleConversationPersist();
       render();
       if (missingPreviewRefs.length) {
-        void hydrateConversationImages(messageId, missingPreviewRefs, imageAlt);
+        void hydrateConversationImages(finalizedMessageId, missingPreviewRefs, imageAlt);
       }
       return;
     }
@@ -11471,10 +15468,12 @@ async function createInfographicFromCurrentPage(): Promise<void> {
       await persistDetachedConversation(conversationIdAtStart);
       return;
     }
-    removePendingImageWorkflowMessage(clientRequestId);
+    const preservedPartialImage = removePendingImageWorkflowMessage(clientRequestId, { preservePartial: true, reason: errorMessage });
     state.promptActivity = null;
     state.streamingAssistantMessageIds.clear();
-    state.messages.push(createAssistantFailureMessage(errorMessage, state.uiLocale));
+    if (!preservedPartialImage) {
+      state.messages.push(createAssistantFailureMessage(errorMessage, state.uiLocale));
+    }
     state.initError = errorMessage;
     scheduleConversationPersist();
     render();
@@ -11501,7 +15500,7 @@ async function createSlideImagesFromCurrentPage(prompt: string): Promise<void> {
     prompt.trim() || stringsForState().prompts.createSlideImagesFromPage;
   const userMessageId = `user-slide-images-${Date.now()}`;
   const clientRequestId = `slide-images-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  const messageProfile = createMessageProfileSnapshot();
+  const messageProfile = createMessageProfileSnapshot(activeProfileId);
   state.activeView = "chat";
   state.promptActivity = {
     clientRequestId,
@@ -11536,8 +15535,10 @@ async function createSlideImagesFromCurrentPage(prompt: string): Promise<void> {
       conversationContext: buildInfographicConversationContext(state.messages),
     });
     if (isCancelledResult(result)) {
-      removePendingImageWorkflowMessage(clientRequestId);
-      state.messages = state.messages.filter((entry) => entry.id !== userMessageId);
+      const preservedPartialImage = removePendingImageWorkflowMessage(clientRequestId, { preservePartial: true });
+      if (!preservedPartialImage) {
+        state.messages = state.messages.filter((entry) => entry.id !== userMessageId);
+      }
       state.promptActivity = null;
       render();
       return;
@@ -11551,8 +15552,10 @@ async function createSlideImagesFromCurrentPage(prompt: string): Promise<void> {
         await persistDetachedConversation(resultConversationId);
         return;
       }
-      removePendingImageWorkflowMessage(clientRequestId);
-      state.messages = state.messages.filter((entry) => entry.id !== userMessageId);
+      const preservedPartialImage = removePendingImageWorkflowMessage(clientRequestId, { preservePartial: true });
+      if (!preservedPartialImage) {
+        state.messages = state.messages.filter((entry) => entry.id !== userMessageId);
+      }
       state.promptActivity = null;
       render();
       return;
@@ -11579,12 +15582,12 @@ async function createSlideImagesFromCurrentPage(prompt: string): Promise<void> {
           previewRef,
         );
       }
-      pendingImageWorkflowMessageIdsByRequest.delete(clientRequestId);
-      rememberCompletedImageWorkflowMessage(clientRequestId, messageId);
+      const finalizedMessageId = finalizeStreamedImageWorkflowMessage(clientRequestId, null) ?? messageId;
+      rememberCompletedImageWorkflowMessage(clientRequestId, finalizedMessageId);
       scheduleConversationPersist();
       render();
       if (missingPreviewRefs.length) {
-        void hydrateConversationImages(messageId, missingPreviewRefs, imageAlt);
+        void hydrateConversationImages(finalizedMessageId, missingPreviewRefs, imageAlt);
       }
       return;
     }
@@ -11608,10 +15611,12 @@ async function createSlideImagesFromCurrentPage(prompt: string): Promise<void> {
       await persistDetachedConversation(conversationIdAtStart);
       return;
     }
-    removePendingImageWorkflowMessage(clientRequestId);
+    const preservedPartialImage = removePendingImageWorkflowMessage(clientRequestId, { preservePartial: true, reason: errorMessage });
     state.promptActivity = null;
     state.streamingAssistantMessageIds.clear();
-    state.messages.push(createAssistantFailureMessage(errorMessage, state.uiLocale));
+    if (!preservedPartialImage) {
+      state.messages.push(createAssistantFailureMessage(errorMessage, state.uiLocale));
+    }
     state.initError = errorMessage;
     scheduleConversationPersist();
     render();
@@ -11633,10 +15638,38 @@ async function copyConversationMessage(messageId: string | undefined): Promise<v
     return;
   }
 
-  await navigator.clipboard.writeText(message.text);
+  await writeTextToClipboard(message.text);
   state.actionStatus = "";
   markMessageCopied(message.id);
   render();
+}
+
+async function writeTextToClipboard(text: string): Promise<void> {
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return;
+    } catch {
+      // Extension pages can briefly lose clipboard access in some browser
+      // contexts. Keep copy actions usable with a local fallback.
+    }
+  }
+
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.top = "-1000px";
+  textarea.style.opacity = "0";
+  document.body.appendChild(textarea);
+  textarea.select();
+  try {
+    if (!document.execCommand("copy")) {
+      throw new Error("copy command was rejected");
+    }
+  } finally {
+    textarea.remove();
+  }
 }
 
 async function deleteConversationFromUi(conversationId: string): Promise<void> {
@@ -11675,9 +15708,10 @@ async function clearConversationHistoryFromUi(options: { returnToSettings?: bool
   }
 
   const strings = stringsForState();
-  const message = strings.prompts.clearChatHistoryConfirm;
+  const visibleChatCount = state.recentChats.length;
+  const message = `${strings.prompts.clearChatHistoryConfirm}\n\n${strings.labels.recentChats}: ${visibleChatCount}`;
   const approved = await requestNativeConfirmation(message, {
-    title: strings.actions.clearRecentChats,
+    title: `${strings.actions.clearRecentChats} (${visibleChatCount})`,
     confirmLabel: strings.actions.clearRecentChats,
     tone: "danger",
   });
@@ -11688,6 +15722,7 @@ async function clearConversationHistoryFromUi(options: { returnToSettings?: bool
   const result = await sendRuntimeMessage<{
     recentChats: ConversationSummary[];
     currentConversation: SavedConversation | null;
+    deletedCount: number;
   }>({
     type: "conversation.clear",
   });
@@ -11695,26 +15730,85 @@ async function clearConversationHistoryFromUi(options: { returnToSettings?: bool
   hydrateConversation(result.currentConversation);
   state.activeView = options.returnToSettings ? "workspace" : "chat";
   state.appMenuOpen = false;
-  state.actionStatus = strings.status.chatHistoryCleared;
+  state.actionStatus = result.deletedCount
+    ? `${strings.status.chatHistoryCleared} (${result.deletedCount})`
+    : strings.status.chatHistoryCleared;
   render();
 }
 
-async function saveCustomSiteSuggestionFromSettings(): Promise<void> {
-  const input = root.querySelector<HTMLInputElement>("#custom-site-suggestion-input");
-  const prompt = input?.value.trim() ?? "";
-  if (!prompt || !state.currentTabReference) {
+function openCustomSiteSuggestionEditor(suggestionId?: string): void {
+  const editor = createCustomSiteSuggestionEditorState(suggestionId ? "edit" : "create", suggestionId);
+  if (!editor) {
+    return;
+  }
+  state.customSiteSuggestionEditor = editor;
+  closeFloatingSurfaces();
+  render();
+  window.setTimeout(() => root.querySelector<HTMLInputElement>("#custom-site-suggestion-command")?.focus(), 0);
+}
+
+function closeCustomSiteSuggestionEditor(): void {
+  state.customSiteSuggestionEditor = null;
+  render();
+}
+
+function readCustomSiteSuggestionEditorForm(): CustomSiteSuggestionEditorState {
+  const current = state.customSiteSuggestionEditor ?? {
+    mode: "create",
+    siteKey: "",
+    siteLabel: "",
+    command: "",
+    prompt: "",
+  };
+  return {
+    ...current,
+    command: root.querySelector<HTMLInputElement>("#custom-site-suggestion-command")?.value ?? current.command,
+    prompt: root.querySelector<HTMLTextAreaElement>("#custom-site-suggestion-prompt")?.value ?? current.prompt,
+  };
+}
+
+async function submitCustomSiteSuggestionEditor(): Promise<void> {
+  const editor = readCustomSiteSuggestionEditorForm();
+  const command = editor.command.trim();
+  const prompt = editor.prompt.trim();
+  if (!command || !prompt || !state.currentTabReference) {
+    state.customSiteSuggestionEditor = {
+      ...editor,
+      error: stringsForState().customSiteSuggestionEditor.required,
+    };
+    render();
     return;
   }
 
-  const nextSuggestions = upsertCustomSiteSuggestion(
-    state.settings.customSiteSuggestions,
-    state.currentTabReference,
-    prompt,
-  );
+  let nextSuggestions = state.settings.customSiteSuggestions;
+  if (editor.mode === "edit" && editor.suggestionId) {
+    const updated = {
+      ...createCustomSiteSuggestion(
+        state.currentTabReference,
+        command,
+        prompt,
+        editor.createdAt ?? Date.now(),
+      ),
+      id: editor.suggestionId,
+      ...(editor.createdAt ? { createdAt: editor.createdAt } : {}),
+    };
+    nextSuggestions = normalizeCustomSiteSuggestions([
+      updated,
+      ...state.settings.customSiteSuggestions.filter((item) => item.id !== editor.suggestionId),
+    ]);
+  } else {
+    nextSuggestions = upsertCustomSiteSuggestion(
+      state.settings.customSiteSuggestions,
+      state.currentTabReference,
+      command,
+      prompt,
+    );
+  }
   state.settings = await sendRuntimeMessage<ExtensionSettings>({
     type: "settings.update",
     settings: { customSiteSuggestions: nextSuggestions },
   });
+  state.customSiteSuggestionEditor = null;
   state.actionStatus = stringsForState().status.siteSuggestionSaved;
   render();
 }
@@ -11754,7 +15848,7 @@ async function copyMessageCodeBlock(button: HTMLButtonElement): Promise<void> {
     return;
   }
 
-  await navigator.clipboard.writeText(code);
+  await writeTextToClipboard(code);
   const strings = stringsForState();
   state.actionStatus = strings.status.messageCopied;
   render();
@@ -11778,7 +15872,7 @@ async function replayConversationFromMessage(
   state.threadId = "";
   state.activeTurn = null;
   scheduleConversationPersist();
-  await sendPrompt(replay.prompt, { resetThread: true });
+  await sendPrompt(replay.prompt, { resetThread: true, profileId: replay.profileId });
 }
 
 function isSlideImageGenerationActionCard(card: ActionCard): boolean {
@@ -11877,6 +15971,33 @@ function upsertTurnPlanTraceInMessages(messages: ConversationMessage[], plan: Co
     }))
     .filter((step) => step.step && !isNoisyTraceText(step.step));
   let changed = removeTurnTraceItemsInMessages(messages, plan.threadId, plan.turnId, (item) => item.id.startsWith("plan-"));
+  if (!steps.length) {
+    return changed;
+  }
+  const messageId = createTurnTraceMessageId(plan.threadId, plan.turnId);
+  let message = messages.find((entry) => entry.id === messageId);
+  if (!message) {
+    message = {
+      id: messageId,
+      role: "assistant",
+      text: "",
+      trace: [],
+    };
+    messages.push(message);
+    changed = true;
+  }
+  const previousPlan = message.plan;
+  const nextPlan = {
+    threadId: plan.threadId,
+    turnId: plan.turnId,
+    explanation: plan.explanation?.trim() || null,
+    steps,
+    ...(previousPlan?.accepted ? { accepted: true } : {}),
+  };
+  if (JSON.stringify(previousPlan ?? null) !== JSON.stringify(nextPlan)) {
+    message.plan = nextPlan;
+    changed = true;
+  }
 
   for (const [index, step] of steps.entries()) {
     if (!step.step) {
@@ -12060,6 +16181,52 @@ function clearEmptyAssistantResponseNoticeForTurn(
   if (conversationId) {
     void persistDetachedConversation(conversationId);
   }
+}
+
+function createAssistantFailureMessageId(seed: string): string {
+  return `assistant-error-${stableMessageIdPart(seed)}`;
+}
+
+function upsertAssistantFailureMessageInMessages(
+  messages: ConversationMessage[],
+  errorMessage: string,
+  id: string,
+): boolean {
+  const next = createAssistantFailureMessage(errorMessage, state.uiLocale, id);
+  const existing = messages.find((message) => message.id === id && message.role === "assistant");
+  if (!existing) {
+    const duplicate = findAssistantFailureDuplicateForLatestUserTurn(messages, next.text);
+    if (duplicate) {
+      return false;
+    }
+    messages.push(next);
+    return true;
+  }
+  if (existing.text === next.text) {
+    return false;
+  }
+  existing.text = next.text;
+  return true;
+}
+
+function findAssistantFailureDuplicateForLatestUserTurn(
+  messages: ConversationMessage[],
+  text: string,
+): ConversationMessage | null {
+  let latestUserMessageIndex = -1;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index]?.role === "user") {
+      latestUserMessageIndex = index;
+      break;
+    }
+  }
+  for (let index = latestUserMessageIndex + 1; index < messages.length; index += 1) {
+    const message = messages[index];
+    if (message?.role === "assistant" && message.id.startsWith("assistant-error-") && message.text === text) {
+      return message;
+    }
+  }
+  return null;
 }
 
 function getMessagesForEmptyAssistantResponseNotice(conversationId: string | null, threadId: string): ConversationMessage[] | null {
@@ -12260,11 +16427,25 @@ function upsertAssistantResponseTextSegment(
   const previousText = texts.get(itemId) ?? "";
   const nextFragment = append ? `${previousText}${fragment}` : fragment;
   const normalizedNextFragment = normalizeAssistantResponseTextSegment(nextFragment);
-  const duplicateItemId = Array.from(texts.entries()).find(
-    ([existingItemId, text]) => existingItemId !== itemId && normalizeAssistantResponseTextSegment(text) === normalizedNextFragment,
-  )?.[0];
+  const duplicateItemId = Array.from(texts.entries()).find(([existingItemId, text]) => {
+    if (existingItemId === itemId) {
+      return false;
+    }
+    const normalizedExisting = normalizeAssistantResponseTextSegment(text);
+    return isAssistantResponseTextDuplicateOrOverlap(normalizedExisting, normalizedNextFragment);
+  })?.[0];
   if (normalizedNextFragment && duplicateItemId) {
-    order.splice(order.indexOf(itemId), 1);
+    const duplicateText = texts.get(duplicateItemId) ?? "";
+    const normalizedExisting = normalizeAssistantResponseTextSegment(duplicateText);
+    const shouldKeepExisting =
+      normalizedExisting === normalizedNextFragment || normalizedExisting.includes(normalizedNextFragment);
+    if (shouldKeepExisting) {
+      order.splice(order.indexOf(itemId), 1);
+    } else {
+      order.splice(order.indexOf(duplicateItemId), 1);
+      texts.delete(duplicateItemId);
+      texts.set(itemId, nextFragment);
+    }
     assistantResponseItemOrderByMessageId.set(messageId, order);
   } else {
     texts.set(itemId, nextFragment);
@@ -12279,6 +16460,19 @@ function upsertAssistantResponseTextSegment(
 
 function normalizeAssistantResponseTextSegment(value: string): string {
   return value.trim().replace(/\s+/g, " ");
+}
+
+function isAssistantResponseTextDuplicateOrOverlap(normalizedExisting: string, normalizedNextFragment: string): boolean {
+  if (!normalizedExisting || !normalizedNextFragment) {
+    return false;
+  }
+  if (normalizedExisting === normalizedNextFragment) {
+    return true;
+  }
+  if (Math.min(normalizedExisting.length, normalizedNextFragment.length) < 120) {
+    return false;
+  }
+  return normalizedExisting.includes(normalizedNextFragment) || normalizedNextFragment.includes(normalizedExisting);
 }
 
 function stableMessageIdPart(value: string): string {
@@ -12398,7 +16592,7 @@ function patchStreamingAssistantMessageDoms(itemIds: string[]): boolean {
       return false;
     }
     content.innerHTML = renderMessageContentHtml(message.text, {
-      enableYouTubeTimestampLinks: shouldRenderYouTubeTimestampLinks(),
+      enableYouTubeTimestampLinks: shouldRenderYouTubeTimestampLinksForMessage(message),
     });
   }
   restoreScrollPositions(scrollState);
@@ -12451,7 +16645,10 @@ async function handleBridgeImageEvent(event: BridgeImageWorkflowEvent): Promise<
       previewRef: event.previewRef,
       hasSrc: Boolean(image.src),
     });
-    const hydratedWorkflowMessageId = appendStreamedImageToWorkflowMessage(event.clientRequestId, image, event.previewRef);
+    const hydratedWorkflowMessageId = appendStreamedImageToWorkflowMessage(event.clientRequestId, image, event.previewRef, {
+      keepTrailingLoadingPlaceholder: shouldKeepTrailingImageWorkflowPlaceholder(event),
+      placeholderAlt: createImageWorkflowPlaceholderAlt(event.workflow ?? "generated-image"),
+    });
     if (!hydratedWorkflowMessageId) {
       state.promptActivity = null;
       upsertAssistantImageMessage(event.itemId, image);
@@ -12508,6 +16705,7 @@ function appendStreamedImageToWorkflowMessage(
   clientRequestId: string | undefined,
   image: ConversationMessageImage,
   previewRef: string,
+  options: { keepTrailingLoadingPlaceholder?: boolean; placeholderAlt?: string } = {},
 ): string | null {
   if (!clientRequestId) {
     return null;
@@ -12518,16 +16716,109 @@ function appendStreamedImageToWorkflowMessage(
   }
 
   rememberStreamedImagePreviewRef(clientRequestId, previewRef);
-  existing.text = "";
-  const images = (existing.images ?? []).filter((candidate) => candidate.status !== "loading");
+  if (!isPartialImageWorkflowFailureText(existing.text)) {
+    existing.text = "";
+  }
+  const images = (existing.images ?? []).filter(
+    (candidate) => candidate.status !== "loading" || isSameConversationImage(candidate, image),
+  );
   const existingIndex = images.findIndex((candidate) => isSameConversationImage(candidate, image));
   if (existingIndex >= 0) {
     images[existingIndex] = image;
   } else {
     images.push(image);
   }
+  if (options.keepTrailingLoadingPlaceholder && image.status === "ready" && options.placeholderAlt) {
+    images.push(createLoadingConversationImage(options.placeholderAlt));
+  }
   existing.images = images;
   return existing.id;
+}
+
+function shouldKeepTrailingImageWorkflowPlaceholder(event: BridgeImageWorkflowEvent): boolean {
+  return event.workflow === "generated-image" || event.workflow === "infographic" || event.workflow === "slide-images";
+}
+
+function isTrailingImageWorkflowPlaceholder(image: ConversationMessageImage): boolean {
+  return image.status === "loading" && !image.assetRef && !image.src;
+}
+
+function removeTrailingImageWorkflowPlaceholder(message: ConversationMessage): void {
+  const images = [...(message.images ?? [])];
+  while (true) {
+    const lastImage = images.at(-1);
+    if (!lastImage || !isTrailingImageWorkflowPlaceholder(lastImage)) {
+      break;
+    }
+    images.pop();
+  }
+  if (images.length) {
+    message.images = images;
+  } else {
+    delete message.images;
+  }
+}
+
+function finalizeStreamedImageWorkflowMessage(clientRequestId: string, assistantText: string | null | undefined): string | null {
+  const existing = getImageWorkflowMessageForStreaming(clientRequestId);
+  if (!existing) {
+    return null;
+  }
+  removeTrailingImageWorkflowPlaceholder(existing);
+  const text = assistantText?.trim();
+  if (text) {
+    existing.text = text;
+  } else if (!existing.images?.length && !existing.text.trim()) {
+    existing.text = stringsForState().images.editPreview;
+  }
+  pendingImageWorkflowMessageIdsByRequest.delete(clientRequestId);
+  return existing.id;
+}
+
+function hasRecoverableImageWorkflowContent(message: ConversationMessage): boolean {
+  return (message.images ?? []).some((image) =>
+    image.status === "ready" ||
+    image.status === "error" ||
+    Boolean(image.src || image.assetRef),
+  );
+}
+
+function buildPartialImageWorkflowFailureText(reason: string | null | undefined): string {
+  const normalizedReason = reason?.trim();
+  const isKorean = getTranslatedUiLocale(state.uiLocale) === "ko";
+  if (isKorean) {
+    return [
+      "요청이 중간에 중단됐지만 이미 생성된 이미지는 유지했습니다.",
+      normalizedReason ? `원인: ${normalizedReason}` : "",
+      '이어서 계속하려면 "이어서 계속 생성해줘"처럼 후속 요청을 보내주세요.',
+    ].filter(Boolean).join("\n\n");
+  }
+  return [
+    "The request stopped before completion, but images that were already generated were preserved.",
+    normalizedReason ? `Reason: ${normalizedReason}` : "",
+    'To continue, send a follow-up such as "continue generating from here."',
+  ].filter(Boolean).join("\n\n");
+}
+
+function isPartialImageWorkflowFailureText(text: string): boolean {
+  return text.includes("이미 생성된 이미지는 유지했습니다") || text.includes("already generated were preserved");
+}
+
+function preservePartialImageWorkflowMessage(clientRequestId: string, reason: string | null | undefined): boolean {
+  const existing = getImageWorkflowMessageForStreaming(clientRequestId);
+  if (!existing) {
+    return false;
+  }
+  removeTrailingImageWorkflowPlaceholder(existing);
+  if (!hasRecoverableImageWorkflowContent(existing)) {
+    return false;
+  }
+  existing.text = buildPartialImageWorkflowFailureText(reason);
+  pendingImageWorkflowMessageIdsByRequest.delete(clientRequestId);
+  streamedImagePreviewRefsByRequest.delete(clientRequestId);
+  completedImageWorkflowMessageIdsByRequest.delete(clientRequestId);
+  rememberCompletedImageWorkflowMessage(clientRequestId, existing.id, PARTIAL_IMAGE_WORKFLOW_MESSAGE_RETENTION_MS);
+  return true;
 }
 
 function rememberStreamedImagePreviewRef(clientRequestId: string, previewRef: string): void {
@@ -12551,13 +16842,17 @@ function getImageWorkflowMessageForStreaming(clientRequestId: string): Conversat
   return state.messages.find((message) => message.id === messageId) ?? null;
 }
 
-function rememberCompletedImageWorkflowMessage(clientRequestId: string, messageId: string): void {
+function rememberCompletedImageWorkflowMessage(
+  clientRequestId: string,
+  messageId: string,
+  retentionMs = COMPLETED_IMAGE_WORKFLOW_MESSAGE_RETENTION_MS,
+): void {
   completedImageWorkflowMessageIdsByRequest.set(clientRequestId, messageId);
   window.setTimeout(() => {
     if (completedImageWorkflowMessageIdsByRequest.get(clientRequestId) === messageId) {
       completedImageWorkflowMessageIdsByRequest.delete(clientRequestId);
     }
-  }, 60_000);
+  }, retentionMs);
 }
 
 async function resolvePreviewRefForUi(previewRef: string): Promise<string> {
@@ -12816,6 +17111,7 @@ async function createGeneratedImageFileAttachmentsForPrompt(
         serviceTier: state.selectedServiceTier || undefined,
         readStrategyOverride: state.currentReadStrategy,
         attachments: Array.from(state.attachments),
+        selectedTextContext: createPromptSelectedTextContextPayload(),
         fileAttachments: [...submittedRequestFileAttachments, ...attachments],
         structuredInputs: getPromptStructuredInputs(),
         selectedTabIds: state.selectedTabIds,
@@ -12957,15 +17253,22 @@ function replacePendingImageWorkflowMessage(
   return existing.id;
 }
 
-function removePendingImageWorkflowMessage(clientRequestId: string): void {
+function removePendingImageWorkflowMessage(
+  clientRequestId: string,
+  options: { preservePartial?: boolean; reason?: string | null } = {},
+): boolean {
+  if (options.preservePartial && preservePartialImageWorkflowMessage(clientRequestId, options.reason)) {
+    return true;
+  }
   const messageId = pendingImageWorkflowMessageIdsByRequest.get(clientRequestId);
   streamedImagePreviewRefsByRequest.delete(clientRequestId);
   completedImageWorkflowMessageIdsByRequest.delete(clientRequestId);
   if (!messageId) {
-    return;
+    return false;
   }
   pendingImageWorkflowMessageIdsByRequest.delete(clientRequestId);
   state.messages = state.messages.filter((message) => message.id !== messageId);
+  return false;
 }
 
 function consumeStreamedImagePreviewRefs(clientRequestId: string): string[] {
@@ -12999,12 +17302,25 @@ async function hydrateConversationImage(messageId: string, previewRef: string, a
 
 async function startRealtimeVoiceSession(options: { reconnect?: boolean } = {}): Promise<void> {
   const strings = stringsForState();
+  if (state.conferenceMode.active || state.conferenceMode.starting) {
+    throw new Error(getConferenceModeBusyMessage());
+  }
   if (!navigator.mediaDevices?.getUserMedia) {
     throw new Error(strings.errors.voiceUnsupported);
   }
-  const SpeechRecognitionCtor = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!SpeechRecognitionCtor) {
-    throw new Error(strings.errors.voiceUnsupported);
+  if (!isRealtimeVoiceAvailableForAccount()) {
+    throw new Error(getRealtimeVoiceSignInRequiredMessage());
+  }
+  const knownRealtimeFailureReason = getKnownChatgptRealtimeEndpointFailureReason();
+  if (!options.reconnect && knownRealtimeFailureReason) {
+    const authResult = await handleRealtimeApiKeyRequirement({
+      source: "live",
+      reason: knownRealtimeFailureReason,
+    });
+    if (authResult === "retry") {
+      await startRealtimeVoiceSession(options);
+    }
+    return;
   }
 
   if (!options.reconnect) {
@@ -13022,10 +17338,15 @@ async function startRealtimeVoiceSession(options: { reconnect?: boolean } = {}):
     state.actionStatus = strings.status.voiceConnecting;
     render();
     realtimeVoiceStream = stream;
-    realtimeVoiceTransport = "websocket";
+    const { peer, sdp } = await createRealtimeVoiceWebRtcOffer(stream);
+    realtimeVoicePeer = peer;
+    realtimeVoiceTransport = "webrtc";
     resetRealtimeVoiceContextSnapshot();
     resetVoiceTranscriptMirrorState(voiceTranscriptMirror);
-    ensureRealtimeOutputAudioContext();
+    const startedPromise = waitForRealtimeVoiceStarted(undefined);
+    const answerPromise = waitForRealtimeVoiceAnswer();
+    void startedPromise.catch(() => undefined);
+    void answerPromise.catch(() => undefined);
 
     const result = await sendRuntimeMessageWithConfirmation<{
       status?: string;
@@ -13033,43 +17354,64 @@ async function startRealtimeVoiceSession(options: { reconnect?: boolean } = {}):
       sessionId?: string;
       transport?: RealtimeVoiceTransport;
       error?: string;
+      errorCode?: string;
       cancelled?: boolean;
-    }>({
-      type: "voice.session.start",
-      confirmed: true,
-      outputModality: "audio",
-      voice: state.settings.preferredVoice,
-    });
+    }>(
+     buildRealtimeVoiceStartMessage({
+        sdp,
+        outputModality: "audio",
+        voice: state.settings.preferredVoice,
+      }),
+    );
     if (isCancelledResult(result)) {
       state.actionStatus = strings.status.voiceCancelled;
       cleanupRealtimeVoiceResources();
       return;
     }
     if (result.status === "error" || result.error) {
+      if (result.errorCode === "requires-api-key") {
+        throw new Error(result.error || getRealtimeApiKeyRequiredMessage("live", result.error));
+      }
       throw new Error(result.error || strings.errors.voiceUpdate);
     }
     if (result.threadId) {
       realtimeVoiceThreadId = result.threadId;
     }
-    realtimeVoiceTransport = result.transport ?? "websocket";
-    if (browserVoiceFallbackActive) {
-      return;
+    realtimeVoiceTransport = result.transport ?? "webrtc";
+    const answerSdp = await answerPromise;
+    if (realtimeVoicePeer === peer) {
+      await peer.setRemoteDescription({ type: "answer", sdp: answerSdp });
     }
     if (result.status === "active") {
+      clearKnownChatgptRealtimeEndpointFailure();
+      completeRealtimeVoiceStarted(result.threadId);
       activateRealtimeVoiceSession({
         ...(result.threadId ? { threadId: result.threadId } : {}),
         transport: result.transport ?? realtimeVoiceTransport,
       });
       return;
     }
-    await waitForRealtimeVoiceStarted(result.threadId);
+    await startedPromise;
+    clearKnownChatgptRealtimeEndpointFailure();
+    activateRealtimeVoiceSession({
+      ...(result.threadId ? { threadId: result.threadId } : {}),
+      transport: result.transport ?? realtimeVoiceTransport,
+    });
   } catch (error) {
     const realtimeReason = state.initError || toErrorMessage(error);
-    if (browserVoiceFallbackActive) {
+    rememberChatgptRealtimeEndpointFailure(realtimeReason);
+    cleanupRealtimeVoiceResources();
+    if (voiceReconnectTimer !== null || (!options.reconnect && voiceReconnectAttempts > 0)) {
       return;
     }
-    cleanupRealtimeVoiceResources();
-    if (!options.reconnect && startBrowserVoiceFallbackIfPossible(realtimeReason)) {
+    if (!options.reconnect && isRealtimeVoiceApiKeyRequired(realtimeReason)) {
+      const authResult = await handleRealtimeApiKeyRequirement({
+        source: "live",
+        reason: realtimeReason,
+      });
+      if (authResult === "retry") {
+        await startRealtimeVoiceSession(options);
+      }
       return;
     }
     throw new Error(toUserFacingVoiceStartError(error));
@@ -13138,6 +17480,259 @@ async function requestMicrophoneStream(): Promise<MediaStream> {
       autoGainControl: true,
     },
   });
+}
+
+async function createRealtimeVoiceWebRtcOffer(stream: MediaStream): Promise<{ peer: RTCPeerConnection; sdp: string }> {
+  const peer = new RTCPeerConnection();
+  const remoteStream = new MediaStream();
+  attachRealtimeVoicePeerHandlers(peer, remoteStream);
+
+  const audioTrack = stream.getAudioTracks()[0];
+  if (!audioTrack) {
+    peer.close();
+    throw new Error(stringsForState().errors.voiceMicrophoneUnavailable);
+  }
+
+  peer.addTrack(audioTrack, stream);
+  peer.createDataChannel("oai-events");
+  const offer = await peer.createOffer();
+  await peer.setLocalDescription(offer);
+  await waitForIceGatheringComplete(peer, 3_000);
+  const sdp = peer.localDescription?.sdp ?? offer.sdp ?? "";
+  if (!sdp.trim()) {
+    peer.close();
+    throw new Error(stringsForState().errors.voiceUpdate);
+  }
+
+  return { peer, sdp };
+}
+
+async function createComposerRealtimeVoiceWebRtcOffer(stream: MediaStream): Promise<{ peer: RTCPeerConnection; sdp: string }> {
+  const peer = new RTCPeerConnection();
+  attachComposerRealtimeVoicePeerHandlers(peer);
+
+  const audioTrack = stream.getAudioTracks()[0];
+  if (!audioTrack) {
+    peer.close();
+    throw new Error(getComputerAudioCaptureNoAudioMessage());
+  }
+
+  peer.addTrack(audioTrack, stream);
+  attachComposerRealtimeVoiceDataChannelHandlers(peer.createDataChannel("oai-events"));
+  const offer = await peer.createOffer();
+  await peer.setLocalDescription(offer);
+  await waitForIceGatheringComplete(peer, 3_000);
+  const sdp = peer.localDescription?.sdp ?? offer.sdp ?? "";
+  if (!sdp.trim()) {
+    peer.close();
+    throw new Error(stringsForState().errors.voiceUpdate);
+  }
+
+  return { peer, sdp };
+}
+
+function attachComposerRealtimeVoicePeerHandlers(peer: RTCPeerConnection): void {
+  const handleConnectionState = () => {
+    if (composerVoiceInputRealtimePeer !== peer || !state.voiceInputActive) {
+      return;
+    }
+    if (peer.connectionState === "failed" || peer.iceConnectionState === "failed") {
+      handleComposerRealtimeVoiceInputError(stringsForState().errors.voiceUpdate);
+      render();
+    }
+  };
+
+  peer.onconnectionstatechange = handleConnectionState;
+  peer.oniceconnectionstatechange = handleConnectionState;
+  peer.ondatachannel = (event) => {
+    attachComposerRealtimeVoiceDataChannelHandlers(event.channel);
+  };
+  peer.ontrack = () => {
+    // Dictation only needs transcript notifications; ignore any negotiated output track.
+  };
+}
+
+function attachComposerRealtimeVoiceDataChannelHandlers(channel: RTCDataChannel): void {
+  composerVoiceInputRealtimeDataChannel = channel;
+  channel.onclose = () => {
+    if (composerVoiceInputRealtimeDataChannel === channel) {
+      composerVoiceInputRealtimeDataChannel = null;
+    }
+  };
+  channel.onmessage = (event) => {
+    void handleComposerRealtimeVoiceDataChannelMessage(event.data);
+  };
+}
+
+async function handleComposerRealtimeVoiceDataChannelMessage(data: unknown): Promise<void> {
+  const payload = await parseComposerRealtimeVoiceDataChannelPayload(data);
+  if (!payload) {
+    return;
+  }
+  const transcript = extractComposerRealtimeDataChannelTranscript(payload);
+  if (!transcript) {
+    return;
+  }
+
+  composerVoiceInputRealtimeDataChannelTranscriptsActive = true;
+  if (!composerVoiceInputRealtimeDataChannelTranscriptLogged) {
+    composerVoiceInputRealtimeDataChannelTranscriptLogged = true;
+    void chrome.runtime
+      .sendMessage({
+        type: "diagnostics.log.write",
+        event: "dictation.webrtc.data_channel.transcript",
+        details: {
+          realtimeType: typeof payload.type === "string" ? payload.type : "",
+          kind: transcript.kind,
+          role: transcript.role,
+          textLength: transcript.text.length,
+        },
+      })
+      .catch(() => undefined);
+  }
+
+  if (transcript.kind === "delta") {
+    if (transcript.deltaMode === "replace") {
+      updateComposerVoiceInputInterimTranscript(transcript.text);
+    } else {
+      handleComposerRealtimeTranscriptDelta({
+        type: "voice.transcript.delta",
+        role: transcript.role,
+        delta: transcript.text,
+      });
+    }
+  } else {
+    handleComposerRealtimeTranscriptDone({
+      type: "voice.transcript.done",
+      role: transcript.role,
+      text: transcript.text,
+    });
+  }
+  render();
+}
+
+async function parseComposerRealtimeVoiceDataChannelPayload(data: unknown): Promise<Record<string, unknown> | null> {
+  if (typeof data === "string") {
+    return parseComposerRealtimeVoiceDataChannelJson(data);
+  }
+  if (data instanceof ArrayBuffer) {
+    return parseComposerRealtimeVoiceDataChannelJson(new TextDecoder().decode(data));
+  }
+  if (data instanceof Blob) {
+    return parseComposerRealtimeVoiceDataChannelJson(await data.text());
+  }
+  return null;
+}
+
+function parseComposerRealtimeVoiceDataChannelJson(text: string): Record<string, unknown> | null {
+  try {
+    const parsed: unknown = JSON.parse(text);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
+function extractComposerRealtimeDataChannelTranscript(
+  payload: Record<string, unknown>,
+): {
+  kind: "delta" | "done";
+  role: "user" | "assistant";
+  text: string;
+  deltaMode?: "append" | "replace";
+} | null {
+  const eventType = typeof payload.type === "string" ? payload.type : "";
+  switch (eventType) {
+    case "conversation.item.input_audio_transcription.delta":
+    case "conversation.input_transcript.delta":
+      return createComposerRealtimeDataChannelTranscript("delta", "user", payload.delta, "replace");
+    case "conversation.item.input_audio_transcription.completed":
+    case "conversation.input_transcript.done":
+      return createComposerRealtimeDataChannelTranscript("done", "user", payload.transcript ?? payload.text);
+    case "response.output_text.delta":
+    case "response.output_audio_transcript.delta":
+    case "response.audio_transcript.delta":
+    case "conversation.output_transcript.delta":
+      return createComposerRealtimeDataChannelTranscript("delta", "assistant", payload.delta);
+    case "response.output_text.done":
+      return createComposerRealtimeDataChannelTranscript("done", "assistant", payload.text);
+    case "response.output_audio_transcript.done":
+    case "response.audio_transcript.done":
+    case "conversation.output_transcript.done":
+      return createComposerRealtimeDataChannelTranscript("done", "assistant", payload.transcript ?? payload.text);
+    case "conversation.item.done":
+      return createComposerRealtimeDataChannelTranscript("done", "assistant", extractRealtimeDataChannelItemText(payload.item));
+    default:
+      return null;
+  }
+}
+
+function createComposerRealtimeDataChannelTranscript(
+  kind: "delta" | "done",
+  role: "user" | "assistant",
+  value: unknown,
+  deltaMode?: "append" | "replace",
+): {
+  kind: "delta" | "done";
+  role: "user" | "assistant";
+  text: string;
+  deltaMode?: "append" | "replace";
+} | null {
+  const text = typeof value === "string" ? value : "";
+  return text.trim() ? { kind, role, text, ...(deltaMode ? { deltaMode } : {}) } : null;
+}
+
+function extractRealtimeDataChannelItemText(item: unknown): string {
+  if (!item || typeof item !== "object" || Array.isArray(item)) {
+    return "";
+  }
+  const record = item as Record<string, unknown>;
+  const content = Array.isArray(record.content) ? record.content : [];
+  return content
+    .map((part) => {
+      if (!part || typeof part !== "object" || Array.isArray(part)) {
+        return "";
+      }
+      const partRecord = part as Record<string, unknown>;
+      return typeof partRecord.text === "string" ? partRecord.text : "";
+    })
+    .join("")
+    .trim();
+}
+
+function attachRealtimeVoicePeerHandlers(peer: RTCPeerConnection, remoteStream: MediaStream): void {
+  peer.ontrack = (event) => {
+    const tracks = event.streams[0]?.getAudioTracks() ?? [event.track].filter((track) => track.kind === "audio");
+    for (const track of tracks) {
+      if (!remoteStream.getTracks().includes(track)) {
+        remoteStream.addTrack(track);
+      }
+    }
+    if (remoteStream.getAudioTracks().length) {
+      playRealtimeVoiceRemoteStream(remoteStream);
+    }
+  };
+
+  const handleConnectionState = () => {
+    if (voiceStopRequested) {
+      return;
+    }
+    if (peer.connectionState === "failed" || peer.iceConnectionState === "failed") {
+      handleRealtimeVoiceDisconnect(stringsForState().errors.voiceUpdate, true);
+      render();
+    }
+  };
+  peer.onconnectionstatechange = handleConnectionState;
+  peer.oniceconnectionstatechange = handleConnectionState;
+}
+
+function playRealtimeVoiceRemoteStream(remoteStream: MediaStream): void {
+  const audio = realtimeVoiceAudio ?? new Audio();
+  realtimeVoiceAudio = audio;
+  audio.autoplay = true;
+  audio.srcObject = remoteStream;
+  audio.muted = false;
+  void audio.play().catch(() => undefined);
 }
 
 async function openDedicatedMicrophonePermissionWindow(): Promise<{
@@ -13267,13 +17862,17 @@ function cleanupRealtimeVoiceResources(): void {
     activeRecognition.onresult = null;
     activeRecognition.stop();
   }
-  browserVoiceFallbackActive = false;
   stopVoiceDurationTicker();
   cancelPendingVoiceStart();
   cancelPendingVoiceAnswer();
   realtimeVoiceStream?.getTracks().forEach((track) => track.stop());
   realtimeVoiceStream = null;
-  realtimeVoicePeer?.close();
+  if (realtimeVoicePeer) {
+    realtimeVoicePeer.ontrack = null;
+    realtimeVoicePeer.onconnectionstatechange = null;
+    realtimeVoicePeer.oniceconnectionstatechange = null;
+    realtimeVoicePeer.close();
+  }
   realtimeVoicePeer = null;
   if (realtimeVoiceAudio) {
     realtimeVoiceAudio.pause();
@@ -13314,14 +17913,65 @@ function cleanupRealtimeVoiceResources(): void {
 }
 
 function handleRealtimeVoiceDisconnect(reason: string | null, hadError: boolean): void {
+  if (reason) {
+    rememberChatgptRealtimeEndpointFailure(reason);
+  }
+  const pendingFailureReason = reason || undefined;
+  cancelPendingVoiceStart(pendingFailureReason);
+  cancelPendingVoiceAnswer(pendingFailureReason);
   const wasActive = Boolean(
-    state.voiceEnabled || realtimeVoicePeer || realtimeVoiceStream || pendingVoiceAnswer || realtimeVoiceTransport,
+    state.voiceEnabled ||
+      realtimeVoicePeer ||
+      realtimeVoiceStream ||
+      pendingVoiceStart ||
+      pendingVoiceAnswer ||
+      realtimeVoiceTransport,
   );
+  const wasConnected = state.voiceEnabled;
   cleanupRealtimeVoiceResources();
   state.voiceEnabled = false;
   state.liveCaption = "";
 
-  if (hadError && reason && !voiceStopRequested && startBrowserVoiceFallbackIfPossible(reason)) {
+  if (reason && !voiceStopRequested && isRealtimeVoiceInvalidApiKey(reason)) {
+    state.initError = getRealtimeInvalidApiKeyMessage("live");
+    state.actionStatus = "";
+    voiceReconnectAttempts = 0;
+    voiceStopRequested = false;
+    return;
+  }
+
+  if (reason && !voiceStopRequested && isRealtimeVoiceApiKeyRequired(reason)) {
+    void handleRealtimeApiKeyRequirement({
+      source: "live",
+      reason,
+    })
+      .then(async (result) => {
+        if (result === "retry") {
+          await startRealtimeVoiceSession();
+        }
+        render();
+      })
+      .catch((error) => {
+        state.initError = toUserFacingVoiceStartError(error);
+        state.actionStatus = "";
+        render();
+      });
+    voiceReconnectAttempts = 0;
+    voiceStopRequested = false;
+    return;
+  }
+
+  if (reason && !voiceStopRequested && isRealtimeVoiceStartupFatal(reason)) {
+    state.initError = toUserFacingVoiceStartError(new Error(reason));
+    state.actionStatus = "";
+    voiceReconnectAttempts = 0;
+    voiceStopRequested = false;
+    return;
+  }
+
+  if (!hadError && reason && !voiceStopRequested && !wasConnected) {
+    state.initError = reason;
+    state.actionStatus = "";
     voiceReconnectAttempts = 0;
     voiceStopRequested = false;
     return;
@@ -13362,10 +18012,9 @@ function activateRealtimeVoiceSession(options: {
   startVoiceDurationTicker();
   state.liveCaption = "";
   state.actionStatus = stringsForState().status.voiceListening;
-  if (realtimeVoiceStream) {
+  if (realtimeVoiceStream && realtimeVoiceTransport === "websocket") {
     void startRealtimeAudioInput(realtimeVoiceStream);
   }
-  startVoiceRecognition("live");
 }
 
 function startVoiceDurationTicker(): void {
@@ -13410,6 +18059,10 @@ function scheduleRealtimeVoiceReconnect(): void {
 async function retryRealtimeVoiceSession(): Promise<void> {
   try {
     await startRealtimeVoiceSession({ reconnect: true });
+    if (voiceReconnectTimer !== null || !state.voiceEnabled) {
+      render();
+      return;
+    }
     voiceReconnectAttempts = 0;
     render();
   } catch (error) {
@@ -13417,13 +18070,8 @@ async function retryRealtimeVoiceSession(): Promise<void> {
     cleanupRealtimeVoiceResources();
     state.voiceEnabled = false;
     state.liveCaption = "";
-    if (!voiceStopRequested && startBrowserVoiceFallbackIfPossible(reason)) {
-      voiceReconnectAttempts = 0;
-      voiceStopRequested = false;
-      render();
-      return;
-    }
     if (
+      !isRealtimeVoiceStartupFatal(reason) &&
       shouldAutoReconnectVoice({
         wasActive: true,
         requestedStop: voiceStopRequested,
@@ -13487,14 +18135,14 @@ function completeRealtimeVoiceStarted(threadId: string | undefined): void {
   pending.resolve();
 }
 
-function cancelPendingVoiceStart(): void {
+function cancelPendingVoiceStart(reason?: string): void {
   if (!pendingVoiceStart) {
     return;
   }
   const pending = pendingVoiceStart;
   pendingVoiceStart = null;
   window.clearTimeout(pending.timeoutId);
-  pending.reject(new Error(stringsForState().errors.voiceUpdate));
+  pending.reject(new Error(reason || stringsForState().errors.voiceUpdate));
 }
 
 function waitForRealtimeVoiceAnswer(timeoutMs = 10_000): Promise<string> {
@@ -13528,14 +18176,14 @@ function completeRealtimeVoiceHandshake(threadId: string | undefined, sdp: strin
   pending.resolve(sdp);
 }
 
-function cancelPendingVoiceAnswer(): void {
+function cancelPendingVoiceAnswer(reason?: string): void {
   if (!pendingVoiceAnswer) {
     return;
   }
   const pending = pendingVoiceAnswer;
   pendingVoiceAnswer = null;
   window.clearTimeout(pending.timeoutId);
-  pending.reject(new Error(stringsForState().errors.voiceUpdate));
+  pending.reject(new Error(reason || stringsForState().errors.voiceUpdate));
 }
 
 function interruptRealtimeVoiceOutput(): void {
@@ -13760,6 +18408,93 @@ function queueRealtimeAudioFrame(samples: number[], sourceSampleRate: number): v
     });
 }
 
+async function startComposerRealtimeAudioInput(stream: MediaStream, threadId: string): Promise<void> {
+  cleanupComposerRealtimeAudioInput();
+
+  try {
+    composerVoiceInputRealtimeAudioContext = new AudioContext();
+    await composerVoiceInputRealtimeAudioContext.audioWorklet.addModule(
+      chrome.runtime.getURL("realtime-audio-input-worklet.js"),
+    );
+    composerVoiceInputRealtimeAudioSource = composerVoiceInputRealtimeAudioContext.createMediaStreamSource(stream);
+    composerVoiceInputRealtimeAudioWorkletNode = new AudioWorkletNode(
+      composerVoiceInputRealtimeAudioContext,
+      "realtime-audio-input",
+      {
+        numberOfInputs: 1,
+        numberOfOutputs: 1,
+        outputChannelCount: [1],
+      },
+    );
+    composerVoiceInputRealtimeAudioWorkletNode.port.onmessage = (event: MessageEvent) => {
+      if (!state.voiceInputActive || composerVoiceInputRealtimeThreadId !== threadId) {
+        return;
+      }
+
+      const input = coerceRealtimeAudioSamples(event.data);
+      const sourceSampleRate = getRealtimeAudioInputSampleRate(
+        event.data,
+        composerVoiceInputRealtimeAudioContext?.sampleRate ?? 48_000,
+      );
+      if (!input.length) {
+        return;
+      }
+
+      for (let index = 0; index < input.length; index += 1) {
+        composerVoiceInputRealtimeAudioSamples.push(input[index] ?? 0);
+      }
+
+      const chunkSize = Math.max(
+        1,
+        Math.floor((sourceSampleRate * REALTIME_AUDIO_CHUNK_MS) / 1000),
+      );
+      while (composerVoiceInputRealtimeAudioSamples.length >= chunkSize) {
+        const samples = composerVoiceInputRealtimeAudioSamples.splice(0, chunkSize);
+        queueComposerRealtimeAudioFrame(threadId, samples, sourceSampleRate);
+      }
+    };
+    composerVoiceInputRealtimeAudioSource.connect(composerVoiceInputRealtimeAudioWorkletNode);
+    composerVoiceInputRealtimeAudioWorkletNode.connect(composerVoiceInputRealtimeAudioContext.destination);
+    void composerVoiceInputRealtimeAudioContext.resume().catch(() => undefined);
+  } catch (error) {
+    handleComposerRealtimeVoiceInputError(toUserFacingVoiceStartError(error));
+  }
+}
+
+function queueComposerRealtimeAudioFrame(threadId: string, samples: number[], sourceSampleRate: number): void {
+  if (!threadId || !samples.length) {
+    return;
+  }
+
+  const targetSampleRate = 24_000;
+  const resampled = resampleMonoPcm16(samples, sourceSampleRate, targetSampleRate);
+  if (!resampled.length) {
+    return;
+  }
+  const data = encodePcm16Base64(resampled);
+  composerVoiceInputRealtimeAudioSendChain = composerVoiceInputRealtimeAudioSendChain
+    .then(async () => {
+      await chrome.runtime.sendMessage({
+        type: "dictation.transcription.append_audio",
+        threadId,
+        audio: {
+          data,
+          sampleRate: targetSampleRate,
+          numChannels: 1,
+          samplesPerChannel: resampled.length,
+        },
+      });
+      composerVoiceInputRealtimeAudioChunksSent += 1;
+      composerVoiceInputRealtimeLastAudioSentAt = Date.now();
+    })
+    .catch((error) => {
+      if (state.voiceInputActive && composerVoiceInputRealtimeThreadId === threadId) {
+        handleComposerRealtimeVoiceInputError(toUserFacingVoiceStartError(error));
+        render();
+      }
+    });
+}
+
 function resampleMonoPcm16(samples: number[], sourceSampleRate: number, targetSampleRate: number): Int16Array {
   if (sourceSampleRate <= 0 || targetSampleRate <= 0 || !samples.length) {
     return new Int16Array();
@@ -13811,9 +18546,2083 @@ function waitForIceGatheringComplete(peer: RTCPeerConnection, timeoutMs: number)
   });
 }
 
-async function startComposerVoiceInput(): Promise<void> {
+async function startDictationFromShortcut(requestId = ""): Promise<void> {
+  if (requestId && requestId === lastHandledDictationShortcutId) {
+    return;
+  }
+  if (requestId) {
+    lastHandledDictationShortcutId = requestId;
+  }
+
+  if (state.voiceInputActive) {
+    await commitComposerVoiceInput();
+    return;
+  }
+
+  await startComposerVoiceInput({ target: resolveComposerVoiceInputTarget() });
+}
+
+function resolveComposerVoiceInputTarget(): ComposerVoiceInputTarget {
+  const activeElement = document.activeElement;
+  if (activeElement instanceof HTMLElement && (activeElement.id === "composer" || Boolean(activeElement.closest(".composer")))) {
+    return "composer";
+  }
+  return "page";
+}
+
+function shouldUseComposerRealtimeWebRtcDictation(): boolean {
+  if (
+    !state.accountStatus?.codexAuthenticated ||
+    !window.RTCPeerConnection ||
+    !navigator.mediaDevices?.getDisplayMedia
+  ) {
+    return false;
+  }
+
+  if (state.accountStatus.authMode === "apikey") {
+    return true;
+  }
+
+  return !getKnownChatgptRealtimeEndpointFailureReason();
+}
+
+async function toggleConferenceMode(): Promise<void> {
+  state.activeView = "conference";
+  state.appMenuOpen = false;
+  state.conferenceMode.viewActive = true;
+  render();
+}
+
+async function startConferenceMode(): Promise<void> {
+  if (state.conferenceMode.active || state.conferenceMode.starting) {
+    return;
+  }
+  if (state.voiceEnabled || state.voiceInputActive || composerVoiceInputRealtimeThreadId || composerVoiceInputRealtimePeer) {
+    state.initError = getConferenceModeBusyMessage();
+    render();
+    return;
+  }
+  if (!state.accountStatus?.openAiApiKeyConfigured) {
+    state.activeView = "conference";
+    state.appMenuOpen = false;
+    state.conferenceMode.viewActive = true;
+    render();
+    openNativeTextDialog("api-key", {
+      description: getRealtimeInterpreterApiKeyDescription(),
+      afterSubmit: { kind: "retry-conference-mode" },
+    });
+    return;
+  }
+  if (!window.RTCPeerConnection || !navigator.mediaDevices?.getDisplayMedia) {
+    state.activeView = "conference";
+    state.conferenceMode.viewActive = true;
+    state.conferenceMode.error = getComputerAudioCaptureUnsupportedMessage();
+    render();
+    return;
+  }
+
+  state.activeView = "conference";
+  state.appMenuOpen = false;
+  state.conferenceMode = {
+    ...state.conferenceMode,
+    viewActive: true,
+    active: false,
+    starting: true,
+    stopping: false,
+    error: "",
+    sourceLabel: "",
+    sessionId: createConferenceModeSessionId(),
+    threadId: "",
+    partialSourceText: "",
+    partialTranslationText: "",
+  };
+  conferenceTranscriptStickToBottom = true;
+  const startSessionId = state.conferenceMode.sessionId;
+  realtimeTranslationOwner = "conference";
+  const startGeneration = ++realtimeInterpreterStartGeneration;
+  state.actionStatus = getConferenceModeCaptureRequestStatus();
+  render();
+
+  let pendingStream: MediaStream | null = null;
+  try {
+    const livePlaybackEnabled = state.realtimeInterpreter.livePlaybackEnabled;
+    const { stream, sourceLabel } = await requestRealtimeInterpreterDisplayAudioStream({
+      suppressLocalAudioPlayback: livePlaybackEnabled,
+    });
+    pendingStream = stream;
+    if (!isCurrentConferenceModeStart(startSessionId)) {
+      pendingStream.getTracks().forEach((track) => track.stop());
+      realtimeTranslationOwner = "interpreter";
+      return;
+    }
+    realtimeInterpreterStream = stream;
+    state.conferenceMode.sourceLabel = sourceLabel;
+    const { peer, sdp } = await createRealtimeInterpreterWebRtcOffer(stream, {
+      playTranslatedAudio: livePlaybackEnabled,
+    });
+    if (!isCurrentConferenceModeStart(startSessionId)) {
+      closeStaleRealtimeInterpreterStart(peer, pendingStream);
+      pendingStream = null;
+      realtimeTranslationOwner = "interpreter";
+      return;
+    }
+    realtimeInterpreterPeer = peer;
+    const secret = await sendRuntimeMessage<{
+      value?: string;
+      expiresAt?: number | null;
+      sessionId?: string | null;
+      model?: string;
+      targetLanguage?: string;
+      error?: string;
+    }>({
+      type: "translation.client_secret.create",
+      targetLanguage: state.realtimeInterpreter.targetLanguage,
+      ttlSeconds: 600,
+    });
+    if (!isCurrentConferenceModeStart(startSessionId)) {
+      closeStaleRealtimeInterpreterStart(peer, pendingStream);
+      pendingStream = null;
+      realtimeTranslationOwner = "interpreter";
+      return;
+    }
+    if (secret.error || !secret.value) {
+      throw new Error(secret.error || "Realtime translation client secret was not created.");
+    }
+    const answer = await fetch("https://api.openai.com/v1/realtime/translations", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${secret.value}`,
+        "Content-Type": "application/sdp",
+      },
+      body: sdp,
+    });
+    if (!answer.ok) {
+      const detail = await answer.text().catch(() => "");
+      throw new Error(
+        [`Realtime translation call failed with ${answer.status} ${answer.statusText}`.trim(), detail.trim()]
+          .filter(Boolean)
+          .join(": "),
+      );
+    }
+    if (!isCurrentConferenceModeStart(startSessionId)) {
+      closeStaleRealtimeInterpreterStart(peer, pendingStream);
+      pendingStream = null;
+      realtimeTranslationOwner = "interpreter";
+      return;
+    }
+    const answerSdp = await answer.text();
+    await peer.setRemoteDescription({ type: "answer", sdp: answerSdp });
+    if (!isCurrentConferenceModeStart(startSessionId) || startGeneration !== realtimeInterpreterStartGeneration) {
+      closeStaleRealtimeInterpreterStart(peer, pendingStream);
+      pendingStream = null;
+      realtimeTranslationOwner = "interpreter";
+      return;
+    }
+    state.conferenceMode.active = true;
+    state.conferenceMode.starting = false;
+    state.conferenceMode.error = "";
+    state.actionStatus = "";
+    startComposerVoiceWaveform(stream);
+    pendingStream = null;
+    render();
+  } catch (error) {
+    const message = toErrorMessage(error);
+    pendingStream?.getTracks().forEach((track) => track.stop());
+    if (realtimeTranslationOwner === "conference") {
+      cleanupRealtimeInterpreterResources();
+      realtimeTranslationOwner = "interpreter";
+    }
+    cleanupConferenceModeResources(message);
+    state.conferenceMode = {
+      ...state.conferenceMode,
+      viewActive: true,
+      active: false,
+      starting: false,
+      stopping: false,
+      error: toUserFacingVoiceStartError(error),
+      threadId: "",
+      sessionId: "",
+      partialSourceText: "",
+      partialTranslationText: "",
+    };
+    state.actionStatus = "";
+    render();
+  }
+}
+
+function shouldRouteConferenceModeToRealtimeInterpreter(): boolean {
+  return Boolean(window.RTCPeerConnection && navigator.mediaDevices?.getDisplayMedia);
+}
+
+async function routeConferenceModeToRealtimeInterpreter(): Promise<void> {
+  if (state.conferenceMode.active || state.conferenceMode.starting || conferenceModePeer) {
+    await stopConferenceMode({ notifyBridge: true, preserveEntries: true, keepViewActive: false });
+  } else {
+    state.conferenceMode = {
+      ...state.conferenceMode,
+      viewActive: false,
+      active: false,
+      starting: false,
+      stopping: false,
+      error: "",
+      sourceLabel: "",
+      threadId: "",
+      sessionId: "",
+      partialSourceText: "",
+      partialTranslationText: "",
+    };
+    cleanupConferenceModeResources();
+  }
+  await openRealtimeInterpreterView();
+  await startRealtimeInterpreterMode();
+}
+
+function isCurrentConferenceModeStart(sessionId: string): boolean {
+  return Boolean(sessionId && state.conferenceMode.sessionId === sessionId && state.conferenceMode.starting);
+}
+
+async function stopConferenceMode(options: {
+  notifyBridge: boolean;
+  preserveEntries: boolean;
+  keepViewActive: boolean;
+}): Promise<void> {
+  const threadId = state.conferenceMode.threadId;
+  const wasRealtimeTranslationConference = Boolean(
+    realtimeTranslationOwner === "conference" &&
+      (realtimeInterpreterPeer || realtimeInterpreterStream || realtimeInterpreterDataChannel),
+  );
+  const wasActive = Boolean(
+    state.conferenceMode.active ||
+      state.conferenceMode.starting ||
+      conferenceModePeer ||
+      wasRealtimeTranslationConference,
+  );
+  if (options.preserveEntries) {
+    commitConferenceModePartialIfReady({ force: true, allowSourceOnly: true });
+  }
+  conferenceModeAudioGeneration += 1;
+  state.conferenceMode.stopping = wasActive;
+  state.conferenceMode.active = false;
+  state.conferenceMode.starting = false;
+  render();
+  if (wasRealtimeTranslationConference) {
+    realtimeInterpreterStartGeneration += 1;
+    cleanupRealtimeInterpreterResources();
+    realtimeTranslationOwner = "interpreter";
+  }
+  cleanupConferenceModeResources();
+  if (options.notifyBridge && threadId) {
+    await chrome.runtime
+      .sendMessage({
+        type: "dictation.transcription.stop",
+        threadId,
+      })
+      .catch(() => undefined);
+  }
+  state.conferenceMode = {
+    ...state.conferenceMode,
+    viewActive: options.keepViewActive,
+    active: false,
+    starting: false,
+    stopping: false,
+    error: "",
+    sourceLabel: "",
+    threadId: "",
+    sessionId: "",
+    entries: options.preserveEntries ? state.conferenceMode.entries : [],
+    partialSourceText: "",
+    partialTranslationText: "",
+  };
+  render();
+}
+
+function cleanupConferenceModeResources(reason?: string): void {
+  cancelPendingVoiceAnswer(reason);
+  cancelConferenceModeTranslationRetry();
+  conferenceModeAudioGeneration += 1;
+  conferenceModeAudioWorkletNode?.port.close();
+  conferenceModeAudioWorkletNode?.disconnect();
+  conferenceModeAudioWorkletNode = null;
+  conferenceModeAudioSource?.disconnect();
+  conferenceModeAudioSource = null;
+  if (conferenceModeAudioContext) {
+    void conferenceModeAudioContext.close().catch(() => undefined);
+    conferenceModeAudioContext = null;
+  }
+  conferenceModeAudioSamples = [];
+  conferenceModeAudioSendChain = Promise.resolve();
+  conferenceModeStream?.getTracks().forEach((track) => track.stop());
+  conferenceModeStream = null;
+  if (conferenceModePeer) {
+    conferenceModePeer.ondatachannel = null;
+    conferenceModePeer.onconnectionstatechange = null;
+    conferenceModePeer.oniceconnectionstatechange = null;
+    conferenceModePeer.close();
+  }
+  conferenceModePeer = null;
+  conferenceModeDataChannel = null;
+  conferenceModePendingTranslationRequests = [];
+  conferenceModeTranslationInFlight = false;
+  conferenceModeActiveTranslationSource = "";
+  conferenceModeDataChannelTranscriptsActive = false;
+  cleanupComposerVoiceWaveform();
+  cleanupComposerVoiceInputAudioBoost();
+}
+
+async function createConferenceModeWebRtcOffer(stream: MediaStream): Promise<{ peer: RTCPeerConnection; sdp: string }> {
+  const peer = new RTCPeerConnection();
+  attachConferenceModePeerHandlers(peer);
+
+  const audioTrack = stream.getAudioTracks()[0];
+  if (!audioTrack) {
+    peer.close();
+    throw new Error(getComputerAudioCaptureNoAudioMessage());
+  }
+
+  peer.addTrack(audioTrack, stream);
+  attachConferenceModeDataChannelHandlers(peer.createDataChannel("oai-events"));
+  const offer = await peer.createOffer();
+  await peer.setLocalDescription(offer);
+  await waitForIceGatheringComplete(peer, 3_000);
+  const sdp = peer.localDescription?.sdp ?? offer.sdp ?? "";
+  if (!sdp.trim()) {
+    peer.close();
+    throw new Error(stringsForState().errors.voiceUpdate);
+  }
+  return { peer, sdp };
+}
+
+function attachConferenceModePeerHandlers(peer: RTCPeerConnection): void {
+  const handleConnectionState = () => {
+    if (conferenceModePeer !== peer || !state.conferenceMode.active) {
+      return;
+    }
+    if (peer.connectionState === "failed" || peer.iceConnectionState === "failed") {
+      handleConferenceModeError(stringsForState().errors.voiceUpdate);
+      render();
+    }
+  };
+  peer.onconnectionstatechange = handleConnectionState;
+  peer.oniceconnectionstatechange = handleConnectionState;
+  peer.ondatachannel = (event) => {
+    attachConferenceModeDataChannelHandlers(event.channel);
+  };
+  peer.ontrack = () => {
+    // Conference mode renders transcript text only.
+  };
+}
+
+function attachConferenceModeDataChannelHandlers(channel: RTCDataChannel): void {
+  conferenceModeDataChannel = channel;
+  channel.onopen = flushConferenceModePendingTranslationRequests;
+  channel.onclose = () => {
+    if (conferenceModeDataChannel === channel) {
+      conferenceModeDataChannel = null;
+    }
+  };
+  channel.onmessage = (event) => {
+    void handleConferenceModeDataChannelMessage(event.data);
+  };
+}
+
+async function handleConferenceModeDataChannelMessage(data: unknown): Promise<void> {
+  const payload = await parseComposerRealtimeVoiceDataChannelPayload(data);
+  if (!payload) {
+    return;
+  }
+  if (isConferenceModeDataChannelError(payload)) {
+    const shouldRetry = isConferenceModeActiveResponseError(payload);
+    const retrySource = conferenceModeActiveTranslationSource;
+    conferenceModeTranslationInFlight = false;
+    conferenceModeActiveTranslationSource = "";
+    if (shouldRetry && retrySource) {
+      enqueueConferenceModeTranslationRequest(retrySource, { front: true });
+      scheduleConferenceModeTranslationFlush(900);
+    } else {
+      flushConferenceModePendingTranslationRequests();
+    }
+    return;
+  }
+  if (isConferenceModeResponseFinishedEvent(payload)) {
+    if (!conferenceModeTranslationInFlight) {
+      flushConferenceModePendingTranslationRequests();
+    }
+    return;
+  }
+  const transcript = extractComposerRealtimeDataChannelTranscript(payload);
+  if (!transcript) {
+    return;
+  }
+  conferenceModeDataChannelTranscriptsActive = true;
+  if (transcript.kind === "delta") {
+    applyConferenceModeTranscriptDelta(transcript.role, transcript.text);
+  } else {
+    applyConferenceModeTranscriptDone(transcript.role, transcript.text);
+  }
+  render();
+}
+
+function handleConferenceModeTranslationPayload(payload: Record<string, unknown>): void {
+  if (payload.type === "error") {
+    handleConferenceModeError(extractConferenceModeDataChannelErrorMessage(payload) || stringsForState().errors.voiceUpdate);
+    render();
+    return;
+  }
+
+  if (payload.type === "session.input_transcript.delta") {
+    state.conferenceMode.partialSourceText = `${state.conferenceMode.partialSourceText}${extractRealtimeInterpreterText(payload)}`;
+    conferenceModeDataChannelTranscriptsActive = true;
+    renderOrPatchConferenceModeTranscript();
+    return;
+  }
+
+  if (payload.type === "session.output_transcript.delta") {
+    state.conferenceMode.partialTranslationText = `${state.conferenceMode.partialTranslationText}${extractRealtimeInterpreterText(payload)}`;
+    conferenceModeDataChannelTranscriptsActive = true;
+    renderOrPatchConferenceModeTranscript();
+    return;
+  }
+
+  if (payload.type === "session.input_transcript.done") {
+    const text = extractRealtimeInterpreterText(payload).trim();
+    if (text) {
+      state.conferenceMode.partialSourceText = text;
+      conferenceModeDataChannelTranscriptsActive = true;
+    }
+    commitConferenceModePartialIfReady();
+    renderOrPatchConferenceModeTranscript();
+    return;
+  }
+
+  if (payload.type === "session.output_transcript.done") {
+    const text = extractRealtimeInterpreterText(payload).trim();
+    if (text) {
+      state.conferenceMode.partialTranslationText = text;
+      conferenceModeDataChannelTranscriptsActive = true;
+    }
+    commitConferenceModePartialIfReady({ force: true });
+    renderOrPatchConferenceModeTranscript();
+  }
+}
+
+async function startConferenceModeAudioInput(stream: MediaStream, threadId: string): Promise<void> {
+  cleanupConferenceModeAudioInput();
+  const audioGeneration = ++conferenceModeAudioGeneration;
+  conferenceModeAudioContext = new AudioContext();
+  await conferenceModeAudioContext.audioWorklet.addModule(chrome.runtime.getURL("realtime-audio-input-worklet.js"));
+  conferenceModeAudioSource = conferenceModeAudioContext.createMediaStreamSource(stream);
+  conferenceModeAudioWorkletNode = new AudioWorkletNode(conferenceModeAudioContext, "realtime-audio-input", {
+    numberOfInputs: 1,
+    numberOfOutputs: 1,
+    outputChannelCount: [1],
+  });
+  conferenceModeAudioWorkletNode.port.onmessage = (event: MessageEvent) => {
+    if (!state.conferenceMode.active || state.conferenceMode.threadId !== threadId) {
+      return;
+    }
+    const input = coerceRealtimeAudioSamples(event.data);
+    const sourceSampleRate = getRealtimeAudioInputSampleRate(event.data, conferenceModeAudioContext?.sampleRate ?? 48_000);
+    if (!input.length) {
+      return;
+    }
+    for (let index = 0; index < input.length; index += 1) {
+      conferenceModeAudioSamples.push(input[index] ?? 0);
+    }
+    const chunkSize = Math.max(1, Math.floor((sourceSampleRate * REALTIME_AUDIO_CHUNK_MS) / 1000));
+    while (conferenceModeAudioSamples.length >= chunkSize) {
+      const samples = conferenceModeAudioSamples.splice(0, chunkSize);
+      queueConferenceModeAudioFrame(threadId, samples, sourceSampleRate, audioGeneration);
+    }
+  };
+  conferenceModeAudioSource.connect(conferenceModeAudioWorkletNode);
+  conferenceModeAudioWorkletNode.connect(conferenceModeAudioContext.destination);
+  void conferenceModeAudioContext.resume().catch(() => undefined);
+}
+
+function cleanupConferenceModeAudioInput(): void {
+  conferenceModeAudioGeneration += 1;
+  conferenceModeAudioWorkletNode?.port.close();
+  conferenceModeAudioWorkletNode?.disconnect();
+  conferenceModeAudioWorkletNode = null;
+  conferenceModeAudioSource?.disconnect();
+  conferenceModeAudioSource = null;
+  if (conferenceModeAudioContext) {
+    void conferenceModeAudioContext.close().catch(() => undefined);
+    conferenceModeAudioContext = null;
+  }
+  conferenceModeAudioSamples = [];
+  conferenceModeAudioSendChain = Promise.resolve();
+}
+
+function queueConferenceModeAudioFrame(
+  threadId: string,
+  samples: number[],
+  sourceSampleRate: number,
+  audioGeneration: number,
+): void {
+  if (!threadId || !samples.length) {
+    return;
+  }
+  const targetSampleRate = 24_000;
+  const resampled = resampleMonoPcm16(samples, sourceSampleRate, targetSampleRate);
+  if (!resampled.length) {
+    return;
+  }
+  const data = encodePcm16Base64(resampled);
+  conferenceModeAudioSendChain = conferenceModeAudioSendChain
+    .then(async () => {
+      if (
+        audioGeneration !== conferenceModeAudioGeneration ||
+        !state.conferenceMode.active ||
+        state.conferenceMode.threadId !== threadId
+      ) {
+        return;
+      }
+      await chrome.runtime.sendMessage({
+        type: "dictation.transcription.append_audio",
+        threadId,
+        audio: {
+          data,
+          sampleRate: targetSampleRate,
+          numChannels: 1,
+          samplesPerChannel: resampled.length,
+        },
+      });
+    })
+    .catch((error) => {
+      if (
+        audioGeneration === conferenceModeAudioGeneration &&
+        state.conferenceMode.active &&
+        state.conferenceMode.threadId === threadId
+      ) {
+        handleConferenceModeError(toUserFacingVoiceStartError(error));
+        render();
+      }
+    });
+}
+
+function isConferenceModeVoiceEvent(event: SidepanelBridgeEvent): boolean {
+  if (state.conferenceMode.sessionId && event.sessionId === state.conferenceMode.sessionId) {
+    return true;
+  }
+  return Boolean(state.conferenceMode.threadId && event.threadId === state.conferenceMode.threadId);
+}
+
+function handleConferenceModeVoiceEvent(event: SidepanelBridgeEvent): void {
+  if (event.type === "voice.session.started") {
+    if (event.threadId) {
+      state.conferenceMode.threadId = event.threadId;
+    }
+    state.conferenceMode.viewActive = true;
+    state.conferenceMode.active = true;
+    state.conferenceMode.starting = false;
+    state.conferenceMode.error = "";
+    clearKnownChatgptRealtimeEndpointFailure();
+    return;
+  }
+  if (event.type === "voice.transcript.delta" && !conferenceModeDataChannelTranscriptsActive) {
+    applyConferenceModeTranscriptDelta(event.role ?? "user", event.delta ?? "");
+    return;
+  }
+  if (event.type === "voice.transcript.done" && !conferenceModeDataChannelTranscriptsActive) {
+    applyConferenceModeTranscriptDone(event.role ?? "user", event.text ?? "");
+    return;
+  }
+  if (event.type === "voice.error") {
+    handleConferenceModeError(toUserFacingVoiceStartError(new Error(event.message ?? stringsForState().errors.voiceUpdate)));
+    return;
+  }
+  if (event.type === "voice.session.stopped") {
+    void stopConferenceMode({ notifyBridge: false, preserveEntries: true, keepViewActive: true });
+  }
+}
+
+function applyConferenceModeTranscriptDelta(role: string | undefined, text: string): void {
+  const value = text.trim();
+  if (!value) {
+    return;
+  }
+  if (role === "assistant") {
+    state.conferenceMode.partialTranslationText = `${state.conferenceMode.partialTranslationText}${text}`;
+    return;
+  }
+  state.conferenceMode.partialSourceText = text;
+}
+
+function applyConferenceModeTranscriptDone(role: string | undefined, text: string): void {
+  const value = text.trim();
+  if (!value) {
+    return;
+  }
+  if (role === "assistant") {
+    const parsed = parseConferenceModeAssistantText(value);
+    appendConferenceModeTranscript(parsed.sourceText, parsed.translationText);
+    state.conferenceMode.partialTranslationText = "";
+    conferenceModeTranslationInFlight = false;
+    conferenceModeActiveTranslationSource = "";
+    flushConferenceModePendingTranslationRequests();
+    return;
+  }
+  const sourceText = appendConferenceModeTranscript(value, "");
+  requestConferenceModeTranslation(sourceText);
+  state.conferenceMode.partialSourceText = "";
+}
+
+function appendConferenceModeTranscript(sourceText: string, translationText: string): string {
+  state.conferenceMode.entries = mergeConferenceModeTranscriptEntry(
+    state.conferenceMode.entries,
+    {
+      sourceText,
+      translationText,
+      createdAt: Date.now(),
+    },
+    () => {
+      conferenceModeTranscriptCounter += 1;
+      return `conference-transcript-${conferenceModeTranscriptCounter}`;
+    },
+  ).slice(-80);
+  return state.conferenceMode.entries.at(-1)?.sourceText ?? sourceText;
+}
+
+function commitConferenceModePartialIfReady(options: { force?: boolean; allowSourceOnly?: boolean } = {}): void {
+  const sourceText = state.conferenceMode.partialSourceText.trim();
+  const translationText = state.conferenceMode.partialTranslationText.trim();
+  if (!translationText && !(options.allowSourceOnly && sourceText)) {
+    return;
+  }
+  if (!sourceText && !options.force) {
+    return;
+  }
+  appendConferenceModeTranscript(sourceText, translationText);
+  state.conferenceMode.partialSourceText = "";
+  state.conferenceMode.partialTranslationText = "";
+}
+
+function requestConferenceModeTranslation(sourceText: string): void {
+  const trimmedSourceText = sourceText.trim();
+  if (!trimmedSourceText) {
+    return;
+  }
+  const channel = conferenceModeDataChannel;
+  if (!channel || channel.readyState !== "open" || conferenceModeTranslationInFlight) {
+    enqueueConferenceModeTranslationRequest(trimmedSourceText);
+    return;
+  }
+  conferenceModeTranslationInFlight = true;
+  conferenceModeActiveTranslationSource = trimmedSourceText;
+  channel.send(JSON.stringify(createConferenceModeTranslationRequestEvent(trimmedSourceText)));
+}
+
+function flushConferenceModePendingTranslationRequests(): void {
+  if (conferenceModeTranslationInFlight) {
+    return;
+  }
+  const sourceText = conferenceModePendingTranslationRequests.shift();
+  if (sourceText) {
+    requestConferenceModeTranslation(sourceText);
+  }
+}
+
+function enqueueConferenceModeTranslationRequest(sourceText: string, options: { front?: boolean } = {}): void {
+  if (
+    sourceText === conferenceModeActiveTranslationSource ||
+    conferenceModePendingTranslationRequests.includes(sourceText)
+  ) {
+    return;
+  }
+  if (options.front) {
+    conferenceModePendingTranslationRequests.unshift(sourceText);
+  } else {
+    conferenceModePendingTranslationRequests.push(sourceText);
+  }
+}
+
+function isConferenceModeDataChannelError(payload: Record<string, unknown>): boolean {
+  return payload.type === "error" || payload.type === "response.error";
+}
+
+function isConferenceModeActiveResponseError(payload: Record<string, unknown>): boolean {
+  const message = extractConferenceModeDataChannelErrorMessage(payload).toLowerCase();
+  return message.includes("active response in progress") || message.includes("wait until the response is finished");
+}
+
+function extractConferenceModeDataChannelErrorMessage(payload: Record<string, unknown>): string {
+  const direct = typeof payload.message === "string" ? payload.message : "";
+  const error = payload.error;
+  if (error && typeof error === "object" && !Array.isArray(error)) {
+    const errorRecord = error as Record<string, unknown>;
+    return direct || (typeof errorRecord.message === "string" ? errorRecord.message : "");
+  }
+  return direct;
+}
+
+function isConferenceModeResponseFinishedEvent(payload: Record<string, unknown>): boolean {
+  return payload.type === "response.done" || payload.type === "response.completed" || payload.type === "response.cancelled";
+}
+
+function scheduleConferenceModeTranslationFlush(delayMs: number): void {
+  cancelConferenceModeTranslationRetry();
+  conferenceModeTranslationRetryTimer = window.setTimeout(() => {
+    conferenceModeTranslationRetryTimer = null;
+    flushConferenceModePendingTranslationRequests();
+  }, delayMs);
+}
+
+function cancelConferenceModeTranslationRetry(): void {
+  if (conferenceModeTranslationRetryTimer === null) {
+    return;
+  }
+  window.clearTimeout(conferenceModeTranslationRetryTimer);
+  conferenceModeTranslationRetryTimer = null;
+}
+
+function handleConferenceModeError(message: string): void {
+  rememberChatgptRealtimeEndpointFailure(message);
+  if (realtimeTranslationOwner === "conference") {
+    cleanupRealtimeInterpreterResources();
+    realtimeTranslationOwner = "interpreter";
+  }
+  cleanupConferenceModeResources(message);
+  state.conferenceMode.active = false;
+  state.conferenceMode.starting = false;
+  state.conferenceMode.stopping = false;
+  state.conferenceMode.error = message;
+  state.conferenceMode.threadId = "";
+  state.conferenceMode.sessionId = "";
+}
+
+function bindConferenceModeControls(): void {
+  root.querySelector<HTMLButtonElement>("#conference-mode-settings-toggle")?.addEventListener("click", () => {
+    state.realtimeInterpreter.settingsOpen = !state.realtimeInterpreter.settingsOpen;
+    render();
+  });
+  root.querySelector<HTMLButtonElement>("#conference-live-playback-toggle")?.addEventListener("click", () => {
+    if (state.conferenceMode.active || state.conferenceMode.starting) {
+      return;
+    }
+    state.realtimeInterpreter.livePlaybackEnabled = !state.realtimeInterpreter.livePlaybackEnabled;
+    state.conferenceMode.error = "";
+    render();
+  });
+  root.querySelector<HTMLButtonElement>("#conference-mode-start")?.addEventListener("click", () => {
+    void startConferenceMode();
+  });
+  root.querySelector<HTMLButtonElement>("#conference-mode-stop")?.addEventListener("click", () => {
+    void stopConferenceMode({ notifyBridge: true, preserveEntries: true, keepViewActive: true });
+  });
+  root.querySelector<HTMLButtonElement>("#conference-mode-clear")?.addEventListener("click", () => {
+    state.conferenceMode.entries = [];
+    state.conferenceMode.partialSourceText = "";
+    state.conferenceMode.partialTranslationText = "";
+    conferenceTranscriptStickToBottom = true;
+    render();
+  });
+}
+
+function bindRealtimeInterpreterControls(): void {
+  root.querySelector<HTMLButtonElement>("#realtime-interpreter-settings-toggle")?.addEventListener("click", () => {
+    state.realtimeInterpreter.settingsOpen = !state.realtimeInterpreter.settingsOpen;
+    render();
+  });
+  root.querySelector<HTMLSelectElement>("#realtime-interpreter-language")?.addEventListener("change", (event) => {
+    const select = event.currentTarget as HTMLSelectElement | null;
+    const value = select?.value.trim() ?? "";
+    updateRealtimeInterpreterTargetLanguage(value);
+  });
+  root.querySelectorAll<HTMLButtonElement>("[data-interpreter-source]").forEach((button) => {
+    button.addEventListener("click", () => {
+      if (state.realtimeInterpreter.active || state.realtimeInterpreter.starting) {
+        return;
+      }
+      const source = button.dataset.interpreterSource === "microphone" ? "microphone" : "display";
+      state.realtimeInterpreter.inputSource = source;
+      state.realtimeInterpreter.error = "";
+      render();
+      if (source === "microphone") {
+        void refreshRealtimeInterpreterMicrophones();
+      }
+    });
+  });
+  root.querySelector<HTMLSelectElement>("#realtime-interpreter-microphone")?.addEventListener("change", (event) => {
+    const select = event.currentTarget as HTMLSelectElement | null;
+    state.realtimeInterpreter.microphoneDeviceId = select?.value ?? "";
+    state.realtimeInterpreter.error = "";
+    render();
+  });
+  root.querySelector<HTMLButtonElement>("#realtime-interpreter-refresh-devices")?.addEventListener("click", () => {
+    void refreshRealtimeInterpreterMicrophones();
+  });
+  root.querySelector<HTMLInputElement>("#realtime-interpreter-output-volume")?.addEventListener("input", (event) => {
+    const input = event.currentTarget as HTMLInputElement | null;
+    const volume = clampRealtimeInterpreterOutputVolume(
+      Number(input?.value ?? DEFAULT_REALTIME_INTERPRETER_OUTPUT_VOLUME * 100) / 100,
+    );
+    state.realtimeInterpreter.outputVolume = volume;
+    applyRealtimeInterpreterOutputVolume();
+    const valueOutput = root.querySelector<HTMLOutputElement>("#realtime-interpreter-output-volume-value");
+    if (valueOutput) {
+      valueOutput.value = `${Math.round(volume * 100)}%`;
+      valueOutput.textContent = valueOutput.value;
+    }
+  });
+  root.querySelector<HTMLButtonElement>("#realtime-interpreter-start")?.addEventListener("click", () => {
+    void startRealtimeInterpreterMode();
+  });
+  root.querySelector<HTMLButtonElement>("#realtime-interpreter-stop")?.addEventListener("click", () => {
+    void stopRealtimeInterpreterMode({ preserveEntries: true, keepViewActive: true });
+  });
+  root.querySelector<HTMLButtonElement>("#realtime-interpreter-clear")?.addEventListener("click", () => {
+    state.realtimeInterpreter.entries = [];
+    state.realtimeInterpreter.partialSourceText = "";
+    state.realtimeInterpreter.partialTranslationText = "";
+    realtimeInterpreterTranscriptStickToBottom = true;
+    render();
+  });
+}
+
+async function openRealtimeInterpreterView(): Promise<void> {
+  state.appMenuOpen = false;
+  state.activeView = "interpreter";
+  state.realtimeInterpreter.viewActive = true;
+  state.realtimeInterpreter.settingsOpen = false;
+  render();
+  void refreshRealtimeInterpreterMicrophones({ quiet: true });
+}
+
+async function refreshRealtimeInterpreterMicrophones(options: { quiet?: boolean } = {}): Promise<void> {
+  if (!navigator.mediaDevices?.enumerateDevices) {
+    return;
+  }
+  if (!options.quiet) {
+    state.realtimeInterpreter.microphoneDevicesLoading = true;
+    render();
+  }
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const microphones = devices
+      .filter((device) => device.kind === "audioinput")
+      .map((device, index) => ({
+        deviceId: device.deviceId,
+        label: device.label || (isKoreanUiLocale() ? `마이크 ${index + 1}` : `Microphone ${index + 1}`),
+      }));
+    state.realtimeInterpreter.microphoneDevices = microphones;
+    if (
+      state.realtimeInterpreter.microphoneDeviceId &&
+      !microphones.some((device) => device.deviceId === state.realtimeInterpreter.microphoneDeviceId)
+    ) {
+      state.realtimeInterpreter.microphoneDeviceId = "";
+    }
+  } catch (error) {
+    if (!options.quiet) {
+      state.realtimeInterpreter.error = toUserFacingRuntimeError(error);
+    }
+  } finally {
+    state.realtimeInterpreter.microphoneDevicesLoading = false;
+    render();
+  }
+}
+
+function getRealtimeInterpreterApiKeyDescription(): string {
+  const apiKeysUrl = "https://platform.openai.com/api-keys";
+  const billingUrl = "https://platform.openai.com/settings/organization/billing/overview";
+  const pricingUrl = "https://openai.com/api/pricing/";
+  if (isKoreanUiLocale()) {
+    return [
+      "실시간 통역을 시작하려면 OpenAI API 키가 필요합니다. 사용 모델은 gpt-realtime-translate이며, 키는 로컬 브리지에 저장됩니다.",
+      "현재 공식 가격표 기준 gpt-realtime-translate는 오디오 길이로 과금되며 약 $0.034/min 입니다. 10분 약 $0.34, 1시간 약 $2.04 정도로 보되 실제 청구액은 OpenAI 가격표와 사용량을 기준으로 확인해 주세요.",
+      `API 키 발급: ${apiKeysUrl}`,
+      `결제/크레딧 설정: ${billingUrl}`,
+      `최신 가격표: ${pricingUrl}`,
+    ].join("\n");
+  }
+  return [
+    "Realtime interpreter requires an OpenAI API key. It uses gpt-realtime-translate, and the key stays in the local bridge.",
+    "Based on the current official pricing, gpt-realtime-translate is billed by audio duration at about $0.034/min. Treat 10 minutes as about $0.34 and 1 hour as about $2.04, then confirm actual billing on OpenAI pricing and usage pages.",
+    `Create an API key: ${apiKeysUrl}`,
+    `Billing and credits: ${billingUrl}`,
+    `Latest pricing: ${pricingUrl}`,
+  ].join("\n");
+}
+
+async function startRealtimeInterpreterMode(): Promise<void> {
+  if (state.realtimeInterpreter.active || state.realtimeInterpreter.starting) {
+    return;
+  }
+  realtimeTranslationOwner = "interpreter";
+  state.appMenuOpen = false;
+  state.activeView = "interpreter";
+  state.realtimeInterpreter.viewActive = true;
+  state.realtimeInterpreter.settingsOpen = false;
+
+  if (!state.accountStatus?.openAiApiKeyConfigured) {
+    render();
+    openNativeTextDialog("api-key", {
+      description: getRealtimeInterpreterApiKeyDescription(),
+      afterSubmit: { kind: "retry-realtime-interpreter" },
+    });
+    return;
+  }
+
+  if (!window.RTCPeerConnection) {
+    state.realtimeInterpreter.error = isKoreanUiLocale()
+      ? "이 브라우저에서는 실시간 통역 WebRTC 연결을 사용할 수 없습니다."
+      : "This browser does not support realtime interpreter WebRTC.";
+    render();
+    return;
+  }
+  if (state.voiceEnabled || state.voiceInputActive || state.conferenceMode.active || state.conferenceMode.starting) {
+    state.realtimeInterpreter.error = isKoreanUiLocale()
+      ? "다른 음성 세션이 실행 중입니다. 먼저 중지한 뒤 통역을 시작해 주세요."
+      : "Another voice session is active. Stop it before starting realtime interpreter.";
+    render();
+    return;
+  }
+
+  state.realtimeInterpreter = {
+    ...state.realtimeInterpreter,
+    viewActive: true,
+    active: false,
+    starting: true,
+    stopping: false,
+    settingsOpen: false,
+    error: "",
+    sourceLabel: "",
+    partialSourceText: "",
+    partialTranslationText: "",
+  };
+  realtimeInterpreterTranscriptStickToBottom = true;
+  render();
+
+  let pendingStream: MediaStream | null = null;
+  const startGeneration = ++realtimeInterpreterStartGeneration;
+  try {
+    const { stream, sourceLabel } = await requestRealtimeInterpreterAudioStream();
+    pendingStream = stream;
+    if (!isCurrentRealtimeInterpreterStart(startGeneration)) {
+      closeStaleRealtimeInterpreterStart(null, pendingStream);
+      pendingStream = null;
+      return;
+    }
+    realtimeInterpreterStream = stream;
+    state.realtimeInterpreter.sourceLabel = sourceLabel;
+
+    const { peer, sdp } = await createRealtimeInterpreterWebRtcOffer(stream);
+    realtimeInterpreterPeer = peer;
+    if (!isCurrentRealtimeInterpreterStart(startGeneration)) {
+      closeStaleRealtimeInterpreterStart(peer, pendingStream);
+      pendingStream = null;
+      return;
+    }
+
+    const secret = await sendRuntimeMessage<{
+      value?: string;
+      expiresAt?: number | null;
+      sessionId?: string | null;
+      model?: string;
+      targetLanguage?: string;
+      error?: string;
+    }>({
+      type: "translation.client_secret.create",
+      targetLanguage: state.realtimeInterpreter.targetLanguage,
+      ttlSeconds: 600,
+    });
+    if (!isCurrentRealtimeInterpreterStart(startGeneration)) {
+      closeStaleRealtimeInterpreterStart(peer, pendingStream);
+      pendingStream = null;
+      return;
+    }
+    if (secret.error || !secret.value) {
+      throw new Error(secret.error || "Realtime translation client secret was not created.");
+    }
+
+    const answer = await fetch("https://api.openai.com/v1/realtime/translations", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${secret.value}`,
+        "Content-Type": "application/sdp",
+      },
+      body: sdp,
+    });
+    if (!answer.ok) {
+      const detail = await answer.text().catch(() => "");
+      throw new Error(
+        [`Realtime translation call failed with ${answer.status} ${answer.statusText}`.trim(), detail.trim()]
+          .filter(Boolean)
+        .join(": "),
+      );
+    }
+    if (!isCurrentRealtimeInterpreterStart(startGeneration)) {
+      closeStaleRealtimeInterpreterStart(peer, pendingStream);
+      pendingStream = null;
+      return;
+    }
+    const answerSdp = await answer.text();
+    if (!isCurrentRealtimeInterpreterStart(startGeneration)) {
+      closeStaleRealtimeInterpreterStart(peer, pendingStream);
+      pendingStream = null;
+      return;
+    }
+    await peer.setRemoteDescription({ type: "answer", sdp: answerSdp });
+    if (!isCurrentRealtimeInterpreterStart(startGeneration)) {
+      closeStaleRealtimeInterpreterStart(peer, pendingStream);
+      pendingStream = null;
+      return;
+    }
+
+    state.realtimeInterpreter.active = true;
+    state.realtimeInterpreter.starting = false;
+    state.realtimeInterpreter.error = "";
+    startComposerVoiceWaveform(stream);
+    pendingStream = null;
+    render();
+  } catch (error) {
+    if (!isCurrentRealtimeInterpreterStart(startGeneration)) {
+      closeStaleRealtimeInterpreterStart(null, pendingStream);
+      pendingStream = null;
+      return;
+    }
+    pendingStream?.getTracks().forEach((track) => track.stop());
+    cleanupRealtimeInterpreterResources();
+    state.realtimeInterpreter = {
+      ...state.realtimeInterpreter,
+      viewActive: true,
+      active: false,
+      starting: false,
+      stopping: false,
+      settingsOpen: false,
+      error: toUserFacingRuntimeError(error),
+      sourceLabel: "",
+      partialSourceText: "",
+      partialTranslationText: "",
+    };
+    render();
+  }
+}
+
+function isCurrentRealtimeInterpreterStart(generation: number): boolean {
+  return generation === realtimeInterpreterStartGeneration && state.realtimeInterpreter.starting;
+}
+
+function closeStaleRealtimeInterpreterStart(peer: RTCPeerConnection | null, stream: MediaStream | null): void {
+  if (realtimeInterpreterPeer === peer) {
+    realtimeInterpreterPeer = null;
+  }
+  if (realtimeInterpreterStream === stream) {
+    realtimeInterpreterStream = null;
+  }
+  if (peer) {
+    peer.ontrack = null;
+    peer.onconnectionstatechange = null;
+    peer.oniceconnectionstatechange = null;
+    peer.close();
+  }
+  stream?.getTracks().forEach((track) => track.stop());
+  cleanupComposerVoiceWaveform();
+}
+
+async function stopRealtimeInterpreterMode(options: {
+  preserveEntries: boolean;
+  keepViewActive: boolean;
+}): Promise<void> {
+  const wasActive = Boolean(
+    state.realtimeInterpreter.active ||
+      state.realtimeInterpreter.starting ||
+      state.realtimeInterpreter.stopping ||
+      realtimeInterpreterPeer,
+  );
+  realtimeInterpreterStartGeneration += 1;
+  if (options.preserveEntries) {
+    commitRealtimeInterpreterPartialIfReady({ force: true, allowSourceOnly: true });
+  }
+  state.realtimeInterpreter.stopping = wasActive;
+  state.realtimeInterpreter.active = false;
+  state.realtimeInterpreter.starting = false;
+  render();
+  cleanupRealtimeInterpreterResources();
+  realtimeTranslationOwner = "interpreter";
+  state.realtimeInterpreter = {
+    ...state.realtimeInterpreter,
+    viewActive: options.keepViewActive,
+    active: false,
+    starting: false,
+    stopping: false,
+    settingsOpen: false,
+    error: "",
+    sourceLabel: "",
+    entries: options.preserveEntries ? state.realtimeInterpreter.entries : [],
+    partialSourceText: "",
+    partialTranslationText: "",
+  };
+  render();
+}
+
+function cleanupRealtimeInterpreterResources(): void {
+  realtimeInterpreterStream?.getTracks().forEach((track) => track.stop());
+  realtimeInterpreterStream = null;
+  if (realtimeInterpreterDataChannel) {
+    realtimeInterpreterDataChannel.onmessage = null;
+    realtimeInterpreterDataChannel.onopen = null;
+    realtimeInterpreterDataChannel.onclose = null;
+    realtimeInterpreterDataChannel.onerror = null;
+    if (
+      realtimeInterpreterDataChannel.readyState === "open" ||
+      realtimeInterpreterDataChannel.readyState === "connecting"
+    ) {
+      realtimeInterpreterDataChannel.close();
+    }
+  }
+  realtimeInterpreterDataChannel = null;
+  if (realtimeInterpreterPeer) {
+    realtimeInterpreterPeer.ontrack = null;
+    realtimeInterpreterPeer.onconnectionstatechange = null;
+    realtimeInterpreterPeer.oniceconnectionstatechange = null;
+    realtimeInterpreterPeer.close();
+  }
+  realtimeInterpreterPeer = null;
+  if (realtimeInterpreterAudio) {
+    realtimeInterpreterAudio.pause();
+    realtimeInterpreterAudio.srcObject = null;
+    realtimeInterpreterAudio = null;
+  }
+  cleanupComposerVoiceWaveform();
+}
+
+async function requestRealtimeInterpreterAudioStream(): Promise<RealtimeInterpreterAudioStreamResult> {
+  if (state.realtimeInterpreter.inputSource === "microphone") {
+    const stream = await requestRealtimeInterpreterMicrophoneStream();
+    await refreshRealtimeInterpreterMicrophones({ quiet: true });
+    return {
+      stream,
+      sourceLabel: getRealtimeInterpreterMicrophoneLabel(stream),
+    };
+  }
+  return requestRealtimeInterpreterDisplayAudioStream({
+    suppressLocalAudioPlayback: true,
+  });
+}
+
+async function requestRealtimeInterpreterDisplayAudioStream(
+  options: ComputerAudioCaptureOptions = {},
+): Promise<RealtimeInterpreterAudioStreamResult> {
+  const stream = await requestComputerAudioStreamForDictation({
+    suppressLocalAudioPlayback: Boolean(options.suppressLocalAudioPlayback),
+  });
+  const displaySurface = getDisplaySurfaceFromStream(stream);
+  if (options.suppressLocalAudioPlayback && shouldSuppressLocalAudioPlaybackForDisplaySurface(displaySurface)) {
+    await suppressBrowserTabLocalAudioPlayback(stream);
+  }
+  return {
+    stream,
+    sourceLabel: getDisplaySurfaceLabel(displaySurface),
+  };
+}
+
+function shouldSuppressLocalAudioPlaybackForDisplaySurface(displaySurface: string): boolean {
+  return displaySurface === "browser";
+}
+
+async function suppressBrowserTabLocalAudioPlayback(stream: MediaStream): Promise<void> {
+  const audioTracks = stream.getAudioTracks().filter((track) => track.readyState === "live");
+  await Promise.all(
+    audioTracks.map((track) =>
+      track
+        .applyConstraints({
+          suppressLocalAudioPlayback: true,
+        } as ExtendedDisplayAudioConstraints)
+        .catch((error) => {
+          void chrome.runtime
+            .sendMessage({
+              type: "diagnostics.log.write",
+              event: "realtime_interpreter.tab_audio_suppression_failed",
+              details: {
+                label: track.label,
+                settings: track.getSettings(),
+                error: toErrorMessage(error),
+              },
+            })
+            .catch(() => undefined);
+        }),
+    ),
+  );
+}
+
+async function requestRealtimeInterpreterMicrophoneStream(): Promise<MediaStream> {
+  if (!navigator.mediaDevices?.getUserMedia) {
+    throw new Error(stringsForState().errors.voiceMicrophoneUnavailable);
+  }
+  const constraints: MediaStreamConstraints = {
+    audio: createRealtimeInterpreterMicrophoneAudioConstraints(),
+  };
+  return navigator.mediaDevices.getUserMedia(constraints);
+}
+
+function createRealtimeInterpreterMicrophoneAudioConstraints(): MediaTrackConstraints {
+  const deviceId = state.realtimeInterpreter.microphoneDeviceId.trim();
+  return {
+    echoCancellation: true,
+    noiseSuppression: true,
+    autoGainControl: true,
+    ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
+  };
+}
+
+function getRealtimeInterpreterMicrophoneLabel(stream: MediaStream): string {
+  const trackLabel = stream.getAudioTracks()[0]?.label.trim();
+  if (trackLabel) {
+    return trackLabel;
+  }
+  const selectedDevice = state.realtimeInterpreter.microphoneDevices.find(
+    (device) => device.deviceId === state.realtimeInterpreter.microphoneDeviceId,
+  );
+  return selectedDevice?.label || (isKoreanUiLocale() ? "마이크" : "Microphone");
+}
+
+async function createRealtimeInterpreterWebRtcOffer(
+  stream: MediaStream,
+  options: { playTranslatedAudio?: boolean } = {},
+): Promise<{ peer: RTCPeerConnection; sdp: string }> {
+  const peer = new RTCPeerConnection();
+  attachRealtimeInterpreterPeerHandlers(peer, { playTranslatedAudio: options.playTranslatedAudio ?? true });
+  const audioTrack = stream.getAudioTracks()[0];
+  if (!audioTrack) {
+    peer.close();
+    throw new Error(getComputerAudioCaptureNoAudioMessage());
+  }
+  peer.addTrack(audioTrack, stream);
+  attachRealtimeInterpreterDataChannelHandlers(peer.createDataChannel("oai-events"));
+  const offer = await peer.createOffer();
+  await peer.setLocalDescription(offer);
+  await waitForIceGatheringComplete(peer, 3_000);
+  const sdp = peer.localDescription?.sdp ?? offer.sdp ?? "";
+  if (!sdp.trim()) {
+    peer.close();
+    throw new Error(stringsForState().errors.voiceUpdate);
+  }
+  return { peer, sdp };
+}
+
+function attachRealtimeInterpreterPeerHandlers(
+  peer: RTCPeerConnection,
+  options: { playTranslatedAudio: boolean },
+): void {
+  const handleConnectionState = () => {
+    if (realtimeInterpreterPeer !== peer) {
+      return;
+    }
+    const ownerActive =
+      realtimeTranslationOwner === "conference" ? state.conferenceMode.active : state.realtimeInterpreter.active;
+    if (!ownerActive) {
+      return;
+    }
+    if (peer.connectionState === "failed" || peer.iceConnectionState === "failed") {
+      if (realtimeTranslationOwner === "conference") {
+        handleConferenceModeError(stringsForState().errors.voiceUpdate);
+      } else {
+        state.realtimeInterpreter.error = stringsForState().errors.voiceUpdate;
+        state.realtimeInterpreter.active = false;
+        cleanupRealtimeInterpreterResources();
+      }
+      render();
+    }
+  };
+  peer.onconnectionstatechange = handleConnectionState;
+  peer.oniceconnectionstatechange = handleConnectionState;
+  peer.ondatachannel = (event) => {
+    attachRealtimeInterpreterDataChannelHandlers(event.channel);
+  };
+  peer.ontrack = (event) => {
+    if (!options.playTranslatedAudio) {
+      return;
+    }
+    const stream = event.streams[0] ?? new MediaStream([event.track]);
+    if (!stream) {
+      return;
+    }
+    realtimeInterpreterAudio?.pause();
+    realtimeInterpreterAudio = new Audio();
+    realtimeInterpreterAudio.autoplay = true;
+    realtimeInterpreterAudio.muted = false;
+    applyRealtimeInterpreterOutputVolume();
+    realtimeInterpreterAudio.setAttribute("playsinline", "true");
+    realtimeInterpreterAudio.srcObject = stream;
+    void realtimeInterpreterAudio.play().catch(() => undefined);
+  };
+}
+
+function attachRealtimeInterpreterDataChannelHandlers(channel: RTCDataChannel): void {
+  realtimeInterpreterDataChannel = channel;
+  channel.onclose = () => {
+    if (realtimeInterpreterDataChannel === channel) {
+      realtimeInterpreterDataChannel = null;
+    }
+  };
+  channel.onmessage = (event) => {
+    void handleRealtimeInterpreterDataChannelMessage(event.data);
+  };
+}
+
+async function handleRealtimeInterpreterDataChannelMessage(data: unknown): Promise<void> {
+  const payload = await parseComposerRealtimeVoiceDataChannelPayload(data);
+  if (!payload) {
+    return;
+  }
+  if (realtimeTranslationOwner === "conference") {
+    handleConferenceModeTranslationPayload(payload);
+    return;
+  }
+  if (payload.type === "error") {
+    state.realtimeInterpreter.error = extractConferenceModeDataChannelErrorMessage(payload) || stringsForState().errors.voiceUpdate;
+    render();
+    return;
+  }
+  if (payload.type === "session.input_transcript.delta") {
+    state.realtimeInterpreter.partialSourceText = `${state.realtimeInterpreter.partialSourceText}${extractRealtimeInterpreterText(payload)}`;
+    renderOrPatchRealtimeInterpreterTranscript();
+    return;
+  }
+  if (payload.type === "session.output_transcript.delta") {
+    state.realtimeInterpreter.partialTranslationText = `${state.realtimeInterpreter.partialTranslationText}${extractRealtimeInterpreterText(payload)}`;
+    renderOrPatchRealtimeInterpreterTranscript();
+    return;
+  }
+  if (payload.type === "session.input_transcript.done") {
+    const text = extractRealtimeInterpreterText(payload).trim();
+    if (text) {
+      state.realtimeInterpreter.partialSourceText = text;
+    }
+    commitRealtimeInterpreterPartialIfReady();
+    renderOrPatchRealtimeInterpreterTranscript();
+    return;
+  }
+  if (payload.type === "session.output_transcript.done") {
+    const text = extractRealtimeInterpreterText(payload).trim();
+    if (text) {
+      state.realtimeInterpreter.partialTranslationText = text;
+    }
+    commitRealtimeInterpreterPartialIfReady({ force: true });
+    renderOrPatchRealtimeInterpreterTranscript();
+  }
+}
+
+function extractRealtimeInterpreterText(payload: Record<string, unknown>): string {
+  for (const key of ["delta", "transcript", "text"]) {
+    const value = payload[key];
+    if (typeof value === "string") {
+      return value;
+    }
+  }
+  return "";
+}
+
+function commitRealtimeInterpreterPartialIfReady(options: { force?: boolean; allowSourceOnly?: boolean } = {}): void {
+  const sourceText = state.realtimeInterpreter.partialSourceText.trim();
+  const translationText = state.realtimeInterpreter.partialTranslationText.trim();
+  if (!translationText && !(options.allowSourceOnly && sourceText)) {
+    return;
+  }
+  if (!sourceText && !options.force) {
+    return;
+  }
+  realtimeInterpreterEntryCounter += 1;
+  state.realtimeInterpreter.entries = [
+    ...state.realtimeInterpreter.entries,
+    {
+      id: `realtime-interpreter-entry-${realtimeInterpreterEntryCounter}`,
+      sourceText,
+      translationText,
+      createdAt: Date.now(),
+    },
+  ].slice(-120);
+  state.realtimeInterpreter.partialSourceText = "";
+  state.realtimeInterpreter.partialTranslationText = "";
+}
+
+async function startComposerRealtimeVoiceInput(options: { target?: ComposerVoiceInputTarget } = {}): Promise<void> {
+  if (state.voiceEnabled || state.pendingAction === "voice") {
+    return;
+  }
+  if (state.conferenceMode.active || state.conferenceMode.starting) {
+    state.initError = getConferenceModeBusyMessage();
+    render();
+    return;
+  }
+
+  state.initError = "";
+  composerVoiceInputTarget = options.target ?? "composer";
+  resetComposerVoiceInputTranscript();
+  render();
+  let pendingStream: MediaStream | null = null;
+
+  try {
+    if (!state.accountStatus?.codexAuthenticated) {
+      throw new Error(getRealtimeVoiceSignInRequiredMessage());
+    }
+    const knownRealtimeFailureReason = getKnownChatgptRealtimeEndpointFailureReason();
+    if (knownRealtimeFailureReason) {
+      const authResult = await handleRealtimeApiKeyRequirement({
+        source: "dictation",
+        target: composerVoiceInputTarget,
+        reason: knownRealtimeFailureReason,
+      });
+      if (authResult === "retry") {
+        await startComposerRealtimeVoiceInput(options);
+      }
+      return;
+    }
+    state.actionStatus = getComputerAudioCaptureRequestStatus();
+    render();
+    const stream = await requestComputerAudioStreamForDictation();
+    pendingStream = stream;
+    state.voiceInputActive = true;
+    state.actionStatus = "";
+    composerVoiceInputPhase = "starting";
+    composerVoiceInputRealtimeSessionId = createComposerRealtimeDictationSessionId();
+    composerVoiceInputRealtimeThreadId = null;
+    composerVoiceInputRealtimeStarted = false;
+    resetComposerRealtimeAudioResponseTracking();
+    cancelPendingComposerRealtimeVoiceInputStarted();
+    render();
+
+    if (shouldUseComposerRealtimeWebRtcDictation()) {
+      if (!(await startComposerRealtimeVoiceInputWithWebRtc(stream))) {
+        pendingStream?.getTracks().forEach((track) => track.stop());
+        pendingStream = null;
+        return;
+      }
+      startComposerVoiceInputListening(stream);
+      pendingStream = null;
+      return;
+    }
+
+    const authResult = await handleRealtimeApiKeyRequirement({
+      source: "dictation",
+      target: composerVoiceInputTarget,
+    });
+    if (authResult === "handled") {
+      cleanupComposerRealtimeVoiceInputResources();
+      state.voiceInputActive = false;
+      composerVoiceInputPhase = "idle";
+      cleanupComposerVoiceWaveform();
+      render();
+      return;
+    }
+    if (authResult === "retry") {
+      cleanupComposerRealtimeVoiceInputResources();
+      state.voiceInputActive = false;
+      composerVoiceInputPhase = "idle";
+      cleanupComposerVoiceWaveform();
+      await startComposerRealtimeVoiceInput(options);
+      return;
+    }
+
+    const result = await sendRuntimeMessageWithConfirmation<{
+      status?: string;
+      threadId?: string;
+      sessionId?: string;
+      error?: string;
+      errorCode?: string;
+      cancelled?: boolean;
+    }>({
+      type: "dictation.transcription.start",
+      confirmed: true,
+      outputModality: "text",
+      sessionId: composerVoiceInputRealtimeSessionId,
+      prompt: getComposerRealtimeDictationPrompt(),
+    });
+    if (isCancelledResult(result)) {
+      cleanupComposerRealtimeVoiceInputResources();
+      state.voiceInputActive = false;
+      composerVoiceInputPhase = "idle";
+      cleanupComposerVoiceWaveform();
+      render();
+      return;
+    }
+    if (result.status === "error" || result.error) {
+      if (result.errorCode === "requires-api-key") {
+        throw new Error(result.error || getRealtimeApiKeyRequiredMessage("dictation", result.error));
+      }
+      throw new Error(result.error || stringsForState().errors.voiceUpdate);
+    }
+    if (result.threadId) {
+      composerVoiceInputRealtimeThreadId = result.threadId;
+    }
+    if (result.status === "active") {
+      composerVoiceInputRealtimeStarted = true;
+    } else {
+      await waitForComposerRealtimeVoiceInputStarted(result.threadId);
+    }
+
+    const threadId = composerVoiceInputRealtimeThreadId ?? result.threadId;
+    if (!threadId) {
+      throw new Error(stringsForState().errors.voiceUpdate);
+    }
+    composerVoiceInputRealtimeThreadId = threadId;
+    await startComposerRealtimeAudioInput(stream, threadId);
+    startComposerVoiceInputListening(stream);
+    pendingStream = null;
+  } catch (error) {
+    const target = composerVoiceInputTarget;
+    const message = toErrorMessage(error);
+    rememberChatgptRealtimeEndpointFailure(message);
+    const threadId = cleanupComposerRealtimeVoiceInputResources();
+    state.voiceInputActive = false;
+    state.actionStatus = "";
+    composerVoiceInputTarget = "composer";
+    composerVoiceInputPhase = "idle";
+    resetComposerVoiceInputTranscript();
+    cleanupComposerVoiceWaveform();
+    pendingStream?.getTracks().forEach((track) => track.stop());
+    if (threadId) {
+      void stopComposerRealtimeVoiceInputSession(threadId);
+    }
+    if (isRealtimeVoiceApiKeyRequired(message)) {
+      const authResult = await handleRealtimeApiKeyRequirement({
+        source: "dictation",
+        target,
+        reason: message,
+      });
+      if (authResult === "retry") {
+        await startComposerRealtimeVoiceInput({ target });
+      }
+      return;
+    }
+    state.initError = toUserFacingVoiceStartError(error);
+    render();
+  }
+}
+
+async function startComposerRealtimeVoiceInputWithWebRtc(stream: MediaStream): Promise<boolean> {
+  const { peer, sdp } = await createComposerRealtimeVoiceWebRtcOffer(stream);
+  composerVoiceInputRealtimePeer = peer;
+  const startedPromise = waitForComposerRealtimeVoiceInputStarted(undefined);
+  const answerPromise = waitForRealtimeVoiceAnswer();
+  void startedPromise.catch(() => undefined);
+  void answerPromise.catch(() => undefined);
+
+  const result = await sendRuntimeMessageWithConfirmation<{
+    status?: string;
+    threadId?: string;
+    sessionId?: string;
+    error?: string;
+    errorCode?: string;
+    cancelled?: boolean;
+  }>({
+    type: "dictation.transcription.start",
+    confirmed: true,
+    sdp,
+    outputModality: "text",
+    sessionId: composerVoiceInputRealtimeSessionId,
+    prompt: getComposerRealtimeDictationPrompt(),
+  });
+
+  if (isCancelledResult(result)) {
+    cleanupComposerRealtimeVoiceInputResources();
+    state.voiceInputActive = false;
+    composerVoiceInputPhase = "idle";
+    cleanupComposerVoiceWaveform();
+    render();
+    return false;
+  }
+  if (result.status === "error" || result.error) {
+    if (result.errorCode === "requires-api-key") {
+      throw new Error(result.error || getRealtimeApiKeyRequiredMessage("dictation", result.error));
+    }
+    throw new Error(result.error || stringsForState().errors.voiceUpdate);
+  }
+  if (result.threadId) {
+    composerVoiceInputRealtimeThreadId = result.threadId;
+  }
+
+  const answerSdp = await answerPromise;
+  if (composerVoiceInputRealtimePeer === peer) {
+    await peer.setRemoteDescription({ type: "answer", sdp: answerSdp });
+  }
+
+  if (result.status === "active") {
+    composerVoiceInputRealtimeStarted = true;
+    completeComposerRealtimeVoiceInputStarted(result.threadId);
+    return true;
+  }
+
+  await startedPromise;
+  return true;
+}
+
+async function requestComputerAudioStreamForDictation(options: ComputerAudioCaptureOptions = {}): Promise<MediaStream> {
+  if (!navigator.mediaDevices?.getDisplayMedia) {
+    throw new Error(getComputerAudioCaptureUnsupportedMessage());
+  }
+
+  const displayMediaOptions = options.suppressLocalAudioPlayback
+    ? createComputerAudioDisplayMediaOptions(options)
+    : createComputerAudioDisplayMediaOptions();
+  const stream = await navigator.mediaDevices.getDisplayMedia(displayMediaOptions);
+  logComputerAudioCaptureDiagnostics(stream, "selected");
+
+  if (!stream.getAudioTracks().some((track) => track.readyState === "live")) {
+    const displaySurface = getDisplaySurfaceFromStream(stream);
+    stream.getTracks().forEach((track) => track.stop());
+    const fallbackStream = await tryRequestDesktopCaptureAudioStreamForDictation(displaySurface);
+    if (fallbackStream) {
+      return fallbackStream;
+    }
+    throw new Error(getComputerAudioCaptureNoAudioMessage(displaySurface));
+  }
+
+  return prepareComputerAudioStreamForDictation(stream);
+}
+
+async function tryRequestDesktopCaptureAudioStreamForDictation(displaySurface: string): Promise<MediaStream | null> {
+  try {
+    return await requestDesktopCaptureAudioStreamForDictation(displaySurface);
+  } catch (error) {
+    void chrome.runtime
+      .sendMessage({
+        type: "diagnostics.log.write",
+        event: "dictation.desktop_capture_audio.fallback_failed",
+        details: {
+          displaySurface,
+          error: toErrorMessage(error),
+        },
+      })
+      .catch(() => undefined);
+    return null;
+  }
+}
+
+async function requestDesktopCaptureAudioStreamForDictation(displaySurface: string): Promise<MediaStream> {
+  if (!chrome.desktopCapture?.chooseDesktopMedia || !navigator.mediaDevices?.getUserMedia) {
+    throw new Error(getComputerAudioCaptureUnsupportedMessage());
+  }
+
+  const { streamId, canRequestAudioTrack } = await chooseDesktopCaptureAudioSource();
+  if (!canRequestAudioTrack) {
+    throw new Error(getComputerAudioCaptureNoAudioMessage(displaySurface));
+  }
+
+  const stream = await navigator.mediaDevices.getUserMedia(createDesktopCaptureMediaConstraints(streamId));
+  logComputerAudioCaptureDiagnostics(stream, "desktop-fallback");
+  if (!stream.getAudioTracks().some((track) => track.readyState === "live")) {
+    stream.getTracks().forEach((track) => track.stop());
+    throw new Error(getComputerAudioCaptureNoAudioMessage(getDisplaySurfaceFromStream(stream) || displaySurface));
+  }
+  return prepareComputerAudioStreamForDictation(stream, getDisplaySurfaceFromStream(stream) || displaySurface);
+}
+
+function chooseDesktopCaptureAudioSource(): Promise<{
+  streamId: string;
+  canRequestAudioTrack: boolean;
+}> {
+  return new Promise((resolve, reject) => {
+    chrome.desktopCapture.chooseDesktopMedia(["screen", "window", "tab", "audio"], (streamId, options) => {
+      const runtimeError = chrome.runtime.lastError;
+      if (runtimeError) {
+        reject(new Error(runtimeError.message || getComputerAudioCaptureUnsupportedMessage()));
+        return;
+      }
+      if (!streamId) {
+        reject(new Error(getComputerAudioCaptureCancelledMessage()));
+        return;
+      }
+      resolve({
+        streamId,
+        canRequestAudioTrack: Boolean(options?.canRequestAudioTrack),
+      });
+    });
+  });
+}
+
+function createDesktopCaptureMediaConstraints(streamId: string): MediaStreamConstraints {
+  return {
+    audio: {
+      mandatory: {
+        chromeMediaSource: "desktop",
+        chromeMediaSourceId: streamId,
+      },
+    },
+    video: {
+      mandatory: {
+        chromeMediaSource: "desktop",
+        chromeMediaSourceId: streamId,
+      },
+    },
+  } as unknown as MediaStreamConstraints;
+}
+
+function prepareComputerAudioStreamForDictation(
+  stream: MediaStream,
+  displaySurface = getDisplaySurfaceFromStream(stream),
+): MediaStream {
+  if (shouldBypassComputerAudioBoost(stream)) {
+    return stream;
+  }
+
+  const gain = getComputerAudioCaptureGain(displaySurface);
+  if (gain <= 1) {
+    return stream;
+  }
+
+  try {
+    return createBoostedComputerAudioStream(stream, gain);
+  } catch (error) {
+    void chrome.runtime
+      .sendMessage({
+        type: "diagnostics.log.write",
+        event: "dictation.display_audio.boost_failed",
+        details: { error: toErrorMessage(error), displaySurface },
+      })
+      .catch(() => undefined);
+    return stream;
+  }
+}
+
+function shouldBypassComputerAudioBoost(stream: MediaStream): boolean {
+  const audioTrack = stream.getAudioTracks().find((track) => track.readyState === "live");
+  if (!audioTrack) {
+    return false;
+  }
+
+  const settings = audioTrack.getSettings();
+  const label = audioTrack.label.toLowerCase();
+  const deviceId = typeof settings.deviceId === "string" ? settings.deviceId.toLowerCase() : "";
+  const isSystemLoopbackAudio = label.includes("system audio") || label.includes("loopback") || deviceId === "loopback";
+  if (!isSystemLoopbackAudio) {
+    return false;
+  }
+
+  void chrome.runtime
+    .sendMessage({
+      type: "diagnostics.log.write",
+      event: "dictation.display_audio.boost_skipped",
+      details: {
+        reason: "system-loopback-direct",
+        label: audioTrack.label,
+        deviceId,
+        settings,
+      },
+    })
+    .catch(() => undefined);
+  return true;
+}
+
+function getComputerAudioCaptureGain(displaySurface: string): number {
+  switch (displaySurface) {
+    case "monitor":
+    case "window":
+      return COMPUTER_AUDIO_CAPTURE_BOOST_GAIN;
+    default:
+      return 1;
+  }
+}
+
+function createBoostedComputerAudioStream(stream: MediaStream, gain: number): MediaStream {
+  const audioTrack = stream.getAudioTracks().find((track) => track.readyState === "live");
+  if (!audioTrack) {
+    return stream;
+  }
+
+  cleanupComposerVoiceInputAudioBoost();
+  const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+  composerVoiceInputAudioBoostContext = new AudioContextCtor();
+  composerVoiceInputRawCaptureStream = stream;
+  const sourceStream = new MediaStream([audioTrack]);
+  composerVoiceInputAudioBoostSource = composerVoiceInputAudioBoostContext.createMediaStreamSource(sourceStream);
+  const gainNode = composerVoiceInputAudioBoostContext.createGain();
+  gainNode.gain.value = gain;
+  composerVoiceInputAudioBoostGain = gainNode;
+  composerVoiceInputAudioBoostCompressor = composerVoiceInputAudioBoostContext.createDynamicsCompressor();
+  composerVoiceInputAudioBoostCompressor.threshold.value = -18;
+  composerVoiceInputAudioBoostCompressor.knee.value = 18;
+  composerVoiceInputAudioBoostCompressor.ratio.value = 8;
+  composerVoiceInputAudioBoostCompressor.attack.value = 0.003;
+  composerVoiceInputAudioBoostCompressor.release.value = 0.18;
+  const destination = composerVoiceInputAudioBoostContext.createMediaStreamDestination();
+  composerVoiceInputAudioBoostDestination = destination;
+  composerVoiceInputAudioBoostSource
+    .connect(gainNode)
+    .connect(composerVoiceInputAudioBoostCompressor)
+    .connect(destination);
+  void composerVoiceInputAudioBoostContext.resume().catch(() => undefined);
+
+  const boostedAudioTrack = destination.stream.getAudioTracks()[0];
+  if (!boostedAudioTrack) {
+    cleanupComposerVoiceInputAudioBoost();
+    return stream;
+  }
+  return new MediaStream([...stream.getVideoTracks(), boostedAudioTrack]);
+}
+
+function createComputerAudioDisplayMediaOptions({
+  suppressLocalAudioPlayback = false,
+}: ComputerAudioCaptureOptions = {}): ExtendedDisplayMediaOptions {
+  const audio: ExtendedDisplayAudioConstraints = {
+    echoCancellation: false,
+    noiseSuppression: false,
+    autoGainControl: false,
+    suppressLocalAudioPlayback: false,
+  };
+  if (suppressLocalAudioPlayback) {
+    audio.suppressLocalAudioPlayback = true;
+  }
+
+  return {
+    audio,
+    video: true,
+    monitorTypeSurfaces: "include",
+    preferCurrentTab: false,
+    selfBrowserSurface: "include",
+    surfaceSwitching: "include",
+    systemAudio: "include",
+    windowAudio: "system",
+  };
+}
+
+function getDisplaySurfaceFromStream(stream: MediaStream): string {
+  for (const track of stream.getVideoTracks()) {
+    const displaySurface = track.getSettings().displaySurface;
+    if (typeof displaySurface === "string" && displaySurface) {
+      return displaySurface;
+    }
+  }
+  return "";
+}
+
+function getDisplaySurfaceLabel(displaySurface: string): string {
+  if (!isKoreanUiLocale()) {
+    switch (displaySurface) {
+      case "browser":
+        return "Chrome tab";
+      case "monitor":
+        return "entire screen";
+      case "window":
+        return "window";
+      default:
+        return "selected source";
+    }
+  }
+  switch (displaySurface) {
+    case "browser":
+      return "Chrome 탭";
+    case "monitor":
+      return "전체 화면";
+    case "window":
+      return "창";
+    default:
+      return "선택한 화면";
+  }
+}
+
+function logComputerAudioCaptureDiagnostics(stream: MediaStream, stage: "selected" | "desktop-fallback" | "silent"): void {
+  const audioTracks = stream.getAudioTracks();
+  const videoTracks = stream.getVideoTracks();
+  const displaySurface = getDisplaySurfaceFromStream(stream);
+  void chrome.runtime
+    .sendMessage({
+      type: "diagnostics.log.write",
+      event: "dictation.display_audio.capture",
+      details: {
+        stage,
+        displaySurface,
+        audioTrackCount: audioTracks.length,
+        audioTracks: audioTracks.map((track) => ({
+          enabled: track.enabled,
+          muted: track.muted,
+          readyState: track.readyState,
+          label: track.label,
+          settings: track.getSettings(),
+        })),
+        videoTrackCount: videoTracks.length,
+        videoTracks: videoTracks.map((track) => ({
+          readyState: track.readyState,
+          label: track.label,
+          settings: track.getSettings(),
+        })),
+      },
+    })
+    .catch(() => undefined);
+}
+
+function shouldUseComposerRealtimeMicrophoneDictation(): boolean {
+  return Boolean(
+    state.accountStatus?.codexAuthenticated &&
+      state.accountStatus.authMode !== "apikey" &&
+      !getKnownChatgptRealtimeEndpointFailureReason() &&
+      window.RTCPeerConnection &&
+      navigator.mediaDevices?.getUserMedia,
+  );
+}
+
+function shouldFallbackMicrophoneDictationToBrowserSpeech(error: unknown): boolean {
+  const message = toErrorMessage(error);
+  return (
+    isRealtimeVoiceApiKeyRequired(message) ||
+    /backend-api\/codex\/realtime\/calls/iu.test(message) ||
+    /voice update/iu.test(message) ||
+    /realtime/iu.test(message)
+  );
+}
+
+async function tryStartComposerRealtimeMicrophoneDictation(
+  options: { target?: ComposerVoiceInputTarget } = {},
+): Promise<boolean> {
+  if (!shouldUseComposerRealtimeMicrophoneDictation()) {
+    return false;
+  }
+
+  state.initError = "";
+  state.actionStatus = "";
+  composerVoiceInputTarget = options.target ?? "composer";
+  resetComposerVoiceInputTranscript();
+  render();
+  let pendingStream: MediaStream | null = null;
+
+  try {
+    const stream = await getMicrophoneStreamForVoice();
+    pendingStream = stream;
+    state.voiceInputActive = true;
+    state.actionStatus = "";
+    composerVoiceInputPhase = "starting";
+    composerVoiceInputRealtimeSessionId = createComposerRealtimeDictationSessionId();
+    composerVoiceInputRealtimeThreadId = null;
+    composerVoiceInputRealtimeStarted = false;
+    resetComposerRealtimeAudioResponseTracking();
+    cancelPendingComposerRealtimeVoiceInputStarted();
+    render();
+
+    if (!(await startComposerRealtimeVoiceInputWithWebRtc(stream))) {
+      pendingStream?.getTracks().forEach((track) => track.stop());
+      pendingStream = null;
+      return false;
+    }
+    startComposerVoiceInputListening(stream);
+    pendingStream = null;
+    return true;
+  } catch (error) {
+    const threadId = cleanupComposerRealtimeVoiceInputResources();
+    state.voiceInputActive = false;
+    state.actionStatus = "";
+    composerVoiceInputTarget = "composer";
+    composerVoiceInputPhase = "idle";
+    resetComposerVoiceInputTranscript();
+    cleanupComposerVoiceWaveform();
+    pendingStream?.getTracks().forEach((track) => track.stop());
+    if (threadId) {
+      void stopComposerRealtimeVoiceInputSession(threadId);
+    }
+    if (shouldFallbackMicrophoneDictationToBrowserSpeech(error)) {
+      return false;
+    }
+    throw error;
+  }
+}
+
+function createComposerRealtimeDictationSessionId(): string {
+  return `sidepanel-dictation-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+function createConferenceModeSessionId(): string {
+  return `sidepanel-conference-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+function getComposerRealtimeDictationPrompt(): string {
+  return [
+    "Transcribe the incoming user audio for dictation.",
+    "Return transcript events only. Do not answer the user, do not execute tools, and do not add commentary.",
+    "Preserve the spoken language and punctuation naturally.",
+  ].join(" ");
+}
+
+function getConferenceModePrompt(): string {
+  return [
+    "Transcribe the incoming meeting audio for conference mode.",
+    "Return transcript events only. Do not translate in this session.",
+    "Do not answer questions, execute tools, summarize, or add commentary.",
+    "Preserve the spoken language and punctuation naturally.",
+  ].join(" ");
+}
+
+function getConferenceModeCaptureRequestStatus(): string {
+  return isKoreanUiLocale()
+    ? "컨퍼런스 모드에서 전사할 오디오가 있는 탭, 창, 또는 전체 화면을 선택하고 오디오 공유를 켜 주세요."
+    : "Choose a tab, window, or screen with audio for conference mode and enable audio sharing.";
+}
+
+function getConferenceModeBusyMessage(): string {
+  return isKoreanUiLocale()
+    ? "다른 음성 세션이 진행 중이라 컨퍼런스 모드를 시작할 수 없습니다. 음성 입력이나 라이브 모드를 종료한 뒤 다시 시도해 주세요."
+    : "Another voice session is active. Stop dictation or live voice before starting conference mode.";
+}
+
+function getComputerAudioCaptureRequestStatus(): string {
+  return isKoreanUiLocale()
+    ? "전사할 오디오가 있는 Chrome 탭, 창, 또는 전체 화면을 선택하고 오디오 공유를 켜 주세요."
+    : "Choose a Chrome tab, window, or screen with audio and enable audio sharing.";
+}
+
+function getComputerAudioCaptureUnsupportedMessage(): string {
+  return isKoreanUiLocale()
+    ? "이 브라우저에서는 컴퓨터/탭 오디오 캡처를 사용할 수 없습니다."
+    : "This browser does not support computer or tab audio capture.";
+}
+
+function getComputerAudioCaptureNoAudioMessage(displaySurface = ""): string {
+  const surfaceLabel = getDisplaySurfaceLabel(displaySurface);
+  const fallbackAdvice = getComputerAudioCaptureFallbackAdvice(displaySurface);
+  if (isKoreanUiLocale()) {
+    return `${surfaceLabel}에서 사용할 수 있는 오디오 트랙을 받지 못했습니다. ${fallbackAdvice}`;
+  }
+  return `Chromex did not receive an audio track from the ${surfaceLabel}. ${fallbackAdvice}`;
+}
+
+function getComputerAudioCaptureSilentMessage(displaySurface = ""): string {
+  const surfaceLabel = getDisplaySurfaceLabel(displaySurface);
+  const fallbackAdvice = getComputerAudioCaptureFallbackAdvice(displaySurface);
+  if (isKoreanUiLocale()) {
+    return `${surfaceLabel} 공유에서 아직 오디오 신호가 감지되지 않았습니다. 소스가 재생 중인지, 오디오 공유 옵션이 켜져 있는지 확인해 주세요. ${fallbackAdvice}`;
+  }
+  return `Chromex has not detected audio from the ${surfaceLabel} yet. Check that the source is playing and that audio sharing is enabled. ${fallbackAdvice}`;
+}
+
+function getComputerAudioCaptureFallbackAdvice(displaySurface = ""): string {
+  if (isKoreanUiLocale()) {
+    switch (displaySurface) {
+      case "window":
+      case "monitor":
+        return "Chrome/OS가 창 또는 전체 화면의 시스템 오디오를 제공하지 않으면 전사할 수 없습니다. 가능하면 소리가 나는 페이지를 Chrome 탭으로 선택하고 \"탭 오디오도 공유\"를 켜 주세요. 앱/시스템 소리는 OS 레벨 시스템 오디오 공유 또는 가상 오디오 장치가 필요할 수 있습니다.";
+      case "browser":
+        return "Chrome 탭은 공유 선택창에서 \"탭 오디오도 공유\"를 켜야 전사할 수 있습니다.";
+      default:
+        return "Chrome 탭은 \"탭 오디오도 공유\"를 켜고, 창/전체 화면은 공유 선택창에 시스템 오디오 옵션이 실제로 제공될 때만 전사할 수 있습니다.";
+    }
+  }
+
+  switch (displaySurface) {
+    case "window":
+    case "monitor":
+      return "If Chrome or the OS does not provide system audio for a window or entire screen, Chromex cannot transcribe it. Prefer choosing the audio-producing Chrome tab and enable \"Share tab audio\". App or system audio may require OS-level system audio sharing or a virtual audio device.";
+    case "browser":
+      return "For Chrome tabs, enable \"Share tab audio\" in the sharing picker.";
+    default:
+      return "For Chrome tabs, enable \"Share tab audio\"; for windows or entire screens, transcription works only when the picker actually provides system audio.";
+  }
+}
+
+function getComputerAudioCaptureCancelledMessage(): string {
+  return isKoreanUiLocale()
+    ? "오디오 공유 선택이 취소되었습니다."
+    : "Audio sharing selection was cancelled.";
+}
+
+async function startComposerVoiceInput(options: { target?: ComposerVoiceInputTarget } = {}): Promise<void> {
   const strings = stringsForState();
   if (state.voiceEnabled || state.pendingAction === "voice") {
+    return;
+  }
+  if (normalizeVoiceInputAudioSource(state.settings.voiceInputAudioSource) === "computer") {
+    await startComposerRealtimeVoiceInput(options);
+    return;
+  }
+  if (await tryStartComposerRealtimeMicrophoneDictation(options)) {
     return;
   }
   const SpeechRecognitionCtor = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -13825,6 +20634,7 @@ async function startComposerVoiceInput(): Promise<void> {
 
   state.initError = "";
   state.actionStatus = "";
+  composerVoiceInputTarget = options.target ?? "composer";
   resetComposerVoiceInputTranscript();
   render();
 
@@ -13832,12 +20642,14 @@ async function startComposerVoiceInput(): Promise<void> {
     const stream = await getMicrophoneStreamForVoice();
     state.voiceInputActive = true;
     state.actionStatus = "";
-    startComposerVoiceWaveform(stream);
+    startComposerVoiceInputListening(stream);
     startVoiceRecognition("composer");
     render();
   } catch (error) {
     state.voiceInputActive = false;
     state.actionStatus = "";
+    composerVoiceInputTarget = "composer";
+    composerVoiceInputPhase = "idle";
     resetComposerVoiceInputTranscript();
     cleanupComposerVoiceWaveform();
     state.initError = toUserFacingVoiceStartError(error);
@@ -13845,7 +20657,17 @@ async function startComposerVoiceInput(): Promise<void> {
   }
 }
 
+function startComposerVoiceInputListening(stream: MediaStream): void {
+  composerVoiceInputPhase = "listening";
+  startComposerVoiceWaveform(stream);
+  render();
+}
+
 function stopComposerVoiceInput(options: { render?: boolean } = {}): void {
+  const realtimeThreadId = cleanupComposerRealtimeVoiceInputResources();
+  if (realtimeThreadId) {
+    void stopComposerRealtimeVoiceInputSession(realtimeThreadId);
+  }
   if (voiceRecognitionMode === "composer" && recognition) {
     const activeRecognition = recognition;
     recognition = null;
@@ -13855,6 +20677,7 @@ function stopComposerVoiceInput(options: { render?: boolean } = {}): void {
     activeRecognition.stop();
   }
   state.voiceInputActive = false;
+  composerVoiceInputPhase = "idle";
   cleanupComposerVoiceWaveform();
   if (state.actionStatus.startsWith(stringsForState().status.voiceInputListening)) {
     state.actionStatus = "";
@@ -13875,9 +20698,15 @@ async function commitComposerVoiceInput(): Promise<void> {
     const transcript = getComposerVoiceInputTranscript() || optimisticTranscript;
     resetComposerVoiceInputTranscript();
     if (transcript) {
-      appendVoiceInputTranscriptToComposer(transcript);
+      if (composerVoiceInputTarget === "page") {
+        await insertVoiceInputTranscriptIntoPage(transcript);
+      } else {
+        appendVoiceInputTranscriptToComposer(transcript);
+      }
+      composerVoiceInputTarget = "composer";
       return;
     }
+    composerVoiceInputTarget = "composer";
     render();
   })().finally(() => {
     composerVoiceInputCommitPromise = null;
@@ -13889,12 +20718,17 @@ async function commitComposerVoiceInput(): Promise<void> {
 function cancelComposerVoiceInput(): void {
   stopComposerVoiceInput({ render: false });
   resetComposerVoiceInputTranscript();
+  composerVoiceInputTarget = "composer";
   render();
 }
 
 function finalizeComposerVoiceInputForCommit(): Promise<void> {
+  if (composerVoiceInputRealtimeThreadId || composerVoiceInputRealtimeSessionId) {
+    return finalizeComposerRealtimeVoiceInputForCommit();
+  }
   if (!(voiceRecognitionMode === "composer" && recognition)) {
     state.voiceInputActive = false;
+    composerVoiceInputPhase = "idle";
     cleanupComposerVoiceWaveform();
     if (state.actionStatus.startsWith(stringsForState().status.voiceInputListening)) {
       state.actionStatus = "";
@@ -13905,7 +20739,8 @@ function finalizeComposerVoiceInputForCommit(): Promise<void> {
   const activeRecognition = recognition;
   recognition = null;
   voiceRecognitionMode = null;
-  state.voiceInputActive = false;
+  composerVoiceInputPhase = "stopping";
+  render();
 
   return new Promise((resolve) => {
     let settled = false;
@@ -13920,6 +20755,8 @@ function finalizeComposerVoiceInputForCommit(): Promise<void> {
       activeRecognition.onend = null;
       activeRecognition.onresult = null;
       cleanupComposerVoiceWaveform();
+      state.voiceInputActive = false;
+      composerVoiceInputPhase = "idle";
       if (state.actionStatus.startsWith(stringsForState().status.voiceInputListening)) {
         state.actionStatus = "";
       }
@@ -13933,6 +20770,47 @@ function finalizeComposerVoiceInputForCommit(): Promise<void> {
       finish();
     }
   });
+}
+
+async function finalizeComposerRealtimeVoiceInputForCommit(): Promise<void> {
+  composerVoiceInputPhase = "stopping";
+  render();
+  const audioSendChain = composerVoiceInputRealtimeAudioSendChain;
+  const threadIdForStop = composerVoiceInputRealtimeThreadId;
+  cleanupComposerRealtimeAudioInput();
+  await audioSendChain.catch(() => undefined);
+  if (threadIdForStop) {
+    await stopComposerRealtimeVoiceInputSession(threadIdForStop);
+  }
+  await waitForComposerRealtimeTranscriptAfterAudioFlush();
+  await delay(COMPOSER_REALTIME_DICTATION_FINALIZATION_TIMEOUT_MS);
+  const threadId = cleanupComposerRealtimeVoiceInputResources();
+  cleanupComposerVoiceWaveform();
+  state.voiceInputActive = false;
+  composerVoiceInputPhase = "idle";
+  if (state.actionStatus.startsWith(stringsForState().status.voiceInputListening)) {
+    state.actionStatus = "";
+  }
+  if (threadId && threadId !== threadIdForStop) {
+    await stopComposerRealtimeVoiceInputSession(threadId);
+  }
+}
+
+async function waitForComposerRealtimeTranscriptAfterAudioFlush(): Promise<void> {
+  if (
+    composerVoiceInputRealtimeAudioChunksSent <= 0 ||
+    composerVoiceInputRealtimeLastTranscriptAt >= composerVoiceInputRealtimeLastAudioSentAt
+  ) {
+    return;
+  }
+
+  const deadline = Date.now() + COMPOSER_REALTIME_DICTATION_LATE_TRANSCRIPT_TIMEOUT_MS;
+  while (Date.now() <= deadline) {
+    if (composerVoiceInputRealtimeLastTranscriptAt >= composerVoiceInputRealtimeLastAudioSentAt) {
+      return;
+    }
+    await delay(COMPOSER_REALTIME_TRANSCRIPT_POLL_INTERVAL_MS);
+  }
 }
 
 function appendVoiceInputTranscriptToComposer(transcript: string): void {
@@ -13952,9 +20830,134 @@ function appendVoiceInputTranscriptToComposer(transcript: string): void {
   window.setTimeout(() => focusComposerAtEnd(), 0);
 }
 
+async function insertVoiceInputTranscriptIntoPage(transcript: string): Promise<void> {
+  const text = transcript.trim();
+  if (!text) {
+    render();
+    return;
+  }
+
+  const result = await sendRuntimeMessageWithConfirmation<{ ok?: boolean; error?: string; summary?: string }>({
+    type: "page.dictation.insert",
+    text,
+  });
+  if (isCancelledResult(result)) {
+    render();
+    return;
+  }
+  if (result.error || result.ok === false) {
+    state.initError = result.error || result.summary || getDictationPageInsertFailedMessage();
+    render();
+    return;
+  }
+  state.actionStatus = getDictationPageInsertedStatus();
+  render();
+}
+
+function getDictationPageInsertedStatus(): string {
+  return isKoreanUiLocale()
+    ? "포커스된 웹페이지 입력 위치에 받아쓰기를 입력했습니다."
+    : "Dictation was inserted into the focused page field.";
+}
+
+function getDictationPageInsertFailedMessage(): string {
+  return isKoreanUiLocale()
+    ? "받아쓰기를 넣을 수 있는 웹페이지 입력 위치를 찾지 못했습니다."
+    : "Chromex could not find a focused page field for dictation.";
+}
+
+async function openDictationShortcutSettings(): Promise<void> {
+  try {
+    await chrome.tabs.create({ url: "chrome://extensions/shortcuts" });
+  } catch (error) {
+    state.initError = toUserFacingRuntimeError(error);
+    render();
+  }
+}
+
+function getDictationShortcutSettingsTitle(): string {
+  return isKoreanUiLocale() ? "받아쓰기 단축키" : "Dictation shortcut";
+}
+
+function getDictationShortcutSettingsDescription(): string {
+  return isKoreanUiLocale()
+    ? "Chrome 단축키 설정에서 받아쓰기 시작/중지 키를 바꿀 수 있습니다."
+    : "Change the start/stop dictation key in Chrome's extension shortcuts.";
+}
+
+function getDictationShortcutSettingsActionLabel(): string {
+  return isKoreanUiLocale() ? "단축키 설정" : "Shortcut settings";
+}
+
+function getVoiceInputSourceSettingsTitle(): string {
+  return isKoreanUiLocale() ? "받아쓰기 오디오 소스" : "Dictation audio source";
+}
+
+function getVoiceInputSourceSettingsDescription(): string {
+  return isKoreanUiLocale()
+    ? "마이크는 Codex app-server 전사를 우선 시도하고, 불가능하면 브라우저 음성 입력으로 대체합니다. 컴퓨터/탭 오디오는 Codex app-server 전사 세션으로 처리합니다."
+    : "Microphone dictation prefers Codex app-server transcription and falls back to browser speech input if needed. Computer or tab audio uses a Codex app-server transcription session.";
+}
+
+function renderVoiceInputSourceControl(): string {
+  const source = normalizeVoiceInputAudioSource(state.settings.voiceInputAudioSource);
+  return renderSettingsSelectControl({
+    id: "setting-voice-input-source",
+    ariaLabel: getVoiceInputSourceSettingsTitle(),
+    value: source,
+    className: "voice-input-source-select-shell",
+    options: [
+      {
+        value: "microphone",
+        label: isKoreanUiLocale() ? "마이크" : "Microphone",
+      },
+      {
+        value: "computer",
+        label: isKoreanUiLocale() ? "컴퓨터/탭 오디오" : "Computer or tab audio",
+      },
+    ],
+  });
+}
+
+function normalizeVoiceInputAudioSource(value: unknown): VoiceInputAudioSource {
+  return value === "computer" ? "computer" : "microphone";
+}
+
+function getVoiceInputTooltip(): string {
+  const source = normalizeVoiceInputAudioSource(state.settings.voiceInputAudioSource);
+  if (source === "computer") {
+    return isKoreanUiLocale()
+      ? "컴퓨터/탭 오디오를 캡처해 Codex app-server로 전사합니다."
+      : "Capture computer or tab audio and transcribe it through the Codex app-server.";
+  }
+  return isKoreanUiLocale()
+    ? "마이크 받아쓰기를 시작합니다. 가능하면 Codex app-server 전사를 우선 사용합니다."
+    : "Start microphone dictation. Chromex prefers Codex app-server transcription when available.";
+}
+
+function getComposerPrimaryActionTooltip(id: string): string {
+  if (id === "live-toggle") {
+    return isKoreanUiLocale()
+      ? "실시간 음성 대화를 시작합니다."
+      : "Start a realtime voice conversation.";
+  }
+  if (id === "stop-live") {
+    return isKoreanUiLocale()
+      ? "실시간 음성 대화를 중지합니다."
+      : "Stop the realtime voice conversation.";
+  }
+  return "";
+}
+
+function isKoreanUiLocale(): boolean {
+  return getTranslatedUiLocale(state.uiLocale) === "ko";
+}
+
 function resetComposerVoiceInputTranscript(): void {
   composerVoiceInputFinalTranscript = "";
   composerVoiceInputInterimTranscript = "";
+  composerVoiceInputRealtimeDataChannelTranscriptsActive = false;
+  composerVoiceInputRealtimeDataChannelTranscriptLogged = false;
 }
 
 function appendComposerVoiceInputFinalTranscript(transcript: string): void {
@@ -13963,20 +20966,205 @@ function appendComposerVoiceInputFinalTranscript(transcript: string): void {
     return;
   }
   const current = composerVoiceInputFinalTranscript.trimEnd();
-  composerVoiceInputFinalTranscript = `${current}${current ? " " : ""}${text}`;
+  const merged = mergeComposerVoiceInputTranscript(current, text);
+  if (merged === current) {
+    composerVoiceInputInterimTranscript = "";
+    return;
+  }
+  composerVoiceInputFinalTranscript = collapseComposerVoiceInputTranscriptRepetitions(merged);
   composerVoiceInputInterimTranscript = "";
 }
 
 function updateComposerVoiceInputInterimTranscript(transcript: string): void {
-  composerVoiceInputInterimTranscript = transcript.trim();
+  const text = transcript.trim();
+  if (!text) {
+    composerVoiceInputInterimTranscript = "";
+    return;
+  }
+  const current = composerVoiceInputFinalTranscript.trimEnd();
+  if (current && normalizeComposerVoiceInputTranscript(text).startsWith(normalizeComposerVoiceInputTranscript(current))) {
+    composerVoiceInputFinalTranscript = text;
+    composerVoiceInputInterimTranscript = "";
+    return;
+  }
+  composerVoiceInputInterimTranscript = trimComposerVoiceInputTranscriptOverlap(current, text);
 }
 
 function getComposerVoiceInputTranscript(): string {
-  return [composerVoiceInputFinalTranscript, composerVoiceInputInterimTranscript]
+  const transcript = [composerVoiceInputFinalTranscript, composerVoiceInputInterimTranscript]
     .map((part) => part.trim())
     .filter(Boolean)
     .join(" ")
     .trim();
+  return collapseComposerVoiceInputTranscriptRepetitions(transcript);
+}
+
+function mergeComposerVoiceInputTranscript(current: string, incoming: string): string {
+  const left = current.trimEnd();
+  const right = incoming.trim();
+  if (!left) {
+    return right;
+  }
+  if (!right) {
+    return left;
+  }
+
+  const normalizedLeft = normalizeComposerVoiceInputTranscript(left);
+  const normalizedRight = normalizeComposerVoiceInputTranscript(right);
+  if (normalizedLeft === normalizedRight || normalizedLeft.endsWith(` ${normalizedRight}`)) {
+    return left;
+  }
+  if (normalizedRight.startsWith(normalizedLeft)) {
+    return right;
+  }
+
+  const trimmedRight = trimComposerVoiceInputTranscriptOverlap(left, right);
+  if (!trimmedRight) {
+    return left;
+  }
+  return `${left} ${trimmedRight}`.trim();
+}
+
+function trimComposerVoiceInputTranscriptOverlap(current: string, incoming: string): string {
+  const right = incoming.trim();
+  if (!current.trim() || !right) {
+    return right;
+  }
+
+  const overlapLength = Math.max(
+    findComposerVoiceInputTranscriptOverlap(current, right),
+    findComposerVoiceInputTranscriptPrefixOverlapInTail(current, right),
+  );
+  return right.slice(overlapLength).trimStart();
+}
+
+function findComposerVoiceInputTranscriptOverlap(current: string, incoming: string): number {
+  const left = current.trimEnd();
+  const right = incoming.trimStart();
+  const maxLength = Math.min(left.length, right.length, 240);
+  for (let length = maxLength; length >= 12; length -= 1) {
+    const leftTail = normalizeComposerVoiceInputTranscript(left.slice(-length));
+    const rightHead = normalizeComposerVoiceInputTranscript(right.slice(0, length));
+    if (leftTail && leftTail === rightHead) {
+      return length;
+    }
+  }
+  return 0;
+}
+
+function findComposerVoiceInputTranscriptPrefixOverlapInTail(current: string, incoming: string): number {
+  const currentTokens = getComposerVoiceInputTranscriptTokens(current).slice(-160);
+  const incomingTokens = getComposerVoiceInputTranscriptTokens(incoming);
+  const maxLength = Math.min(currentTokens.length, incomingTokens.length, 80);
+
+  for (let length = maxLength; length >= 4; length -= 1) {
+    const incomingSlice = incomingTokens.slice(0, length);
+    const normalizedIncoming = incomingSlice.map((token) => token.normalized).join(" ");
+    if (normalizedIncoming.replace(/\s+/g, "").length < 18) {
+      continue;
+    }
+
+    for (let start = currentTokens.length - length; start >= 0; start -= 1) {
+      const currentSlice = currentTokens.slice(start, start + length);
+      const normalizedCurrent = currentSlice.map((token) => token.normalized).join(" ");
+      if (normalizedCurrent === normalizedIncoming) {
+        return incomingSlice[incomingSlice.length - 1]?.end ?? 0;
+      }
+    }
+  }
+
+  return 0;
+}
+
+function collapseComposerVoiceInputTranscriptRepetitions(transcript: string): string {
+  let output = transcript.trim();
+  for (let pass = 0; pass < 8; pass += 1) {
+    const repeatedSpan = findComposerVoiceInputTranscriptRepeatedSpan(output);
+    if (!repeatedSpan) {
+      return output;
+    }
+    output = `${output.slice(0, repeatedSpan.start)}${output.slice(repeatedSpan.end)}`
+      .replace(/\s+([,.!?;:])/g, "$1")
+      .replace(/\s{2,}/g, " ")
+      .trim();
+  }
+  return output;
+}
+
+function findComposerVoiceInputTranscriptRepeatedSpan(transcript: string): { start: number; end: number } | null {
+  const tokens = getComposerVoiceInputTranscriptTokens(transcript);
+  const minTokenLength = 8;
+  let bestSpan: { start: number; end: number; tokenLength: number } | null = null;
+
+  for (let start = minTokenLength; start < tokens.length - minTokenLength; start += 1) {
+    const searchStart = Math.max(0, start - 180);
+    for (let previousStart = start - 1; previousStart >= searchStart; previousStart -= 1) {
+      if (tokens[previousStart]?.normalized !== tokens[start]?.normalized) {
+        continue;
+      }
+
+      let tokenLength = 0;
+      while (
+        tokenLength < 90 &&
+        previousStart + tokenLength < start &&
+        start + tokenLength < tokens.length &&
+        tokens[previousStart + tokenLength]?.normalized === tokens[start + tokenLength]?.normalized
+      ) {
+        tokenLength += 1;
+      }
+
+      if (tokenLength < minTokenLength) {
+        continue;
+      }
+
+      const repeatedTokens = tokens.slice(start, start + tokenLength);
+      const normalizedRepeated = repeatedTokens.map((token) => token.normalized).join(" ");
+      if (normalizedRepeated.replace(/\s+/g, "").length < 32) {
+        continue;
+      }
+
+      const repeatedEndToken = repeatedTokens[repeatedTokens.length - 1];
+      const span = {
+        start: tokens[start]?.start ?? 0,
+        end: repeatedEndToken?.end ?? transcript.length,
+        tokenLength,
+      };
+      if (!bestSpan || span.tokenLength > bestSpan.tokenLength) {
+        bestSpan = span;
+      }
+      break;
+    }
+  }
+
+  return bestSpan ? { start: bestSpan.start, end: bestSpan.end } : null;
+}
+
+type ComposerVoiceInputTranscriptToken = {
+  normalized: string;
+  start: number;
+  end: number;
+};
+
+function getComposerVoiceInputTranscriptTokens(value: string): ComposerVoiceInputTranscriptToken[] {
+  const tokens: ComposerVoiceInputTranscriptToken[] = [];
+  const tokenPattern = /[\p{L}\p{N}]+(?:['’][\p{L}\p{N}]+)?/gu;
+  let match: RegExpExecArray | null;
+  while ((match = tokenPattern.exec(value)) !== null) {
+    tokens.push({
+      normalized: match[0].toLocaleLowerCase(),
+      start: match.index,
+      end: match.index + match[0].length,
+    });
+  }
+  return tokens;
+}
+
+function normalizeComposerVoiceInputTranscript(value: string): string {
+  return value
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLocaleLowerCase();
 }
 
 function createSilentComposerVoiceWaveform(): number[] {
@@ -13990,6 +21178,8 @@ function startComposerVoiceWaveform(stream: MediaStream): void {
   cleanupComposerVoiceWaveform();
   composerVoiceInputStream = stream;
   composerVoiceInputWaveformLevels = createSilentComposerVoiceWaveform();
+  composerVoiceInputLastAudibleAt = Date.now();
+  composerVoiceInputSilenceWarningShown = false;
 
   try {
     const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
@@ -14004,6 +21194,8 @@ function startComposerVoiceWaveform(stream: MediaStream): void {
       updateComposerVoiceWaveform,
       COMPOSER_VOICE_WAVEFORM_REFRESH_MS,
     );
+    void composerVoiceInputAudioContext.resume().catch(() => undefined);
+    startComposerVoiceInputSilenceMonitor(stream);
     updateComposerVoiceWaveform();
   } catch {
     composerVoiceInputWaveformTimer = window.setInterval(() => {
@@ -14021,6 +21213,7 @@ function updateComposerVoiceWaveform(): void {
   }
   analyser.getByteTimeDomainData(audioData);
   const bucketSize = Math.max(1, Math.floor(audioData.length / COMPOSER_VOICE_WAVEFORM_BAR_COUNT));
+  let overallPeak = 0;
   composerVoiceInputWaveformLevels = Array.from({ length: COMPOSER_VOICE_WAVEFORM_BAR_COUNT }, (_, index) => {
     const start = index * bucketSize;
     const end = Math.min(audioData.length, start + bucketSize);
@@ -14029,19 +21222,54 @@ function updateComposerVoiceWaveform(): void {
       const sample = audioData[sampleIndex] ?? 128;
       peak = Math.max(peak, Math.abs(sample - 128) / 128);
     }
+    overallPeak = Math.max(overallPeak, peak);
     const eased = Math.min(1, 0.1 + peak * 4.2);
     const previous = composerVoiceInputWaveformLevels[index] ?? 0.08;
     return Math.max(0.06, previous * 0.46 + eased * 0.54);
   });
+  if (overallPeak > 0.012) {
+    composerVoiceInputLastAudibleAt = Date.now();
+    composerVoiceInputSilenceWarningShown = false;
+  }
   paintComposerVoiceWaveform();
+}
+
+function startComposerVoiceInputSilenceMonitor(stream: MediaStream): void {
+  if (composerVoiceInputSilenceWarningTimer !== null) {
+    window.clearInterval(composerVoiceInputSilenceWarningTimer);
+  }
+  composerVoiceInputSilenceWarningTimer = window.setInterval(() => {
+    if (!state.voiceInputActive || composerVoiceInputStream !== stream) {
+      return;
+    }
+    if (composerVoiceInputSilenceWarningStatusActive && !composerVoiceInputSilenceWarningShown) {
+      composerVoiceInputSilenceWarningStatusActive = false;
+      state.actionStatus = "";
+      render();
+      return;
+    }
+    const liveAudioTracks = stream.getAudioTracks().filter((track) => track.readyState === "live");
+    if (!liveAudioTracks.length) {
+      state.actionStatus = getComputerAudioCaptureNoAudioMessage(getDisplaySurfaceFromStream(stream));
+      render();
+      return;
+    }
+    if (
+      composerVoiceInputSilenceWarningShown ||
+      Date.now() - composerVoiceInputLastAudibleAt < COMPOSER_VOICE_SILENCE_WARNING_MS
+    ) {
+      return;
+    }
+    composerVoiceInputSilenceWarningShown = true;
+    composerVoiceInputSilenceWarningStatusActive = true;
+    state.actionStatus = getComputerAudioCaptureSilentMessage(getDisplaySurfaceFromStream(stream));
+    logComputerAudioCaptureDiagnostics(stream, "silent");
+    render();
+  }, 500);
 }
 
 function paintComposerVoiceWaveform(): void {
   const bars = root.querySelectorAll<HTMLSpanElement>(".composer-waveform-bar");
-  if (!bars.length) {
-    return;
-  }
-
   bars.forEach((bar, index) => {
     const normalized = Math.max(0.06, Math.min(1, composerVoiceInputWaveformLevels[index] ?? 0.08));
     bar.style.setProperty("--bar-level", normalized.toFixed(3));
@@ -14061,6 +21289,10 @@ function cleanupComposerVoiceWaveform(): void {
     window.clearInterval(composerVoiceInputWaveformTimer);
     composerVoiceInputWaveformTimer = null;
   }
+  if (composerVoiceInputSilenceWarningTimer !== null) {
+    window.clearInterval(composerVoiceInputSilenceWarningTimer);
+    composerVoiceInputSilenceWarningTimer = null;
+  }
   composerVoiceInputAudioSource?.disconnect();
   composerVoiceInputAudioSource = null;
   composerVoiceInputAnalyser?.disconnect();
@@ -14070,9 +21302,206 @@ function cleanupComposerVoiceWaveform(): void {
     composerVoiceInputAudioContext = null;
   }
   composerVoiceInputStream?.getTracks().forEach((track) => track.stop());
+  if (composerVoiceInputRawCaptureStream && composerVoiceInputRawCaptureStream !== composerVoiceInputStream) {
+    composerVoiceInputRawCaptureStream.getTracks().forEach((track) => track.stop());
+  }
   composerVoiceInputStream = null;
+  composerVoiceInputRawCaptureStream = null;
+  cleanupComposerVoiceInputAudioBoost();
   composerVoiceInputAudioData = null;
+  composerVoiceInputLastAudibleAt = 0;
+  composerVoiceInputSilenceWarningShown = false;
+  composerVoiceInputSilenceWarningStatusActive = false;
   composerVoiceInputWaveformLevels = createSilentComposerVoiceWaveform();
+}
+
+function cleanupComposerVoiceInputAudioBoost(): void {
+  composerVoiceInputAudioBoostSource?.disconnect();
+  composerVoiceInputAudioBoostSource = null;
+  composerVoiceInputAudioBoostGain?.disconnect();
+  composerVoiceInputAudioBoostGain = null;
+  composerVoiceInputAudioBoostCompressor?.disconnect();
+  composerVoiceInputAudioBoostCompressor = null;
+  composerVoiceInputAudioBoostDestination?.disconnect();
+  composerVoiceInputAudioBoostDestination = null;
+  if (composerVoiceInputAudioBoostContext) {
+    void composerVoiceInputAudioBoostContext.close().catch(() => undefined);
+    composerVoiceInputAudioBoostContext = null;
+  }
+}
+
+function cleanupComposerRealtimeAudioInput(): void {
+  composerVoiceInputRealtimeAudioWorkletNode?.port.close();
+  composerVoiceInputRealtimeAudioWorkletNode?.disconnect();
+  composerVoiceInputRealtimeAudioWorkletNode = null;
+  composerVoiceInputRealtimeAudioSource?.disconnect();
+  composerVoiceInputRealtimeAudioSource = null;
+  if (composerVoiceInputRealtimeAudioContext) {
+    void composerVoiceInputRealtimeAudioContext.close().catch(() => undefined);
+    composerVoiceInputRealtimeAudioContext = null;
+  }
+  composerVoiceInputRealtimeAudioSamples = [];
+  composerVoiceInputRealtimeAudioSendChain = Promise.resolve();
+}
+
+function resetComposerRealtimeAudioResponseTracking(): void {
+  composerVoiceInputRealtimeAudioChunksSent = 0;
+  composerVoiceInputRealtimeLastAudioSentAt = 0;
+  composerVoiceInputRealtimeLastTranscriptAt = 0;
+}
+
+function cleanupComposerRealtimeVoiceInputResources(): string | null {
+  cancelPendingComposerRealtimeVoiceInputStarted();
+  cancelPendingVoiceAnswer();
+  cleanupComposerRealtimeAudioInput();
+  composerVoiceInputRealtimePeer?.close();
+  composerVoiceInputRealtimePeer = null;
+  composerVoiceInputRealtimeDataChannel = null;
+  const threadId = composerVoiceInputRealtimeThreadId;
+  composerVoiceInputRealtimeThreadId = null;
+  composerVoiceInputRealtimeSessionId = null;
+  composerVoiceInputRealtimeStarted = false;
+  resetComposerRealtimeAudioResponseTracking();
+  return threadId;
+}
+
+async function stopComposerRealtimeVoiceInputSession(threadId: string): Promise<void> {
+  await chrome.runtime
+    .sendMessage({
+      type: "dictation.transcription.stop",
+      threadId,
+    })
+    .catch(() => undefined);
+}
+
+function isComposerRealtimeVoiceInputStartedEvent(event: SidepanelBridgeEvent): boolean {
+  if (event.type !== "voice.session.started") {
+    return false;
+  }
+  if (composerVoiceInputRealtimeSessionId && event.sessionId === composerVoiceInputRealtimeSessionId) {
+    return true;
+  }
+  return Boolean(composerVoiceInputRealtimeThreadId && event.threadId === composerVoiceInputRealtimeThreadId);
+}
+
+function isComposerRealtimeVoiceInputEvent(event: SidepanelBridgeEvent): boolean {
+  if (composerVoiceInputRealtimeSessionId && event.sessionId === composerVoiceInputRealtimeSessionId) {
+    return true;
+  }
+  return Boolean(composerVoiceInputRealtimeThreadId && event.threadId === composerVoiceInputRealtimeThreadId);
+}
+
+function handleComposerRealtimeVoiceInputStarted(event: SidepanelBridgeEvent): void {
+  if (event.threadId) {
+    composerVoiceInputRealtimeThreadId = event.threadId;
+  }
+  if (state.accountStatus?.authMode === "chatgpt") {
+    clearKnownChatgptRealtimeEndpointFailure();
+  }
+  composerVoiceInputRealtimeStarted = true;
+  completeComposerRealtimeVoiceInputStarted(event.threadId);
+}
+
+function handleComposerRealtimeTranscriptDelta(event: SidepanelBridgeEvent): void {
+  if (!isComposerRealtimeDictationTranscriptRole(event.role)) {
+    return;
+  }
+  const delta = String(event.delta ?? "");
+  if (!delta.trim()) {
+    return;
+  }
+  composerVoiceInputRealtimeLastTranscriptAt = Date.now();
+  composerVoiceInputInterimTranscript = `${composerVoiceInputInterimTranscript}${delta}`;
+}
+
+function handleComposerRealtimeTranscriptDone(event: SidepanelBridgeEvent): void {
+  if (!isComposerRealtimeDictationTranscriptRole(event.role)) {
+    return;
+  }
+  const text = String(event.text ?? "").trim() || composerVoiceInputInterimTranscript;
+  if (!text) {
+    return;
+  }
+  composerVoiceInputRealtimeLastTranscriptAt = Date.now();
+  appendComposerVoiceInputFinalTranscript(text);
+  composerVoiceInputInterimTranscript = "";
+}
+
+function isComposerRealtimeDictationTranscriptRole(role: string | undefined): boolean {
+  return !role || role === "user" || role === "assistant";
+}
+
+function handleComposerRealtimeVoiceInputError(message: string): void {
+  rememberChatgptRealtimeEndpointFailure(message);
+  cancelPendingComposerRealtimeVoiceInputStarted(message);
+  cancelPendingVoiceAnswer(message);
+  const threadId = cleanupComposerRealtimeVoiceInputResources();
+  state.voiceInputActive = false;
+  state.actionStatus = "";
+  composerVoiceInputPhase = "idle";
+  cleanupComposerVoiceWaveform();
+  if (threadId) {
+    void stopComposerRealtimeVoiceInputSession(threadId);
+  }
+  state.initError = message;
+}
+
+function handleComposerRealtimeVoiceInputStopped(): void {
+  cleanupComposerRealtimeVoiceInputResources();
+  state.voiceInputActive = false;
+  state.actionStatus = "";
+  composerVoiceInputPhase = "idle";
+  cleanupComposerVoiceWaveform();
+}
+
+function waitForComposerRealtimeVoiceInputStarted(threadId: string | undefined, timeoutMs = 15_000): Promise<void> {
+  if (composerVoiceInputRealtimeStarted && (!threadId || composerVoiceInputRealtimeThreadId === threadId)) {
+    return Promise.resolve();
+  }
+
+  cancelPendingComposerRealtimeVoiceInputStarted();
+  return new Promise((resolve, reject) => {
+    const timeoutId = window.setTimeout(() => {
+      if (!composerVoiceInputRealtimeStartPromise) {
+        return;
+      }
+      composerVoiceInputRealtimeStartPromise = null;
+      reject(new Error(stringsForState().errors.voiceUpdate));
+    }, timeoutMs);
+    composerVoiceInputRealtimeStartPromise = {
+      resolve,
+      reject,
+      timeoutId,
+      ...(threadId ? { threadId } : {}),
+    };
+  });
+}
+
+function completeComposerRealtimeVoiceInputStarted(threadId: string | undefined): void {
+  if (!composerVoiceInputRealtimeStartPromise) {
+    return;
+  }
+  if (
+    composerVoiceInputRealtimeStartPromise.threadId &&
+    threadId &&
+    composerVoiceInputRealtimeStartPromise.threadId !== threadId
+  ) {
+    return;
+  }
+  const pending = composerVoiceInputRealtimeStartPromise;
+  composerVoiceInputRealtimeStartPromise = null;
+  window.clearTimeout(pending.timeoutId);
+  pending.resolve();
+}
+
+function cancelPendingComposerRealtimeVoiceInputStarted(reason?: string): void {
+  if (!composerVoiceInputRealtimeStartPromise) {
+    return;
+  }
+  const pending = composerVoiceInputRealtimeStartPromise;
+  composerVoiceInputRealtimeStartPromise = null;
+  window.clearTimeout(pending.timeoutId);
+  pending.reject(new Error(reason || stringsForState().errors.voiceUpdate));
 }
 
 function startVoiceRecognition(mode: VoiceRecognitionMode): void {
@@ -14100,14 +21529,11 @@ function startVoiceRecognition(mode: VoiceRecognitionMode): void {
   voiceRecognitionMode = mode;
   recognition.continuous = true;
   recognition.interimResults = true;
-  recognition.onresult = (event: { results: ArrayLike<SpeechRecognitionResult> }) => {
+  recognition.onresult = (event: SpeechRecognitionResultEventLike) => {
     let interim = "";
 
-    for (const result of Array.from(event.results)) {
-      const transcript = result[0]?.transcript?.trim();
-      if (!transcript) {
-        continue;
-      }
+    for (const result of listChangedSpeechRecognitionResults(event)) {
+      const { transcript } = result;
       const resultAt = Date.now();
       if (mode === "live" && liveVoiceRecognitionUtteranceStartedAt === null) {
         liveVoiceRecognitionUtteranceStartedAt = resultAt;
@@ -14185,39 +21611,6 @@ function startVoiceRecognition(mode: VoiceRecognitionMode): void {
     }
     render();
   }
-}
-
-function startBrowserVoiceFallbackIfPossible(reason: string): boolean {
-  if (!isRealtimeVoiceBackendUnavailable(reason)) {
-    return false;
-  }
-
-  const SpeechRecognitionCtor = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!SpeechRecognitionCtor) {
-    return false;
-  }
-
-  void chrome.runtime
-    .sendMessage({
-      type: "diagnostics.log.write",
-      event: "voice.browser_fallback.started",
-      details: { reason },
-    })
-    .catch(() => undefined);
-  state.initError = "";
-  state.voiceEnabled = true;
-  startVoiceDurationTicker();
-  browserVoiceFallbackActive = true;
-  state.liveCaption = "";
-  state.actionStatus = stringsForState().status.voiceFallbackListening;
-  startVoiceRecognition("live");
-  return true;
-}
-
-function isRealtimeVoiceBackendUnavailable(reason: string): boolean {
-  return /does not support realtime conversation|codex\/realtime\/calls|unexpected status (?:403|404|501|503)|http error: (?:403|404|501|503)|realtime.*not available|not found/iu.test(
-    reason,
-  );
 }
 
 async function appendRealtimeVoiceTextWithCurrentContext(
@@ -14310,6 +21703,7 @@ function createCurrentVoiceRoutePreviewPayload(message: string): PromptRequestPa
     ...(state.selectedServiceTier ? { serviceTier: state.selectedServiceTier } : {}),
     readStrategyOverride: state.currentReadStrategy,
     attachments: Array.from(state.attachments),
+    selectedTextContext: createPromptSelectedTextContextPayload(),
     fileAttachments: state.fileAttachments,
     structuredInputs: getPromptStructuredInputs(),
     selectedTabIds: state.selectedTabIds,
@@ -14410,17 +21804,6 @@ function shouldMirrorRealtimeTranscriptEvent(role: string | undefined): boolean 
   return !(role === "user" && voiceRecognitionMode === "live");
 }
 
-function speak(text: string): void {
-  if (!("speechSynthesis" in window) || !text.trim()) {
-    return;
-  }
-
-  const utterance = new SpeechSynthesisUtterance(text);
-  utterance.rate = 1.05;
-  window.speechSynthesis.cancel();
-  window.speechSynthesis.speak(utterance);
-}
-
 async function compactCurrentConversation(): Promise<void> {
   const strings = stringsForState();
   if (!state.threadId || isCurrentTurnActive()) {
@@ -14490,6 +21873,65 @@ async function startNewChat(): Promise<void> {
   state.latestDiff = null;
   state.latestReroute = null;
   state.pendingProfileQuestion = null;
+  state.realtimeInterpreter = createRealtimeInterpreterState();
+  profileQuestionStreamBuffers.clear();
+  profileQuestionCardRenderRequested = false;
+  completedTurnIds.clear();
+  render();
+}
+
+async function persistConferenceConversationBeforeReset(): Promise<void> {
+  if (!state.conferenceMode.viewActive) {
+    await persistConversationBatch.flush();
+    return;
+  }
+  commitConferenceModePartialIfReady({ force: true, allowSourceOnly: true });
+  rememberCurrentConversationSnapshot();
+  await persistConversationBatch.flush();
+  await persistConversation();
+}
+
+async function startNewConferencePage(): Promise<void> {
+  flushStreamingAssistantDeltas();
+  await persistConferenceConversationBeforeReset();
+  if (
+    state.conferenceMode.active ||
+    state.conferenceMode.starting ||
+    conferenceModePeer ||
+    (realtimeTranslationOwner === "conference" && (realtimeInterpreterPeer || realtimeInterpreterStream))
+  ) {
+    await stopConferenceMode({ notifyBridge: true, preserveEntries: true, keepViewActive: true });
+  } else {
+    cleanupConferenceModeResources();
+  }
+  await persistConversationBatch.flush();
+  const activeProfileId = ensureComposerProfileSelection();
+  const result = await sendRuntimeMessage<{ conversation: SavedConversation | null }>({
+    type: "conversation.new",
+    profileId: activeProfileId,
+    model: state.selectedModel,
+  });
+  hydrateConversation(result.conversation);
+  state.messages = [];
+  state.chatMessageWindowSize = DEFAULT_CHAT_MESSAGE_WINDOW_SIZE;
+  pendingChatScrollToBottom = false;
+  pendingChatScrollAnchor = null;
+  state.attachments = new Set();
+  state.fileAttachments = [];
+  state.selectedTabIds = [];
+  state.historyQuery = "";
+  state.currentReadStrategy = "auto";
+  state.structuredInputs = [];
+  state.activeTurn = null;
+  state.activeView = "conference";
+  state.latestPlan = null;
+  state.latestDiff = null;
+  state.latestReroute = null;
+  state.pendingProfileQuestion = null;
+  state.conferenceMode = {
+    ...createConferenceModeState(),
+    viewActive: true,
+  };
   profileQuestionStreamBuffers.clear();
   profileQuestionCardRenderRequested = false;
   completedTurnIds.clear();
@@ -14511,10 +21953,13 @@ function flushConversationPersist(): void {
 }
 
 async function persistConversation(): Promise<void> {
-  const activeProfileId = ensureComposerProfileSelection();
   let conversationIdForSave = state.currentConversationId;
+  const activeProfileId = conversationIdForSave
+    ? (conversationProfilesById.get(conversationIdForSave) ?? ensureComposerProfileSelection())
+    : ensureComposerProfileSelection();
   const messages = serializeConversationMessagesForStorage(state.messages);
-  if (!shouldPersistConversationMessagesForStorage(state.messages)) {
+  const conferenceSnapshot = serializeConferenceModeForStorage();
+  if (!shouldPersistConversationMessagesForStorage(state.messages) && !conferenceSnapshot) {
     if (conversationIdForSave) {
       state.recentChats = state.recentChats.filter((item) => item.id !== conversationIdForSave);
     }
@@ -14540,6 +21985,8 @@ async function persistConversation(): Promise<void> {
       profileId: activeProfileId,
       model: state.selectedModel || undefined,
       threadId: state.threadId || undefined,
+      conversationMode: conferenceSnapshot ? "conference" : "chat",
+      ...(conferenceSnapshot ? { conferenceMode: conferenceSnapshot } : {}),
       messages,
       attachments: [],
       structuredInputs: [],
@@ -14562,6 +22009,7 @@ async function persistConversation(): Promise<void> {
     id: result.conversation.id,
     title: result.conversation.title,
     profileId: result.conversation.profileId,
+    conversationMode: result.conversation.conversationMode === "conference" ? "conference" : "chat",
     updatedAt: result.conversation.updatedAt,
   });
 }
@@ -14648,7 +22096,14 @@ async function sendRuntimeMessageWithConfirmation<TResult>(
     break;
   }
 
-  if (response?.error && !("threadId" in response) && !("items" in response) && !("tabs" in response) && !("ok" in response)) {
+  if (
+    response?.error &&
+    nextMessage.type !== "turn.steer" &&
+    !("threadId" in response) &&
+    !("items" in response) &&
+    !("tabs" in response) &&
+    !("ok" in response)
+  ) {
     throw new Error(String(response.error));
   }
 
@@ -14731,8 +22186,17 @@ async function sendRuntimeMessage<TResult = unknown>(
 
 function toUserFacingRuntimeError(error: unknown, fallback?: string): string {
   const strings = getUiStrings(state.uiLocale);
+  const planModeError = getPlanModeRuntimeErrorMessage(error);
+  if (planModeError) {
+    return planModeError;
+  }
+  const specificMessage = getSpecificRuntimeErrorMessage(error, getTranslatedUiLocale(state.uiLocale));
+  if (specificMessage) {
+    return specificMessage;
+  }
   switch (classifyRuntimeMessageError(error)) {
     case "transient-disconnect":
+    case "stale-tab":
       return strings.errors.runtimeDisconnected;
     case "host-access":
       return strings.errors.pageAccess;
@@ -14753,6 +22217,18 @@ function getAuthExpiredRuntimeErrorMessage(): string {
 
 function toUserFacingVoiceStartError(error: unknown): string {
   const strings = getUiStrings(state.uiLocale);
+  const message = toErrorMessage(error);
+  if (isRealtimeVoiceInvalidApiKey(message)) {
+    return getRealtimeInvalidApiKeyMessage(
+      state.activeView === "conference" || state.conferenceMode.viewActive ? "conference" : "live",
+    );
+  }
+  if (isRealtimeVoiceApiKeyRequired(message)) {
+    return getRealtimeApiKeyRequiredMessage(
+      state.activeView === "conference" || state.conferenceMode.viewActive ? "conference" : "live",
+      message,
+    );
+  }
   switch (classifyMicrophonePermissionError(error)) {
     case "dismissed":
       return strings.errors.voicePermissionDismissed;
@@ -14780,6 +22256,9 @@ function isAttachmentUnavailableOnThisPage(
 }
 
 function sanitizeUnavailableCurrentPageState(): void {
+  if (!state.currentPageSupport.available) {
+    state.selectedPageTextContext = null;
+  }
   const nextAttachments = sanitizeUnavailableCurrentPageAttachments(
     Array.from(state.attachments),
     state.currentPageSupport,

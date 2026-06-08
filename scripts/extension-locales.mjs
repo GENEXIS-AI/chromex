@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
 export const CHROME_WEB_STORE_LOCALES = [
@@ -65,7 +65,9 @@ export const EXTENSION_MESSAGE_KEYS = [
   "actionOpenSidePanel",
   "commandOpenSidePanel",
   "commandOpenPopup",
+  "commandStartDictation",
   "contextAskPage",
+  "contextAskSelection",
   "contextEditImage",
   "contextSummarizeYoutube",
 ];
@@ -76,7 +78,9 @@ const MESSAGE_DESCRIPTIONS = {
   actionOpenSidePanel: "Tooltip for the browser action button.",
   commandOpenSidePanel: "Keyboard shortcut description for opening the side panel.",
   commandOpenPopup: "Keyboard shortcut description for opening the popup workspace.",
+  commandStartDictation: "Chrome command description for voice dictation shortcut.",
   contextAskPage: "Context menu item for asking about the current page.",
+  contextAskSelection: "Context menu item for asking about selected text.",
   contextEditImage: "Context menu item for editing an image with Chromex.",
   contextSummarizeYoutube: "Context menu item for summarizing a YouTube video.",
 };
@@ -87,7 +91,9 @@ const DEFAULT_MESSAGES = {
   actionOpenSidePanel: "Open Chromex",
   commandOpenSidePanel: "Open Chromex",
   commandOpenPopup: "Open Chromex popup",
+  commandStartDictation: "Start or stop dictation",
   contextAskPage: "Ask Chromex about this page",
+  contextAskSelection: "Ask AI about selection",
   contextEditImage: "Edit this image with Chromex",
   contextSummarizeYoutube: "Summarize this YouTube video",
 };
@@ -304,6 +310,7 @@ const LOCALE_MESSAGES = {
     "이 페이지를 Chromex에 물어보기",
     "이 이미지를 Chromex로 편집하기",
     "이 YouTube 영상을 요약하기",
+    "AI에게 질문하기",
   ),
   lt: messages(
     "„Codex“ valdoma naršyklės pagalba puslapio kontekstui, kortelėms, balsui ir vaizdų redagavimui.",
@@ -524,9 +531,38 @@ export async function writeExtensionLocaleFiles(localesDir) {
   await mkdir(localesDir, { recursive: true });
   for (const locale of CHROME_WEB_STORE_LOCALES) {
     const directory = resolve(localesDir, locale);
+    const messagesPath = resolve(directory, "messages.json");
     await mkdir(directory, { recursive: true });
-    await writeFile(resolve(directory, "messages.json"), `${JSON.stringify(buildChromeLocaleMessages(locale), null, 2)}\n`);
+    const generatedMessages = buildChromeLocaleMessages(locale);
+    const existingMessages = await readExistingChromeLocaleMessages(messagesPath);
+    await writeFile(
+      messagesPath,
+      `${JSON.stringify(mergeExistingChromeLocaleMessages(generatedMessages, existingMessages), null, 2)}\n`,
+    );
   }
+}
+
+async function readExistingChromeLocaleMessages(messagesPath) {
+  try {
+    return JSON.parse(await readFile(messagesPath, "utf8"));
+  } catch {
+    return {};
+  }
+}
+
+function mergeExistingChromeLocaleMessages(generatedMessages, existingMessages) {
+  const merged = { ...generatedMessages };
+  for (const key of EXTENSION_MESSAGE_KEYS) {
+    const existingMessage = existingMessages?.[key]?.message;
+    const generatedMessage = generatedMessages?.[key]?.message;
+    if (typeof existingMessage === "string" && existingMessage.trim() && generatedMessage === DEFAULT_MESSAGES[key]) {
+      merged[key] = {
+        ...generatedMessages[key],
+        message: existingMessage,
+      };
+    }
+  }
+  return merged;
 }
 
 function messages(
@@ -536,6 +572,7 @@ function messages(
   contextAskPage,
   contextEditImage,
   contextSummarizeYoutube,
+  contextAskSelection = DEFAULT_MESSAGES.contextAskSelection,
 ) {
   return {
     extensionName: "Chromex",
@@ -543,7 +580,9 @@ function messages(
     actionOpenSidePanel,
     commandOpenSidePanel: actionOpenSidePanel,
     commandOpenPopup,
+    commandStartDictation: DEFAULT_MESSAGES.commandStartDictation,
     contextAskPage,
+    contextAskSelection,
     contextEditImage,
     contextSummarizeYoutube,
   };

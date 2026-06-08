@@ -73,6 +73,23 @@ export function resolveOpenFolderCommand(
   return { command: "xdg-open", args: [folder] };
 }
 
+export function resolveRevealPathCommand(
+  targetPath: string,
+  isDirectory: boolean,
+  platformName: RuntimePlatform = process.platform,
+): { command: string; args: string[] } {
+  if (isDirectory) {
+    return resolveOpenFolderCommand(targetPath, platformName);
+  }
+  if (platformName === "darwin") {
+    return { command: "open", args: ["-R", targetPath] };
+  }
+  if (platformName === "win32") {
+    return { command: "explorer.exe", args: [`/select,${targetPath}`] };
+  }
+  return { command: "xdg-open", args: [getPathApi(platformName).dirname(targetPath)] };
+}
+
 export function resolveHookShellCommand(
   commandText: string,
   options: PlatformPathOptions = {},

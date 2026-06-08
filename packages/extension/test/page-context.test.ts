@@ -165,6 +165,40 @@ describe("page context helpers", () => {
     ]);
   });
 
+  test("suppresses default page context while preserving explicit page attachments", () => {
+    expect(
+      filterSuppressedPageContextRequests(
+        [
+          {
+            source: "current-page",
+            readStrategy: "dom",
+            required: true,
+            reason: "User explicitly attached current page.",
+          },
+          {
+            source: "image",
+            readStrategy: "vision",
+            required: true,
+            reason: "User explicitly attached visible image.",
+          },
+          {
+            source: "selection",
+            readStrategy: "dom",
+            required: true,
+            reason: "User explicitly attached a selection.",
+          },
+          {
+            source: "open-tabs",
+            readStrategy: "auto",
+            required: true,
+            reason: "Compare tabs.",
+          },
+        ],
+        ["current-page", "image", "selection"],
+      ).map((request) => request.source),
+    ).toEqual(["current-page", "image", "selection", "open-tabs"]);
+  });
+
   test("updates the route plan context mode when baseline page context is attached", () => {
     expect(
       createEffectivePromptRoutePlan(

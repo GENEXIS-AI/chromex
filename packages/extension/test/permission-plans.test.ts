@@ -1,8 +1,11 @@
 import { describe, expect, test } from "vitest";
 
 import {
+  getCurrentPageSupport,
+  getFileUrlAccessHelpMessage,
   getPermissionRequestForMessage,
   getPermissionRequestForRuntimeResponse,
+  isFileUrl,
   isRestrictedBrowserUrl,
   toOriginPermissionPattern,
 } from "../src/permission-plans.js";
@@ -13,17 +16,48 @@ describe("permission plans", () => {
     expect(toOriginPermissionPattern("http://localhost:3000/app")).toBe("http://localhost:3000/*");
   });
 
-  test("treats browser-internal pages as restricted", () => {
-    expect(isRestrictedBrowserUrl("chrome://extensions")).toBe(true);
+  test("does not pre-block browser-internal pages from visual fallback context", () => {
+    expect(isRestrictedBrowserUrl("chrome://extensions")).toBe(false);
     expect(toOriginPermissionPattern("chrome://extensions")).toBeNull();
+    expect(getCurrentPageSupport("chrome://extensions")).toEqual({
+      available: true,
+      blockedReason: "",
+    });
   });
 
-  test("treats the Chrome extensions gallery as restricted even though it uses https", () => {
-    expect(isRestrictedBrowserUrl("https://chromewebstore.google.com/detail/example/abc")).toBe(true);
-    expect(toOriginPermissionPattern("https://chromewebstore.google.com/detail/example/abc")).toBeNull();
-    expect(isRestrictedBrowserUrl("https://chrome.google.com/webstore/detail/example/abc")).toBe(true);
-    expect(toOriginPermissionPattern("https://chrome.google.com/webstore/detail/example/abc")).toBeNull();
+  test("treats Chrome Web Store pages as readable pages so DOM failure can fall back to vision", () => {
+    expect(isRestrictedBrowserUrl("https://chromewebstore.google.com/detail/example/abc")).toBe(false);
+    expect(toOriginPermissionPattern("https://chromewebstore.google.com/detail/example/abc")).toBe(
+      "https://chromewebstore.google.com/*",
+    );
+    expect(isRestrictedBrowserUrl("https://chrome.google.com/webstore/detail/example/abc")).toBe(false);
+    expect(toOriginPermissionPattern("https://chrome.google.com/webstore/detail/example/abc")).toBe(
+      "https://chrome.google.com/*",
+    );
     expect(isRestrictedBrowserUrl("https://chrome.google.com/search?q=codex")).toBe(false);
+    expect(getCurrentPageSupport("https://chromewebstore.google.com/detail/example/abc")).toEqual({
+      available: true,
+      blockedReason: "",
+    });
+  });
+
+  test("allows local file pages to proceed so Chrome file access settings can be honored", () => {
+    expect(isFileUrl("file:///Users/test/page.html")).toBe(true);
+    expect(isRestrictedBrowserUrl("file:///Users/test/page.html")).toBe(false);
+    expect(toOriginPermissionPattern("file:///Users/test/page.html")).toBeNull();
+    expect(getCurrentPageSupport("file:///Users/test/page.html")).toEqual({
+      available: true,
+      blockedReason: "",
+    });
+    expect(getFileUrlAccessHelpMessage()).toContain("Allow access to file URLs");
+  });
+
+  test("separates unsupported schemes from browser-internal pages", () => {
+    expect(getCurrentPageSupport("mailto:test@example.com")).toEqual({
+      available: false,
+      blockedReason:
+        "This page uses an unsupported URL scheme for page reading. Open an http, https, or file page, then try again.",
+    });
   });
 
   test("requests history permission only for history search", () => {
@@ -126,10 +160,7 @@ describe("permission plans", () => {
         },
         "chrome://extensions",
       ),
-    ).toEqual({
-      rationale: "Allow Codex to read the current page before creating an infographic.",
-      blockedReason: "This page is a restricted browser page, so Codex cannot read or modify it.",
-    });
+    ).toBeNull();
   });
 
   test("treats YouTube seek as a current-page action", () => {
@@ -149,13 +180,10 @@ describe("permission plans", () => {
         },
         "chrome://extensions",
       ),
-    ).toEqual({
-      rationale: "Allow Codex to interact with the current page that you are already viewing.",
-      blockedReason: "This page is a restricted browser page, so Codex cannot read or modify it.",
-    });
+    ).toBeNull();
   });
 
-  test("reports restricted pages instead of asking for impossible permissions", () => {
+  test("does not pre-block page actions on browser-visible pages before runtime fallback runs", () => {
     expect(
       getPermissionRequestForMessage(
         {
@@ -163,10 +191,7 @@ describe("permission plans", () => {
         },
         "chrome://extensions",
       ),
-    ).toEqual({
-      rationale: "Allow Codex to interact with the current page that you are already viewing.",
-      blockedReason: "This page is a restricted browser page, so Codex cannot read or modify it.",
-    });
+    ).toBeNull();
   });
 
   test("does not block plain prompting when the current tab is restricted", () => {

@@ -8,6 +8,7 @@ function readNormalizedSource(path: string): string {
 }
 
 const sidepanelSource = readNormalizedSource("src/sidepanel/index.ts");
+const backgroundSource = readNormalizedSource("src/background/index.ts");
 const i18nSource = readNormalizedSource("src/sidepanel/i18n.ts");
 const traceFormattingSource = readNormalizedSource("src/sidepanel/message-trace-formatting.ts");
 const stateSource = readNormalizedSource("src/sidepanel/sidepanel-state.ts");
@@ -29,6 +30,32 @@ describe("turn activity rendering", () => {
     expect(sidepanelSource).not.toContain("추론 요약");
     expect(traceFormattingSource).toContain("return trace.plan;");
     expect(i18nSource).toContain('plan: "계획"');
+  });
+
+  test("renders Codex work activity as a muted icon log after assistant text", () => {
+    const cardTemplateIndex = sidepanelSource.indexOf('<div class="message-card ${message.role}');
+    const bodyIndex = sidepanelSource.indexOf("messageBodyHtml", cardTemplateIndex);
+    const traceIndex = sidepanelSource.indexOf("${traceHtml}", cardTemplateIndex);
+
+    expect(cardTemplateIndex).toBeGreaterThan(-1);
+    expect(bodyIndex).toBeGreaterThan(cardTemplateIndex);
+    expect(traceIndex).toBeGreaterThan(bodyIndex);
+    expect(sidepanelSource).toContain("renderPromptActivityIndicator");
+    expect(sidepanelSource).toContain("renderTraceKindIcon");
+    expect(sidepanelSource).toContain("message-trace-summary-icon");
+    expect(sidepanelSource).not.toContain('class="message-trace-line-icon"');
+    expect(stylesSource).toContain(".prompt-activity-lucide-icon");
+    expect(stylesSource).toContain(".message-trace-text[open] .message-trace-summary-icon");
+  });
+
+  test("uses one contextual summary icon and removes icons from expanded trace rows", () => {
+    expect(sidepanelSource).toContain("function resolveTraceSummaryKind");
+    expect(sidepanelSource).toContain('const priority: ConversationMessageTraceItem["kind"][] = [');
+    expect(sidepanelSource).toContain('"web"');
+    expect(sidepanelSource).toContain('"command"');
+    expect(sidepanelSource).not.toContain("renderTraceKindIcon(item.kind");
+    expect(stylesSource).toContain(".message-trace-text[open] .message-trace-summary-icon");
+    expect(stylesSource).toContain("grid-template-columns: minmax(0, 1fr)");
   });
 
   test("keeps active turn trace under the current prompt activity instead of above it", () => {
@@ -72,7 +99,9 @@ describe("turn activity rendering", () => {
 
   test("deduplicates completed assistant text recovered under a second item id", () => {
     expect(sidepanelSource).toContain("normalizeAssistantResponseTextSegment");
+    expect(sidepanelSource).toContain("isAssistantResponseTextDuplicateOrOverlap");
     expect(sidepanelSource).toContain("duplicateItemId");
+    expect(sidepanelSource).toContain("normalizedExisting.includes(normalizedNextFragment)");
     expect(sidepanelSource).toContain("order.splice(order.indexOf(itemId), 1)");
   });
 
@@ -108,15 +137,38 @@ describe("turn activity rendering", () => {
     expect(sidepanelSource).toContain("rememberCurrentConversationThreadForBridgeEvent(event)");
     expect(sidepanelSource).toContain("hasCurrentPromptInFlight()");
     expect(sidepanelSource).toContain("promptSubmissionBootstrapInFlight ||");
+    expect(sidepanelSource).toContain("isCurrentPromptRequestPending() ||");
     expect(sidepanelSource).toContain("state.promptActivity ||");
     expect(sidepanelSource).toContain("if (!threadId) {\n    return true;\n  }");
+  });
+
+  test("keeps the composer busy while prompt.send is still awaiting tool or web-search work", () => {
+    expect(sidepanelSource).toContain("pendingPromptRequestIdsByConversationId");
+    expect(sidepanelSource).toContain("setPendingPromptRequest(conversationIdAtStart, clientRequestId)");
+    expect(sidepanelSource).toContain("clearPendingPromptRequest(conversationIdAtStart, clientRequestId)");
+    expect(sidepanelSource).toContain("state.promptActivity?.clientRequestId || getCurrentPendingPromptRequestId()");
+    expect(sidepanelSource).toContain("const pendingClientRequestId = getCurrentPendingPromptRequestId()");
+    expect(sidepanelSource).toContain('phase: "waiting-for-codex"');
+    expect(sidepanelSource).toContain("isCurrentPromptWorkActive()");
+    expect(sidepanelSource).toContain("isCurrentPromptRequestPending()");
+  });
+
+  test("surfaces failed Codex turns instead of leaving progress stuck or adding empty-response fallbacks", () => {
+    expect(sidepanelSource).toContain('event.type === "turn.failed"');
+    expect(sidepanelSource).toContain('case "turn.failed":');
+    expect(sidepanelSource).toContain("upsertAssistantFailureMessageInMessages");
+    expect(sidepanelSource).toContain("createAssistantFailureMessageId");
+    expect(sidepanelSource).toContain("cancelEmptyAssistantResponseNotice(event.threadId, turnId");
+    expect(sidepanelSource).toContain("clearConversationActivity(state.currentConversationId)");
+    expect(backgroundSource).toContain('bridgeEvent.type === "turn.failed"');
+    expect(backgroundSource).toContain("assistantText: promptTurn.assistantText");
   });
 
   test("claims the first unresolved thread for the current prompt even when the stored thread is stale", () => {
     expect(sidepanelSource).toContain("getCurrentClaimedBridgeEventThreadId()");
     expect(sidepanelSource).toContain("const claimedThreadId = getCurrentClaimedBridgeEventThreadId()");
     expect(sidepanelSource).toContain("if (claimedThreadId) {\n    return threadId === claimedThreadId;\n  }");
-    expect(sidepanelSource).toContain("return Boolean(state.promptActivity || promptSubmissionBootstrapInFlight)");
+    expect(sidepanelSource).toContain("return Boolean(state.promptActivity || promptSubmissionBootstrapInFlight || isCurrentPromptRequestPending())");
   });
 
   test("routes nested plan, diff, and reroute events by thread before rendering logs", () => {

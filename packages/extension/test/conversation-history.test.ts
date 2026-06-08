@@ -40,6 +40,34 @@ describe("conversation history helpers", () => {
     ]);
   });
 
+  test("persists conference transcript history even without chat messages", () => {
+    const conversation = makeConversation("conference-history");
+    conversation.conversationMode = "conference";
+    conversation.conferenceMode = {
+      sourceLabel: "Chrome tab audio",
+      entries: [
+        {
+          id: "conference-transcript-1",
+          sourceText: "We can preserve this transcript.",
+          translationText: "이 전사 내용을 보존할 수 있습니다.",
+          createdAt: 123,
+        },
+      ],
+      targetLanguage: "ko",
+      livePlaybackEnabled: false,
+      updatedAt: 124,
+    };
+
+    expect(shouldPersistConversationInHistory(conversation)).toBe(true);
+    expect(prepareConversationsForStorage([makeConversation("empty-draft"), conversation]).map((item) => item.id)).toEqual([
+      "conference-history",
+    ]);
+    expect(sanitizeConversationForStorage(conversation).conversationMode).toBe("conference");
+    expect(sanitizeConversationForStorage(conversation).conferenceMode?.entries[0]?.translationText).toBe(
+      "이 전사 내용을 보존할 수 있습니다.",
+    );
+  });
+
   test("deletes one conversation without changing another active conversation", () => {
     const result = deleteConversationHistoryEntry({
       conversations: [makeConversation("a"), makeConversation("b")],

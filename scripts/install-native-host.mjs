@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 
 const NATIVE_HOST_NAME = "com.codex.sidepanel.bridge";
 const SUPPORTED_BROWSERS = ["chrome", "chrome-beta", "chrome-dev", "chrome-canary", "chrome-for-testing", "chromium"];
+const CHROME_WEB_STORE_EXTENSION_ID = "odlalmnpmmakfigepbaabimjcmcppgfo";
 const LEGACY_EXTENSION_IDS = [
   "fmeijhhjkfehnmbenppijhplbchnidpf",
   "jmghgkadlfpclhehodncahidegjdegpk",
@@ -22,7 +23,7 @@ const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDir, "..");
 const extensionManifestPath = resolve(repoRoot, "packages/extension/public/manifest.json");
 const derivedExtensionId = await deriveExtensionIdFromManifest(extensionManifestPath);
-const extensionId = extensionIdArg ?? derivedExtensionId;
+const extensionId = extensionIdArg ?? derivedExtensionId ?? CHROME_WEB_STORE_EXTENSION_ID;
 
 if (!extensionId || !isValidExtensionId(extensionId)) {
   console.error(
@@ -31,7 +32,7 @@ if (!extensionId || !isValidExtensionId(extensionId)) {
       "",
       derivedExtensionId
         ? `Derived extension ID from manifest key: ${derivedExtensionId}`
-        : "No manifest key was available to derive the extension ID automatically.",
+        : `No manifest key was available; defaulting to Chrome Web Store extension ID ${CHROME_WEB_STORE_EXTENSION_ID}.`,
       "The extension ID must be a 32-character Chrome extension ID using letters a-p.",
     ].join("\n"),
   );
@@ -43,7 +44,12 @@ assertSelectedBrowsersSupportedOnPlatform(selectedBrowsers, currentPlatform);
 const appSupportDir = resolveAppSupportDir(currentPlatform);
 const hostInstallDir = resolve(appSupportDir, "native-host");
 const hostSourceDir = resolve(repoRoot, "packages/native-host/dist");
-const bridgeEntryPath = resolve(repoRoot, "packages/bridge/dist/cli.js");
+const bundledBridgeEntryPath = await findFirstExistingPath([
+  resolve(repoRoot, "bridge/cli.bundle.cjs"),
+  resolve(repoRoot, "bridge/cli.bundle.mjs"),
+]);
+const sourceBridgeEntryPath = resolve(repoRoot, "packages/bridge/dist/cli.js");
+const bridgeEntryPath = bundledBridgeEntryPath ?? sourceBridgeEntryPath;
 const hostPath = resolve(hostInstallDir, "bin.js");
 const launcherPath = resolve(hostInstallDir, currentPlatform === "win32" ? "run-bridge.cmd" : "run-bridge");
 const homeDir = homedir();
@@ -62,12 +68,23 @@ const discoveredExtensionIds = await discoverCompatibleExtensionIds({
   candidatePaths: collectExtensionPathCandidates({ repoRoot, homeDir }),
 });
 const allowedExtensionIds = [
-  ...new Set([extensionId, ...(includeLegacyExtensionIds ? LEGACY_EXTENSION_IDS : []), ...discoveredExtensionIds]),
+  ...new Set(
+    [
+      extensionId,
+      derivedExtensionId,
+      CHROME_WEB_STORE_EXTENSION_ID,
+      ...(includeLegacyExtensionIds ? LEGACY_EXTENSION_IDS : []),
+      ...discoveredExtensionIds,
+    ].filter((id) => id && isValidExtensionId(id)),
+  ),
 ];
 const allowedOrigins = allowedExtensionIds.map((id) => `chrome-extension://${id}/`);
 
 await assertBuiltAsset(hostSourceDir, "packages/native-host/dist");
-await assertBuiltAsset(bridgeEntryPath, "packages/bridge/dist/cli.js");
+await assertBuiltAsset(
+  bridgeEntryPath,
+  bundledBridgeEntryPath ? `bridge/${basename(bundledBridgeEntryPath)}` : "packages/bridge/dist/cli.js",
+);
 
 await rm(hostInstallDir, { recursive: true, force: true });
 await mkdir(hostInstallDir, { recursive: true });
@@ -101,14 +118,7 @@ for (const target of targets) {
   });
 
   if (target.kind === "windows-registry") {
-    const result = spawnSync(
-      "reg",
-      ["add", target.registryKey, "/ve", "/t", "REG_SZ", "/d", manifestPath, "/f"],
-      { encoding: "utf8" },
-    );
-    if (result.status !== 0) {
-      throw new Error(result.stderr.trim() || `Failed to register ${target.registryKey}`);
-    }
+    registerWindowsNativeHost(target.registryKey, manifestPath);
   }
 }
 
@@ -118,6 +128,9 @@ for (const target of targets) {
 }
 console.log(`Using extension ID: ${extensionId}`);
 console.log(`Allowed extension IDs: ${allowedExtensionIds.join(", ")}`);
+if (allowedExtensionIds.includes(CHROME_WEB_STORE_EXTENSION_ID)) {
+  console.log(`Chrome Web Store extension ID included automatically: ${CHROME_WEB_STORE_EXTENSION_ID}`);
+}
 if (includeLegacyExtensionIds) {
   console.log("Legacy extension IDs were included because --include-legacy-extension-ids was set.");
 }
@@ -126,7 +139,13 @@ if (currentPlatform === "win32") {
   console.log("Windows checks:");
   console.log("- Run: codex --version");
   console.log("- Run: where codex");
-  console.log(`- Run: reg query HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts\\${NATIVE_HOST_NAME}`);
+  console.log("- Optional: where codex-app-server if you installed the standalone app-server artifact");
+  console.log(
+    "- If Codex is still not detected, set the Chromex Codex binary path to %APPDATA%\\npm\\codex.cmd or to the standalone codex-app-server*.exe",
+  );
+  console.log(`- Run: reg query HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts\\${NATIVE_HOST_NAME} /reg:32`);
+  console.log(`- Run: reg query HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts\\${NATIVE_HOST_NAME} /reg:64`);
+  console.log("- Close every Chrome window, reopen Chrome, then click Reload on the Chromex extension card.");
   if (profileDirArg) {
     console.log(
       "- Note: --profile-dir is ignored on Windows because Chrome native messaging uses the current-user registry. If setup is still waiting, rerun with the extension ID and --browser=chrome.",
@@ -134,6 +153,19 @@ if (currentPlatform === "win32") {
   }
 }
 console.log("No API key was copied during installation. ChatGPT login remains the default auth path.");
+
+function registerWindowsNativeHost(registryKey, manifestPath) {
+  for (const registryView of ["/reg:32", "/reg:64"]) {
+    const result = spawnSync(
+      "reg",
+      ["add", registryKey, "/ve", "/t", "REG_SZ", "/d", manifestPath, "/f", registryView],
+      { encoding: "utf8" },
+    );
+    if (result.status !== 0) {
+      throw new Error(result.stderr.trim() || `Failed to register ${registryKey} ${registryView}`);
+    }
+  }
+}
 
 function isValidExtensionId(value) {
   return /^[a-p]{32}$/u.test(value);
@@ -568,6 +600,24 @@ async function assertBuiltAsset(path, label) {
   } catch {
     throw new Error(`Missing ${label}. Run "npm run build" before installing the native host.`);
   }
+}
+
+async function pathExists(path) {
+  try {
+    await stat(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function findFirstExistingPath(paths) {
+  for (const path of paths) {
+    if (await pathExists(path)) {
+      return path;
+    }
+  }
+  return null;
 }
 
 function readEnvValue(env, key) {

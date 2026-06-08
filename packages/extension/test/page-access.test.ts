@@ -18,6 +18,10 @@ describe("page access helpers", () => {
     expect(buildTabOriginPermission("chrome://extensions")).toBeNull();
   });
 
+  test("does not request origin permissions for file pages because Chrome exposes a separate file access switch", () => {
+    expect(buildTabOriginPermission("file:///Users/test/page.html")).toBeNull();
+  });
+
   test("attempts recovery only for host-access failures on regular web tabs", () => {
     const hostAccessError = new Error("Cannot access contents of url \"https://example.org/docs\". Extension manifest must request permission to access this host.");
     const transientError = new Error("The message port closed before a response was received.");
@@ -25,6 +29,7 @@ describe("page access helpers", () => {
     expect(shouldAttemptTabOriginRecovery("https://example.org/docs", hostAccessError)).toBe(true);
     expect(shouldAttemptTabOriginRecovery("https://example.org/docs", transientError)).toBe(false);
     expect(shouldAttemptTabOriginRecovery("chrome://extensions", hostAccessError)).toBe(false);
+    expect(shouldAttemptTabOriginRecovery("file:///Users/test/page.html", hostAccessError)).toBe(false);
   });
 
   test("wraps missing site access with a retryable UI permission request", () => {

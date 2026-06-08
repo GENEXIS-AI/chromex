@@ -1,7 +1,7 @@
 import type { ProfileTemplate } from "@codex-sidepanel/shared";
 
 import { localizeBuiltinProfileName } from "../profile-localization.js";
-import type { UiLocale } from "./i18n.js";
+import { getUiStrings, type UiLocale } from "./i18n.js";
 
 export interface SkillOption {
   id: string;
@@ -23,7 +23,15 @@ export type SlashCommandOption =
     description: string;
     visual?: ProfileTemplate["visual"];
     active?: boolean;
+  }
+  | {
+    id: "create-profile";
+    kind: "create-profile";
+    label: string;
+    description: string;
   };
+
+type SlashProfileCommandOption = Extract<SlashCommandOption, { kind: "profile" }>;
 
 const SLASH_QUERY_PATTERN = /(?:^|\s)\/([\p{L}\p{N}\p{M}_\- ]*)$/iu;
 
@@ -48,7 +56,7 @@ export function listSlashCommandOptions(
 ): SlashCommandOption[] {
   const normalized = query.trim().toLowerCase();
   const profileOptions = profiles
-    .map<SlashCommandOption>((profile) => ({
+    .map<SlashProfileCommandOption>((profile) => ({
       id: `profile:${profile.id}` as const,
       kind: "profile",
       profileId: profile.id,
@@ -59,7 +67,17 @@ export function listSlashCommandOptions(
     }))
     .filter((option) => matchesSlashOption(option, normalized));
 
-  return profileOptions.sort((left, right) => Number(Boolean(right.active)) - Number(Boolean(left.active)));
+  const createProfileOption: SlashCommandOption = {
+    id: "create-profile",
+    kind: "create-profile",
+    label: getUiStrings(locale).actions.createProfileDirect,
+    description: "",
+  };
+
+  return [
+    ...profileOptions.sort((left, right) => Number(Boolean(right.active)) - Number(Boolean(left.active))),
+    createProfileOption,
+  ];
 }
 
 export function removeActiveSlashToken(currentValue: string): string {
@@ -71,6 +89,8 @@ function matchesSlashOption(option: SlashCommandOption, normalizedQuery: string)
     return true;
   }
 
-  const searchable = [option.profileId, option.label, option.description];
+  const searchable = option.kind === "profile"
+    ? [option.profileId, option.label, option.description]
+    : [option.label, option.description];
   return searchable.some((value) => value.toLowerCase().includes(normalizedQuery));
 }

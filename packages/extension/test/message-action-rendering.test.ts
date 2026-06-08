@@ -34,8 +34,8 @@ describe("message action rendering", () => {
 
   test("marks edited user messages so the editor can use a wider layout", () => {
     expect(sidepanelSource).toContain('const editingClass = editing ? "editing" : ""');
-    expect(sidepanelSource).toContain('class="message-card ${message.role} ${editingClass} ${voiceClass} ${imageResultClass}"');
-    expect(sidepanelSource).toContain('class="message-user-stack ${editingClass}"');
+    expect(sidepanelSource).toContain('class="message-card ${message.role} ${editingClass} ${voiceClass} ${steerClass} ${imageResultClass}"');
+    expect(sidepanelSource).toContain('class="message-user-stack ${editingClass} ${steerClass}"');
   });
 
   test("tracks streaming assistant message ids so copy and regenerate controls do not flicker", () => {

@@ -11,6 +11,8 @@ describe("conversation message attachments", () => {
     expect(sidepanelSource).toContain("renderConversationMessageAttachments");
     expect(sidepanelSource).toContain("renderConversationMessageAttachmentImage");
     expect(sidepanelSource).toContain("renderConversationMessageAttachmentFile");
+    expect(sidepanelSource).toContain("renderConversationMessageAttachmentFileIcon");
+    expect(sidepanelSource).toContain('attachment.kind === "audio" ? renderUiIcon("audio-lines")');
     expect(sidepanelSource).toContain("createConversationMessageAttachments");
     expect(sidepanelSource).toContain("attachments: createConversationMessageAttachments(submittedMessageFileAttachments)");
     expect(sidepanelSource).not.toContain("attachments: createConversationMessageAttachments(nextFileAttachments)");

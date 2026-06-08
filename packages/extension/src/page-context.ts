@@ -48,8 +48,18 @@ export function ensureDefaultCurrentPageContextRequests(
 
 export function filterSuppressedPageContextRequests(
   requests: AgenticContextRequest[],
+  explicitAttachments: PromptRequestPayload["attachments"] = [],
 ): AgenticContextRequest[] {
-  return requests.filter((request) => request.source !== "current-page" && request.source !== "selection" && request.source !== "image");
+  const explicitPageAttachments = new Set(
+    explicitAttachments.filter(isCurrentPageAttachment),
+  );
+
+  return requests.filter((request) => {
+    if (request.source !== "current-page" && request.source !== "selection" && request.source !== "image") {
+      return true;
+    }
+    return explicitPageAttachments.has(request.source);
+  });
 }
 
 export function shouldSuppressDefaultCurrentPageContextForHistory(

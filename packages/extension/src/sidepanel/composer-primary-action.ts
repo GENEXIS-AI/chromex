@@ -4,6 +4,7 @@ export interface ComposerPrimaryActionInput {
   composerDraft: string;
   currentWorkActive: boolean;
   liveActive: boolean;
+  liveAvailable: boolean;
 }
 
 export interface ComposerPrimaryActionDraftInput {
@@ -11,6 +12,7 @@ export interface ComposerPrimaryActionDraftInput {
   nextComposerDraft: string;
   currentWorkActive: boolean;
   liveActive: boolean;
+  liveAvailable: boolean;
   compositionInProgress?: boolean;
 }
 
@@ -27,7 +29,7 @@ export function resolveComposerPrimaryAction(input: ComposerPrimaryActionInput):
     return "stop-live";
   }
 
-  return "start-live";
+  return input.liveAvailable ? "start-live" : "send";
 }
 
 export function didComposerPrimaryActionChangeForDraftInput(input: ComposerPrimaryActionDraftInput): boolean {
@@ -39,11 +41,20 @@ export function didComposerPrimaryActionChangeForDraftInput(input: ComposerPrima
     composerDraft: input.previousComposerDraft,
     currentWorkActive: input.currentWorkActive,
     liveActive: input.liveActive,
+    liveAvailable: input.liveAvailable,
   });
   const nextAction = resolveComposerPrimaryAction({
     composerDraft: input.nextComposerDraft,
     currentWorkActive: input.currentWorkActive,
     liveActive: input.liveActive,
+    liveAvailable: input.liveAvailable,
   });
-  return previousAction !== nextAction;
+  if (previousAction !== nextAction) {
+    return true;
+  }
+
+  return (
+    nextAction === "send" &&
+    Boolean(input.previousComposerDraft.trim()) !== Boolean(input.nextComposerDraft.trim())
+  );
 }

@@ -121,4 +121,15 @@ describe("prompt activity labels", () => {
       }),
     ).toEqual({ clientRequestId: "prompt-image-1", phase: "rendering-image-preview" });
   });
+
+  test("does not resurrect completed non-image tool activity as active response progress", () => {
+    expect(
+      promotePromptActivityForTurnActivity({
+        current: null,
+        activeTurn: { threadId: "thread-1", turnId: "turn-completed-tool" },
+        kind: "tool",
+        status: "completed",
+      }),
+    ).toBeNull();
+  });
 });

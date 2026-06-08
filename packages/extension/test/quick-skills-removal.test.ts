@@ -36,7 +36,9 @@ describe("quick skill removal", () => {
         ],
         "en",
         "default",
-      ).map((option) => option.kind),
+      )
+        .filter((option) => option.kind !== "create-profile")
+        .map((option) => option.kind),
     ).toEqual([]);
   });
 

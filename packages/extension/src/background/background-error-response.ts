@@ -42,8 +42,24 @@ export function shouldLogBackgroundMessageError(error: unknown): boolean {
 }
 
 function isExpectedRecoverableBackgroundError(error: unknown): boolean {
+  switch (classifyRuntimeMessageError(error)) {
+    case "auth-expired":
+    case "extension-reload-required":
+    case "invalid-api-key":
+    case "invalid-image":
+    case "missing-configuration":
+    case "stale-tab":
+    case "usage-limit":
+      return true;
+    default:
+      break;
+  }
+
   const message = getErrorMessage(error).toLowerCase();
   return (
+    message.includes("allow access to file urls") ||
+    message.includes("chrome blocks extensions from reading or modifying this protected browser page") ||
+    message.includes("chrome web store pages cannot be scripted") ||
     message.includes("generated image asset is no longer available") ||
     message.includes("extensions gallery cannot be scripted") ||
     /\bthread not found\b|no turns for conversation|unknown conversation/iu.test(message)

@@ -12,6 +12,8 @@ describe("infographic context fallback", () => {
     expect(backgroundSource).toContain('collectCurrentPageContext("hybrid")');
     expect(backgroundSource).toContain("shouldFallbackToVisionForInfographic");
     expect(backgroundSource).toContain("collectVisibleScreenOnlyInfographicContext");
+    expect(backgroundSource).toContain("collectVisibleScreenFallbackContext");
+    expect(backgroundSource).toContain("extension.page_context.dom_failed");
     expect(backgroundSource).toContain("createMinimalVisibleScreenContext");
     expect(backgroundSource).toContain("extension.infographic_context.dom_failed");
     expect(backgroundSource).toContain("extension.infographic_context.hybrid_fallback_failed");

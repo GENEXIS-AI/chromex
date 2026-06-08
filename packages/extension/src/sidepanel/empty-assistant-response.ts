@@ -18,6 +18,9 @@ export function shouldShowEmptyAssistantResponseNotice(input: EmptyAssistantResp
   if (traceMessage?.text.trim()) {
     return false;
   }
+  if (traceMessage?.plan?.steps.length) {
+    return false;
+  }
 
   const anchorIndex = resolveEmptyResponseAnchorIndex(input.messages, input.traceMessageId, input.activeUserMessageId);
   const scopedMessages = anchorIndex >= 0 ? input.messages.slice(anchorIndex + 1) : input.messages;

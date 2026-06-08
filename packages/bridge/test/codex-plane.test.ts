@@ -3,7 +3,14 @@ import { mkdtemp, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { AppServerCodexPlane, CodexImagePlane, InMemoryBridgeSecrets, type BridgeEvent, type PromptSendParams } from "../src/index.js";
+import {
+  AppServerCodexPlane,
+  CodexImagePlane,
+  CodexVoicePlane,
+  InMemoryBridgeSecrets,
+  type BridgeEvent,
+  type PromptSendParams,
+} from "../src/index.js";
 import { normalizeLocalImagePath } from "../src/codex-plane.js";
 import { BridgeImageAssetStore, isBridgeImageAssetRef } from "../src/image-assets.js";
 import type { ProfileTemplate } from "@codex-sidepanel/shared";
@@ -22,9 +29,13 @@ class FakeCodexClient {
       threadReadItems?: Array<Record<string, unknown>>;
       agentText?: string;
       emitEmptyAgentCompletion?: boolean;
+      goalSetError?: string;
+      goalSetErrors?: string[];
+      goalGetStatuses?: string[];
       imageEditMode?: boolean;
       imageGenerationItems?: Array<Record<string, unknown>>;
       turnCompletedItems?: Array<Record<string, unknown>>;
+      turnCompletedError?: string;
       turnStartFailures?: string[];
       appListPages?: Array<{ data?: Array<Record<string, unknown>>; nextCursor?: string | null }>;
       accountReadResult?: {
@@ -46,6 +57,20 @@ class FakeCodexClient {
     this.calls.push({ method, params });
     if (method === "account/read") {
       return this.options.accountReadResult ?? { account: { type: "chatgpt" } };
+    }
+    if (method === "model/list") {
+      return {
+        data: [
+          {
+            id: "gpt-5.5",
+            model: "gpt-5.5",
+            displayName: "GPT-5.5",
+            isDefault: true,
+            inputModalities: ["text", "image"],
+            supportedReasoningEfforts: ["low", "medium", "high"],
+          },
+        ],
+      };
     }
     if (method === "skills/list") {
       return { data: [] };
@@ -74,6 +99,30 @@ class FakeCodexClient {
         },
       };
     }
+    if (method === "thread/goal/set") {
+      const goalSetCount = this.calls.filter((call) => call.method === "thread/goal/set").length;
+      const queuedGoalSetError = this.options.goalSetErrors?.[goalSetCount - 1];
+      if (queuedGoalSetError) {
+        throw new Error(queuedGoalSetError);
+      }
+      if (this.options.goalSetError) {
+        throw new Error(this.options.goalSetError);
+      }
+      return { goal: { id: "goal-1", objective: String(params?.objective ?? ""), status: "active" } };
+    }
+    if (method === "thread/goal/get") {
+      const goalGetCount = this.calls.filter((call) => call.method === "thread/goal/get").length;
+      const statuses = this.options.goalGetStatuses ?? [];
+      const status = statuses[Math.min(goalGetCount - 1, Math.max(0, statuses.length - 1))] ?? "complete";
+      return {
+        goal: {
+          id: "goal-1",
+          threadId: String(params?.threadId ?? "thread-1"),
+          objective: "Build a small dashboard",
+          status,
+        },
+      };
+    }
     if (method === "turn/start") {
       const failures = this.options.turnStartFailures ?? [];
       const turnStartCount = this.calls.filter((call) => call.method === "turn/start").length;
@@ -81,6 +130,8 @@ class FakeCodexClient {
       if (failureMessage) {
         throw new Error(failureMessage);
       }
+      const threadId = String(params?.threadId ?? "thread-1");
+      const turnId = `turn-${turnStartCount}`;
       queueMicrotask(() => {
         if (this.options.emitImageBeforeTurnCompleted !== false) {
           const imageItems = this.options.imageGenerationItems ?? [
@@ -94,8 +145,8 @@ class FakeCodexClient {
             this.emit({
               method: "item/completed",
               params: {
-                threadId: "thread-1",
-                turnId: "turn-1",
+                threadId,
+                turnId,
                 item,
               },
             });
@@ -105,8 +156,8 @@ class FakeCodexClient {
           this.emit({
             method: "item/completed",
             params: {
-              threadId: "thread-1",
-              turnId: "turn-1",
+              threadId,
+              turnId,
               item: {
                 id: "agent-1",
                 type: "agentMessage",
@@ -119,8 +170,8 @@ class FakeCodexClient {
           this.emit({
             method: "item/completed",
             params: {
-              threadId: "thread-1",
-              turnId: "turn-1",
+              threadId,
+              turnId,
               item: {
                 id: "agent-from-thread",
                 type: "agentMessage",
@@ -131,12 +182,16 @@ class FakeCodexClient {
         this.emit({
           method: "turn/completed",
           params: {
-            threadId: "thread-1",
-            turn: { id: "turn-1", items: this.options.turnCompletedItems ?? [] },
+            threadId,
+            turn: {
+              id: turnId,
+              items: this.options.turnCompletedItems ?? [],
+              ...(this.options.turnCompletedError ? { error: { message: this.options.turnCompletedError } } : {}),
+            },
           },
         });
       });
-      return { turn: { id: "turn-1" } };
+      return { turn: { id: turnId } };
     }
     if (method === "thread/compact/start") {
       const threadId = String(params?.threadId ?? "thread-1");
@@ -290,7 +345,7 @@ async function flushAsyncWork(): Promise<void> {
 }
 
 describe("AppServerCodexPlane", () => {
-  test("starts API-key login through the app-server and stores the key only in bridge secrets", async () => {
+  test("stores API keys for realtime translation without switching Codex app-server auth", async () => {
     const secretDir = await mkdtemp(join(tmpdir(), "chromex-api-key-test-"));
     const secrets = new InMemoryBridgeSecrets({
       secretPath: join(secretDir, "secrets.json"),
@@ -306,15 +361,10 @@ describe("AppServerCodexPlane", () => {
     await plane.login({ type: "apiKey", apiKey: "sk-test" });
 
     expect(secrets.getOpenAiApiKey()).toBe("sk-test");
-    expect(client.calls.find((call) => call.method === "account/login/start")).toMatchObject({
-      params: {
-        type: "apiKey",
-        apiKey: "sk-test",
-      },
-    });
+    expect(client.calls.find((call) => call.method === "account/login/start")).toBeUndefined();
   });
 
-  test("switches to an already configured API key without requiring Chrome to resend the key", async () => {
+  test("does not switch to a stored API key without receiving the key again", async () => {
     const secretDir = await mkdtemp(join(tmpdir(), "chromex-api-key-reuse-test-"));
     const client = new FakeCodexClient();
     const plane = new AppServerCodexPlane({
@@ -326,14 +376,44 @@ describe("AppServerCodexPlane", () => {
       }),
     });
 
-    await plane.login({ type: "apiKey" });
+    await expect(plane.login({ type: "apiKey" })).rejects.toThrow(/requires params\.apiKey/u);
+    expect(client.calls.find((call) => call.method === "account/login/start")).toBeUndefined();
+  });
 
-    expect(client.calls.find((call) => call.method === "account/login/start")).toMatchObject({
-      params: {
-        type: "apiKey",
-        apiKey: "sk-stored",
+  test("does not load the model catalog through a Codex API-key account", async () => {
+    const client = new FakeCodexClient({
+      accountReadResult: {
+        account: { type: "apiKey" },
       },
     });
+    const plane = new AppServerCodexPlane({
+      client: client as never,
+      harness: harness as never,
+      secrets: new InMemoryBridgeSecrets({ initialOpenAiApiKey: "sk-test" }),
+    });
+
+    await expect(plane.listModels()).rejects.toThrow(/does not run Codex requests through API-key auth/u);
+    expect(client.calls.map((call) => call.method)).toEqual(["account/read"]);
+  });
+
+  test("blocks prompt turns when Codex is in API-key auth mode", async () => {
+    const client = new FakeCodexClient({
+      accountReadResult: {
+        account: { type: "apiKey" },
+        requiresOpenaiAuth: true,
+      },
+    });
+    const plane = new AppServerCodexPlane({
+      client: client as never,
+      harness: harness as never,
+      secrets: new InMemoryBridgeSecrets(),
+    });
+
+    await expect(plane.sendPrompt({ ...promptParams, planMode: true }, () => undefined)).rejects.toThrow(
+      /does not run Codex requests through API-key auth/u,
+    );
+    expect(client.calls.find((call) => call.method === "turn/start")).toBeUndefined();
+    expect(client.calls.find((call) => call.method === "thread/goal/set")).toBeUndefined();
   });
 
   test("enables app and plugin runtime features before loading the app catalog", async () => {
@@ -421,6 +501,539 @@ describe("AppServerCodexPlane", () => {
       "app://connector_2128aebfecb84f64a069897515042a44",
       "plugin://gmail@openai-curated",
     ]);
+  });
+
+  test("starts plan collaboration mode without requiring a persisted thread goal", async () => {
+    const client = new FakeCodexClient({
+      emitImageBeforeTurnCompleted: false,
+      agentText: "I will ask a clarifying question first.",
+    });
+    const plane = new AppServerCodexPlane({
+      client: client as never,
+      harness: harness as never,
+      secrets: new InMemoryBridgeSecrets(),
+    });
+
+    await plane.sendPrompt(
+      {
+        ...promptParams,
+        threadId: "thread-1",
+        planMode: true,
+      },
+      () => undefined,
+    );
+
+    expect(client.calls.find((call) => call.method === "thread/goal/set")).toBeUndefined();
+    expect(client.calls.find((call) => call.method === "turn/start")?.params).toMatchObject({
+      collaborationMode: {
+        mode: "plan",
+        settings: {
+          developer_instructions: expect.stringContaining("always produce a visible plan"),
+        },
+      },
+    });
+  });
+
+  test("emits completed app-server plan items as turn plan updates", async () => {
+    const client = new FakeCodexClient({
+      emitImageBeforeTurnCompleted: false,
+      turnCompletedItems: [
+        {
+          id: "plan-1",
+          type: "plan",
+          explanation: "Draft first, then verify.",
+          plan: [
+            { step: "Draft the implementation plan", status: "completed" },
+            { step: "Ask for approval before editing", status: "pending" },
+          ],
+        },
+      ],
+    });
+    const plane = new AppServerCodexPlane({
+      client: client as never,
+      harness: harness as never,
+      secrets: new InMemoryBridgeSecrets(),
+    });
+    const events: BridgeEvent[] = [];
+
+    await plane.sendPrompt(
+      {
+        ...promptParams,
+        threadId: "thread-1",
+        planMode: true,
+      },
+      (event) => events.push(event),
+    );
+
+    expect(events).toContainEqual({
+      type: "turn.plan.updated",
+      plan: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        explanation: "Draft first, then verify.",
+        steps: [
+          { step: "Draft the implementation plan", status: "completed" },
+          { step: "Ask for approval before editing", status: "pending" },
+        ],
+      },
+    });
+    expect(events).not.toContainEqual(
+      expect.objectContaining({
+        type: "turn.activity",
+        itemId: "plan-1",
+      }),
+    );
+  });
+
+  test("emits plan tool-call payloads as turn plan updates instead of tool activity", async () => {
+    const client = new FakeCodexClient({
+      emitImageBeforeTurnCompleted: false,
+      turnCompletedItems: [
+        {
+          id: "tool-plan-1",
+          type: "functionCall",
+          name: "plan",
+          arguments: JSON.stringify({
+            explanation: "Clarify the request, then propose steps.",
+            plan: [
+              { step: "Clarify the target outcome", status: "completed" },
+              { step: "Propose a short execution plan", status: "pending" },
+            ],
+          }),
+        },
+      ],
+    });
+    const plane = new AppServerCodexPlane({
+      client: client as never,
+      harness: harness as never,
+      secrets: new InMemoryBridgeSecrets(),
+    });
+    const events: BridgeEvent[] = [];
+
+    await plane.sendPrompt(
+      {
+        ...promptParams,
+        threadId: "thread-1",
+        planMode: true,
+      },
+      (event) => events.push(event),
+    );
+
+    expect(events).toContainEqual({
+      type: "turn.plan.updated",
+      plan: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        explanation: "Clarify the request, then propose steps.",
+        steps: [
+          { step: "Clarify the target outcome", status: "completed" },
+          { step: "Propose a short execution plan", status: "pending" },
+        ],
+      },
+    });
+    expect(events).not.toContainEqual(
+      expect.objectContaining({
+        type: "turn.activity",
+        itemId: "tool-plan-1",
+      }),
+    );
+  });
+
+  test("recovers plan tool payloads when app-server sends a raw JSON step array", async () => {
+    const client = new FakeCodexClient({
+      emitImageBeforeTurnCompleted: false,
+      turnCompletedItems: [
+        {
+          id: "tool-plan-array",
+          type: "functionCall",
+          name: "plan",
+          arguments: JSON.stringify([
+            { step: "Confirm the target", status: "completed" },
+            { step: "Draft the plan", status: "pending" },
+          ]),
+        },
+      ],
+    });
+    const plane = new AppServerCodexPlane({
+      client: client as never,
+      harness: harness as never,
+      secrets: new InMemoryBridgeSecrets(),
+    });
+    const events: BridgeEvent[] = [];
+
+    await plane.sendPrompt(
+      {
+        ...promptParams,
+        threadId: "thread-1",
+        planMode: true,
+      },
+      (event) => events.push(event),
+    );
+
+    expect(events).toContainEqual({
+      type: "turn.plan.updated",
+      plan: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        explanation: null,
+        steps: [
+          { step: "Confirm the target", status: "completed" },
+          { step: "Draft the plan", status: "pending" },
+        ],
+      },
+    });
+    expect(events).not.toContainEqual(
+      expect.objectContaining({
+        type: "turn.activity",
+        itemId: "tool-plan-array",
+      }),
+    );
+  });
+
+  test("recovers plan tool payloads from numbered text output", async () => {
+    const client = new FakeCodexClient({
+      emitImageBeforeTurnCompleted: false,
+      turnCompletedItems: [
+        {
+          id: "tool-plan-text",
+          type: "functionCall",
+          name: "plan",
+          output: "1. Check the current behavior\n2. Patch the failing path\n3. Verify with focused tests",
+        },
+      ],
+    });
+    const plane = new AppServerCodexPlane({
+      client: client as never,
+      harness: harness as never,
+      secrets: new InMemoryBridgeSecrets(),
+    });
+    const events: BridgeEvent[] = [];
+
+    await plane.sendPrompt(
+      {
+        ...promptParams,
+        threadId: "thread-1",
+        planMode: true,
+      },
+      (event) => events.push(event),
+    );
+
+    expect(events).toContainEqual({
+      type: "turn.plan.updated",
+      plan: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        explanation: null,
+        steps: [
+          { step: "Check the current behavior", status: "pending" },
+          { step: "Patch the failing path", status: "pending" },
+          { step: "Verify with focused tests", status: "pending" },
+        ],
+      },
+    });
+    expect(events).not.toContainEqual(
+      expect.objectContaining({
+        type: "turn.activity",
+        itemId: "tool-plan-text",
+      }),
+    );
+  });
+
+  test("recovers nested app-server plan tool call payloads", async () => {
+    const client = new FakeCodexClient({
+      emitImageBeforeTurnCompleted: false,
+      turnCompletedItems: [
+        {
+          id: "tool-plan-nested",
+          type: "toolCall",
+          toolCall: {
+            function: { name: "plan" },
+            arguments_json: JSON.stringify({
+              summary: "Use the nested tool payload.",
+              steps: [
+                { step: "Read the nested payload", status: "completed" },
+                { step: "Render it as a plan card", status: "pending" },
+              ],
+            }),
+          },
+        },
+      ],
+    });
+    const plane = new AppServerCodexPlane({
+      client: client as never,
+      harness: harness as never,
+      secrets: new InMemoryBridgeSecrets(),
+    });
+    const events: BridgeEvent[] = [];
+
+    await plane.sendPrompt(
+      {
+        ...promptParams,
+        threadId: "thread-1",
+        planMode: true,
+      },
+      (event) => events.push(event),
+    );
+
+    expect(events).toContainEqual({
+      type: "turn.plan.updated",
+      plan: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        explanation: "Use the nested tool payload.",
+        steps: [
+          { step: "Read the nested payload", status: "completed" },
+          { step: "Render it as a plan card", status: "pending" },
+        ],
+      },
+    });
+    expect(events).not.toContainEqual(
+      expect.objectContaining({
+        type: "turn.activity",
+        itemId: "tool-plan-nested",
+      }),
+    );
+  });
+
+  test("shows the route clarification when plan mode returns no visible output", async () => {
+    const client = new FakeCodexClient({
+      emitImageBeforeTurnCompleted: false,
+      turnCompletedItems: [
+        {
+          id: "tool-plan-empty",
+          type: "functionCall",
+          name: "plan",
+        },
+      ],
+    });
+    const plane = new AppServerCodexPlane({
+      client: client as never,
+      harness: harness as never,
+      secrets: new InMemoryBridgeSecrets(),
+    });
+    const events: BridgeEvent[] = [];
+
+    await plane.sendPrompt(
+      {
+        ...promptParams,
+        threadId: "thread-1",
+        planMode: true,
+        routePlan: {
+          task: "general",
+          contextMode: "none",
+          requiresVision: false,
+          pageReadStrategy: "auto",
+          selectedProfileId: "default",
+          selectedModel: "gpt-5.5",
+          notes: [],
+          reroutedProfile: false,
+          reroutedModel: false,
+          intent: {
+            summary: "The request needs a target.",
+            action: "clarify",
+            target: "none",
+            constraints: [],
+            needsClarification: true,
+            clarificationQuestion: "무엇에 대한 계획이 필요한가요?",
+          },
+        },
+      },
+      (event) => events.push(event),
+    );
+
+    expect(events).toContainEqual({
+      type: "message.completed",
+      itemId: "plan-clarification-turn-1",
+      threadId: "thread-1",
+      turnId: "turn-1",
+      text: "무엇에 대한 계획이 필요한가요?",
+    });
+  });
+
+  test("recovers plan collaboration mode when an existing thread is rejected as ephemeral", async () => {
+    const staleThreadId = "019de74e-7ab6-7e22-96d0-bbc7fe3e37f5";
+    const client = new FakeCodexClient({
+      emitImageBeforeTurnCompleted: false,
+      agentText: "Plan mode recovered without a goal.",
+    });
+    const originalRequest = client.request.bind(client);
+    let firstTurnStart = true;
+    client.request = async (method: string, params?: Record<string, unknown>) => {
+      if (method === "turn/start" && firstTurnStart) {
+        firstTurnStart = false;
+        throw new Error(`plan_mode_start_failed:ephemeral thread does not support goals: ${staleThreadId}`);
+      }
+      return originalRequest(method, params);
+    };
+    const plane = new AppServerCodexPlane({
+      client: client as never,
+      harness: harness as never,
+      secrets: new InMemoryBridgeSecrets(),
+      retryDelayImpl: async () => undefined,
+    });
+
+    const result = await plane.sendPrompt(
+      {
+        ...promptParams,
+        threadId: staleThreadId,
+        planMode: true,
+      },
+      () => undefined,
+    );
+
+    expect(client.calls.find((call) => call.method === "thread/goal/set")).toBeUndefined();
+    expect(client.calls.filter((call) => call.method === "thread/start")).toHaveLength(1);
+    expect(client.calls.findLast((call) => call.method === "turn/start")?.params?.threadId).toBe("thread-1");
+    expect(result.threadId).toBe("thread-1");
+  });
+
+  test("sets a thread goal only when goal mode is explicitly requested", async () => {
+    const client = new FakeCodexClient({
+      emitImageBeforeTurnCompleted: false,
+      agentText: "I will work against this goal.",
+    });
+    const plane = new AppServerCodexPlane({
+      client: client as never,
+      harness: harness as never,
+      secrets: new InMemoryBridgeSecrets(),
+    });
+
+    await plane.sendPrompt(
+      {
+        ...promptParams,
+        threadId: "thread-1",
+        planMode: true,
+        goalObjective: "Build a small dashboard",
+        useGoal: true,
+      },
+      () => undefined,
+    );
+
+    expect(client.calls.find((call) => call.method === "thread/goal/set")).toEqual({
+      method: "thread/goal/set",
+      params: {
+        threadId: "thread-1",
+        objective: "Build a small dashboard",
+      },
+    });
+    expect(client.calls.find((call) => call.method === "turn/start")).toBeTruthy();
+  });
+
+  test("continues explicit goal mode until the app-server goal reaches a terminal status", async () => {
+    const client = new FakeCodexClient({
+      emitImageBeforeTurnCompleted: false,
+      agentText: "Completed one goal step.",
+      goalGetStatuses: ["active", "complete"],
+    });
+    const events: BridgeEvent[] = [];
+    const plane = new AppServerCodexPlane({
+      client: client as never,
+      harness: harness as never,
+      secrets: new InMemoryBridgeSecrets(),
+    });
+
+    await plane.sendPrompt(
+      {
+        ...promptParams,
+        threadId: "thread-1",
+        planMode: true,
+        useGoal: true,
+        goalObjective: "Build a small dashboard",
+      },
+      (event) => events.push(event),
+    );
+
+    const turnStarts = client.calls.filter((call) => call.method === "turn/start");
+    expect(turnStarts).toHaveLength(2);
+    expect(client.calls.filter((call) => call.method === "thread/goal/get")).toHaveLength(2);
+    expect(turnStarts[1]?.params?.input).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          text: expect.stringContaining("Continue working toward the active goal"),
+        }),
+      ]),
+    );
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "goal.updated",
+      goal: expect.objectContaining({ status: "complete" }),
+    }));
+  });
+
+  test("runs explicit goal mode without requiring plan collaboration mode", async () => {
+    const client = new FakeCodexClient({
+      emitImageBeforeTurnCompleted: false,
+      agentText: "Goal step finished.",
+      goalGetStatuses: ["complete"],
+    });
+    const plane = new AppServerCodexPlane({
+      client: client as never,
+      harness: harness as never,
+      secrets: new InMemoryBridgeSecrets(),
+    });
+
+    await plane.sendPrompt(
+      {
+        ...promptParams,
+        threadId: "thread-1",
+        useGoal: true,
+        goalObjective: "Find and fix the failing workflow",
+      },
+      () => undefined,
+    );
+
+    expect(client.calls.find((call) => call.method === "thread/goal/set")).toEqual({
+      method: "thread/goal/set",
+      params: {
+        threadId: "thread-1",
+        objective: "Find and fix the failing workflow",
+      },
+    });
+    expect(client.calls.find((call) => call.method === "thread/goal/get")).toBeTruthy();
+    expect(client.calls.find((call) => call.method === "turn/start")?.params).not.toHaveProperty("collaborationMode");
+  });
+
+  test("replaces an ephemeral realtime thread before starting explicit goal mode", async () => {
+    const staleThreadId = "019de74e-7ab6-7e22-96d0-bbc7fe3e37f5";
+    const client = new FakeCodexClient({
+      emitImageBeforeTurnCompleted: false,
+      agentText: "Plan mode recovered on a normal thread.",
+      goalSetErrors: [`ephemeral thread does not support goals: ${staleThreadId}`],
+    });
+    const events: BridgeEvent[] = [];
+    const plane = new AppServerCodexPlane({
+      client: client as never,
+      harness: harness as never,
+      secrets: new InMemoryBridgeSecrets(),
+      retryDelayImpl: async () => undefined,
+    });
+
+    const result = await plane.sendPrompt(
+      {
+        ...promptParams,
+        clientRequestId: "plan-ephemeral-recovery",
+        threadId: staleThreadId,
+        planMode: true,
+        useGoal: true,
+        goalObjective: "Build a small dashboard",
+      },
+      (event) => events.push(event),
+    );
+
+    const goalSetCalls = client.calls.filter((call) => call.method === "thread/goal/set");
+    expect(goalSetCalls.map((call) => call.params?.threadId)).toEqual([staleThreadId, "thread-1"]);
+    expect(client.calls.filter((call) => call.method === "thread/start")).toHaveLength(1);
+    expect(client.calls.find((call) => call.method === "turn/start")?.params?.threadId).toBe("thread-1");
+    expect(result.threadId).toBe("thread-1");
+    expect(events).not.toContainEqual(expect.objectContaining({ type: "prompt.retrying" }));
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "goal.updated",
+      threadId: "thread-1",
+    }));
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "message.completed",
+      itemId: "agent-1",
+      text: "Plan mode recovered on a normal thread.",
+    }));
   });
 
   test("allows app-server approval flow when a turn uses explicit app or plugin mentions", async () => {
@@ -531,6 +1144,79 @@ describe("AppServerCodexPlane", () => {
       email: "codex@example.com",
       planType: "plus",
     });
+  });
+
+  test("rejects websocket realtime voice on ChatGPT OAuth before starting a voice thread", async () => {
+    const client = new FakeCodexClient({
+      accountReadResult: {
+        account: { type: "chatgpt", email: "codex@example.com" },
+      },
+    });
+    const plane = new CodexVoicePlane({
+      client: client as never,
+      harness: harness as never,
+    });
+
+    await expect(plane.start({ outputModality: "audio" })).resolves.toMatchObject({
+      status: "error",
+      errorCode: "requires-api-key",
+      realtimeAvailable: false,
+    });
+    expect(client.calls.map((call) => call.method)).toEqual(["account/read"]);
+  });
+
+  test("allows WebRTC realtime voice on ChatGPT OAuth when the browser supplies an SDP offer", async () => {
+    const client = new FakeCodexClient({
+      accountReadResult: {
+        account: { type: "chatgpt", email: "codex@example.com" },
+      },
+    });
+    const plane = new CodexVoicePlane({
+      client: client as never,
+      harness: harness as never,
+    });
+
+    await expect(plane.start({ outputModality: "audio", sdp: "offer-sdp" })).resolves.toMatchObject({
+      status: "connecting",
+      threadId: "thread-1",
+      transport: "webrtc",
+      realtimeAvailable: true,
+    });
+    expect(client.calls.map((call) => call.method)).toEqual([
+      "account/read",
+      "thread/start",
+      "thread/realtime/start",
+    ]);
+    const realtimeStartParams = client.calls.find((call) => call.method === "thread/realtime/start")?.params;
+    expect(realtimeStartParams).toMatchObject({
+      threadId: "thread-1",
+      transport: { type: "webrtc", sdp: "offer-sdp" },
+    });
+    expect(realtimeStartParams).not.toHaveProperty("realtimeSessionId");
+  });
+
+  test("does not pass the saved workspace root into browser WebRTC transcription threads", async () => {
+    const client = new FakeCodexClient({
+      accountReadResult: {
+        account: { type: "chatgpt", email: "codex@example.com" },
+      },
+    });
+    const plane = new CodexVoicePlane({
+      client: client as never,
+      harness: {
+        ...harness,
+        getWorkspaceRoot: async () => "/missing/chromex-workspace",
+      } as never,
+    });
+
+    await expect(plane.start({ outputModality: "text", sdp: "offer-sdp" })).resolves.toMatchObject({
+      status: "connecting",
+      threadId: "thread-1",
+      transport: "webrtc",
+    });
+
+    const threadStartParams = client.calls.find((call) => call.method === "thread/start")?.params;
+    expect(threadStartParams).not.toHaveProperty("cwd");
   });
 
   test("resumes sessions without eagerly loading full turn history", async () => {
@@ -676,6 +1362,22 @@ describe("AppServerCodexPlane", () => {
       },
     });
     client.emit({
+      method: "item/started",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        item: {
+          id: "dynamic-search-1",
+          type: "dynamicToolCall",
+          namespace: "web",
+          toolName: "search_query",
+          arguments: {
+            query: "latest Codex app-server webSearch",
+          },
+        },
+      },
+    });
+    client.emit({
       method: "item/completed",
       params: {
         threadId: "thread-1",
@@ -703,6 +1405,13 @@ describe("AppServerCodexPlane", () => {
         title: "Web search complete",
         detail:
           "site:github.com/openai/codex supports_parallel_tool_calls · https://github.com/openai/codex/blob/main/docs/config.md",
+      }),
+      expect.objectContaining({
+        type: "turn.activity",
+        kind: "web",
+        status: "running",
+        title: "Searching the web",
+        detail: "latest Codex app-server webSearch",
       }),
       expect.objectContaining({
         type: "turn.activity",
@@ -780,6 +1489,33 @@ describe("AppServerCodexPlane", () => {
       itemId: "agent-nested",
       text: "Recovered from nested turn payload.",
     }));
+  });
+
+  test("emits a failed turn event when app-server completes a turn with an error", async () => {
+    const client = new FakeCodexClient({
+      emitImageBeforeTurnCompleted: false,
+      turnCompletedError: "Search tool failed before the assistant answer.",
+    });
+    const plane = new AppServerCodexPlane({
+      client: client as never,
+      harness: harness as never,
+      secrets: new InMemoryBridgeSecrets(),
+    });
+    const events: BridgeEvent[] = [];
+
+    await expect(
+      plane.sendPrompt({ ...promptParams, clientRequestId: "prompt-error-1" }, (event) => events.push(event)),
+    ).rejects.toThrow("Search tool failed before the assistant answer.");
+
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "turn.failed",
+        threadId: "thread-1",
+        turnId: "turn-1",
+        message: "Search tool failed before the assistant answer.",
+        clientRequestId: "prompt-error-1",
+      }),
+    );
   });
 
   test("does not retry a completed prompt when post-completion hooks fail", async () => {
@@ -1438,7 +2174,7 @@ describe("CodexImagePlane", () => {
     expect(localImageItems).toEqual([]);
   });
 
-  test("uses the same app-server image generation path for API-key accounts", async () => {
+  test("blocks image generation when Codex is in API-key auth mode", async () => {
     const workspaceRoot = await mkdtemp(join(tmpdir(), "codex-image-generate-apikey-"));
     const imageAssets = new BridgeImageAssetStore({
       outputDir: () => join(workspaceRoot, ".codex-sidepanel", "generated-images"),
@@ -1458,17 +2194,17 @@ describe("CodexImagePlane", () => {
       { client: client as never, imageAssets },
     );
 
-    const result = await plane.startGenerate({
-      prompt: "Generate a product concept image.",
-      contexts: [],
-      model: "gpt-image-2",
-    });
-
-    expect(result.previewRef).toMatch(/^codex-asset:/);
+    await expect(
+      plane.startGenerate({
+        prompt: "Generate a product concept image.",
+        contexts: [],
+        model: "gpt-image-2",
+      }),
+    ).rejects.toThrow(/does not run Codex requests through API-key auth/u);
     expect(client.calls.find((call) => call.method === "account/read")?.params).toMatchObject({
       refreshToken: false,
     });
-    expect(client.calls.find((call) => call.method === "turn/start")).toBeTruthy();
+    expect(client.calls.find((call) => call.method === "turn/start")).toBeUndefined();
   });
 
   test("ignores explicit image render parameters for ChatGPT OAuth accounts", async () => {
@@ -1522,7 +2258,7 @@ describe("CodexImagePlane", () => {
     });
   });
 
-  test("preserves explicit image render parameters only for API-key accounts", async () => {
+  test("does not preserve explicit image render parameters by using API-key auth", async () => {
     const workspaceRoot = await mkdtemp(join(tmpdir(), "codex-image-generate-apikey-params-"));
     const imageAssets = new BridgeImageAssetStore({
       outputDir: () => join(workspaceRoot, ".codex-sidepanel", "generated-images"),
@@ -1548,29 +2284,18 @@ describe("CodexImagePlane", () => {
       { client: client as never, imageAssets },
     );
 
-    await plane.startGenerate({
-      prompt: "Generate a product concept image.",
-      contexts: [],
-      model: "gpt-image-2",
-      quality: "high",
-      size: "1024x1024",
-    });
+    await expect(
+      plane.startGenerate({
+        prompt: "Generate a product concept image.",
+        contexts: [],
+        model: "gpt-image-2",
+        quality: "high",
+        size: "1024x1024",
+      }),
+    ).rejects.toThrow(/does not run Codex requests through API-key auth/u);
 
-    const turnStart = client.calls.find((call) => call.method === "turn/start");
-    const inputItems = Array.isArray(turnStart?.params?.input) ? turnStart.params.input : [];
-    const textItem = inputItems.find(
-      (item): item is { type: "text"; text: string } =>
-        typeof item === "object" &&
-        item !== null &&
-        (item as { type?: unknown }).type === "text" &&
-        typeof (item as { text?: unknown }).text === "string",
-    );
-
-    expect(textItem?.text).toContain("Render target: 1024x1024, high quality.");
-    expect(hookPayloads.find((payload) => payload.mode === "generate")).toMatchObject({
-      quality: "high",
-      size: "1024x1024",
-    });
+    expect(client.calls.find((call) => call.method === "turn/start")).toBeUndefined();
+    expect(hookPayloads).toEqual([]);
   });
 
   test("fails image generation early with a clear message for free ChatGPT accounts", async () => {
@@ -1602,7 +2327,7 @@ describe("CodexImagePlane", () => {
     expect(client.calls.find((call) => call.method === "turn/start")).toBeUndefined();
   });
 
-  test("does not block image generation from non-ChatGPT accounts with unrelated plan fields", async () => {
+  test("blocks image generation from API-key accounts even when unrelated plan fields are present", async () => {
     const workspaceRoot = await mkdtemp(join(tmpdir(), "codex-image-generate-apikey-plan-field-"));
     const imageAssets = new BridgeImageAssetStore({
       outputDir: () => join(workspaceRoot, ".codex-sidepanel", "generated-images"),
@@ -1623,14 +2348,14 @@ describe("CodexImagePlane", () => {
       { client: client as never, imageAssets },
     );
 
-    const result = await plane.startGenerate({
-      prompt: "Generate a product concept image.",
-      contexts: [],
-      model: "gpt-image-2",
-    });
-
-    expect(result.previewRef).toMatch(/^codex-asset:/);
-    expect(client.calls.find((call) => call.method === "turn/start")).toBeTruthy();
+    await expect(
+      plane.startGenerate({
+        prompt: "Generate a product concept image.",
+        contexts: [],
+        model: "gpt-image-2",
+      }),
+    ).rejects.toThrow(/does not run Codex requests through API-key auth/u);
+    expect(client.calls.find((call) => call.method === "turn/start")).toBeUndefined();
   });
 
   test("preserves app-server image generation failures without inferring the account plan from text", async () => {

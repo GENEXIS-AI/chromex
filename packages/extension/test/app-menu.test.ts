@@ -193,7 +193,7 @@ describe("top app menu", () => {
     expect(readFinalDeclaration(".app-menu-chat-row:hover .app-menu-delete-button", "color")).toBe("");
     expect(readFinalDeclaration(".app-menu-chat-row:focus-within .app-menu-delete-button", "color")).toBe("");
     expect(readFinalDeclaration(".app-menu-chat-row:hover", "background")).toBe("rgba(255, 255, 255, 0.1)");
-    expect(readFinalDeclaration(".app-menu-chat-row.selected", "background")).toBe("rgba(255, 255, 255, 0.1)");
+    expect(readFinalDeclaration(".app-menu-chat-row.selected", "background")).toBe("transparent");
     expect(readFinalDeclaration(".app-menu-chat-row.selected .app-menu-row", "background")).toBe("transparent");
     expect(readFinalDeclaration(".app-menu-delete-button .ui-lucide-icon", "width")).toBe("18px");
     expect(readFinalDeclaration(".app-menu-delete-button .ui-lucide-icon", "height")).toBe("18px");
@@ -212,5 +212,9 @@ describe("top app menu", () => {
     expect(readFinalDeclaration(".recent-chat", "background")).toBe("transparent");
     expect(readFinalDeclaration(".recent-chat:hover", "background")).toBe("rgba(255, 255, 255, 0.055)");
     expect(readFinalDeclaration(".recent-chat:focus-visible", "background")).toBe("rgba(255, 255, 255, 0.055)");
+    expect(readFinalDeclaration(".app-menu-chat-row.selected", "background")).toBe("transparent");
+    expect(readFinalDeclaration(':root[data-theme="light"] .app-menu-chat-row.selected', "background")).toBe(
+      "transparent",
+    );
   });
 });

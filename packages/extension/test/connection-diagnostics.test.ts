@@ -38,6 +38,19 @@ describe("connection diagnostics", () => {
     });
   });
 
+  test("shows reconnect when the native host launcher exits immediately", () => {
+    expect(
+      getNativeHostHealth({
+        modelCatalogState: "error",
+        modelCatalogErrorMessage: "The Codex native host was found but exited immediately.",
+      }),
+    ).toEqual({
+      status: "reconnect",
+      tone: "warn",
+      detailSource: "error",
+    });
+  });
+
   test("does not blame native host for unrelated model catalog failures", () => {
     expect(
       getNativeHostHealth({
@@ -79,6 +92,40 @@ describe("connection diagnostics", () => {
       status: "not-detected",
       tone: "warn",
       detailSource: "missing",
+    });
+  });
+
+  test("trusts a successful model catalog even when Codex path detection is missing", () => {
+    expect(
+      getCodexBinaryHealth({
+        nativeHostStatus: "connected",
+        runtimeConfig: {
+          codexBinSource: "missing",
+          configuredCodexBinPathInvalid: false,
+        },
+        modelCatalogState: "ready",
+      }),
+    ).toEqual({
+      status: "automatic",
+      tone: "ok",
+      detailSource: "detected",
+    });
+  });
+
+  test("keeps Codex binary pending while the model catalog is still loading", () => {
+    expect(
+      getCodexBinaryHealth({
+        nativeHostStatus: "connected",
+        runtimeConfig: {
+          codexBinSource: "missing",
+          configuredCodexBinPathInvalid: false,
+        },
+        modelCatalogState: "loading",
+      }),
+    ).toEqual({
+      status: "pending",
+      tone: "neutral",
+      detailSource: "waiting-for-host",
     });
   });
 });

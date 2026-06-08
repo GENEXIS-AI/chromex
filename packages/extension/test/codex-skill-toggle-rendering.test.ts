@@ -107,13 +107,30 @@ describe("Codex skill toggles", () => {
 
     expect(pluginView).toContain("getRenderableConnectedApps()");
     expect(pluginView).toContain("getRenderableAppServerPlugins()");
-    expect(pluginView).toContain("state.mcpServers");
+    expect(pluginView).toContain("getRenderableMcpServers()");
     expect(pluginView).toContain("data-app-id=");
     expect(pluginView).toContain("data-plugin-settings-id=");
     expect(pluginView).not.toContain("data-plugin-id=");
     expect(pluginView).toContain("data-mcp-oauth-server=");
     expect(pluginView).toContain("reload-plugin-catalog");
     expect(pluginView).toContain("reload-mcp-servers");
+  });
+
+  test("adds search controls to the top of skill and plugin settings views", () => {
+    const skillsView = getFunctionSource(sidepanelSource, "renderSkillsView");
+    const pluginView = getFunctionSource(sidepanelSource, "renderPluginMcpView");
+    const bindEvents = getFunctionSource(sidepanelSource, "bindEvents");
+
+    expect(skillsView).toContain('"settings-skill-search"');
+    expect(skillsView).toContain("getFilteredCodexSkills()");
+    expect(skillsView).toContain("shouldShowPlaywrightRuntimeSkill(strings)");
+    expect(pluginView).toContain('"settings-plugin-mcp-search"');
+    expect(pluginView).toContain("getRenderableConnectedApps()");
+    expect(pluginView).toContain("getRenderableAppServerPlugins()");
+    expect(pluginView).toContain("getRenderableMcpServers()");
+    expect(sidepanelSource).toContain("state.skillSettingsSearchQuery");
+    expect(sidepanelSource).toContain("state.pluginMcpSettingsSearchQuery");
+    expect(bindEvents).toContain("bindSettingsSearchInput");
   });
 
   test("renders only connected apps before Plugins/MCP injection", () => {
@@ -188,7 +205,7 @@ describe("Codex skill toggles", () => {
 
   test("force-refreshes the app catalog after plugin app connection flows", () => {
     expect(backgroundSource).toContain("forceCatalog: Boolean(message.forceCatalog)");
-    expect(backgroundSource).toContain("options.forceCatalog || state.modelCatalogState");
+    expect(backgroundSource).toContain("force: Boolean(options.forceCatalog)");
     expect(backgroundSource).toContain("catalog refresh before plugin connection check failed");
     expect(sidepanelSource).toContain("pendingPluginConnectionCatalogRefresh");
     expect(sidepanelSource).toContain("connectionRefreshPending");

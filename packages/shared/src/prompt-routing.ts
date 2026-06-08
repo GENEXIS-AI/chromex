@@ -46,11 +46,13 @@ const TEXT_EXTENSIONS = new Set([
   "env",
 ]);
 const SPREADSHEET_EXTENSIONS = new Set(["xls", "xlsx", "xlsm", "ods"]);
+const AUDIO_EXTENSIONS = new Set(["aac", "aif", "aiff", "flac", "m4a", "mp3", "oga", "ogg", "opus", "wav", "webm"]);
 const PDF_MIME_PATTERN = /application\/pdf/u;
 const DOCX_MIME_PATTERN =
   /application\/vnd\.openxmlformats-officedocument\.wordprocessingml\.document|application\/msword/u;
 const SPREADSHEET_MIME_PATTERN =
   /text\/csv|text\/tab-separated-values|application\/vnd\.ms-excel|application\/vnd\.openxmlformats-officedocument\.spreadsheetml\.sheet|application\/vnd\.oasis\.opendocument\.spreadsheet/u;
+const AUDIO_MIME_PATTERN = /^audio\/|video\/webm|video\/mp4/u;
 
 export function inferUserFileAttachmentKind(name: string, mimeType: string): UserFileAttachmentKind {
   const extension = extensionOf(name);
@@ -66,6 +68,10 @@ export function inferUserFileAttachmentKind(name: string, mimeType: string): Use
     extension === "gif"
   ) {
     return "image";
+  }
+
+  if (AUDIO_MIME_PATTERN.test(normalizedMime) || AUDIO_EXTENSIONS.has(extension)) {
+    return "audio";
   }
 
   if (PDF_MIME_PATTERN.test(normalizedMime) || extension === "pdf") {
@@ -109,7 +115,7 @@ export function planPromptRouting(input: {
   const hasFiles = input.fileAttachments.length > 0;
   const hasImageFiles = input.fileAttachments.some((attachment) => attachment.kind === "image");
   const hasDocumentFiles = input.fileAttachments.some(
-    (attachment) => attachment.kind !== "image" && attachment.kind !== "binary",
+    (attachment) => attachment.kind !== "image" && attachment.kind !== "audio" && attachment.kind !== "binary",
   );
   const asksForImageEdit = false;
   const asksForCompare = hasPageContext && hasFiles;

@@ -19,26 +19,38 @@ Published by **GenexisAI CHOI**.
 - Chat with the current webpage, selected open tabs, screenshots, uploaded files, PDFs, Office files, images, and browser history when requested.
 - Summarize and compare page content, YouTube videos, news articles, research pages, PDFs, and arXiv papers.
 - Edit or generate images through Codex image workflows with local output handling.
-- Use voice transcription, live voice mode, page-aware suggestions, custom profiles, and optional Codex skills.
+- Use voice transcription, plan mode, page-aware suggestions, custom profiles, and optional Codex skills.
+- Run the unified Translation/Live mode for live transcripts, optional realtime translation, and follow-up chat over the captured transcript.
 - Run browser-control workflows through Chrome content scripts with visible in-page activity indicators.
 
-## Install In 5 Minutes
+## Chrome Web Store Install
 
-Fastest path for users:
+Chrome Web Store users do **not** need to build Chromex from source.
 
-1. Open the [latest GitHub Release](https://github.com/GENEXIS-AI/chromex/releases/latest).
-2. Download [`chromex-unpacked-extension.zip`](https://github.com/GENEXIS-AI/chromex/releases/latest/download/chromex-unpacked-extension.zip) from the release assets.
-3. Unzip it.
-4. Open `chrome://extensions`.
-5. Enable **Developer mode**.
-6. Select **Load unpacked** and choose the unzipped `chromex-extension` folder.
-7. Open Chromex from the Chrome toolbar or side panel and follow onboarding.
+For a step-by-step guide with copy buttons in English, Korean, Japanese, and Simplified Chinese, use the public setup page: <https://genexis-ai.github.io/chromex/install/>
 
-Release ZIP files are attached to GitHub Releases. They are not committed into the repository file tree. If the direct download link does not open, use the [latest release page](https://github.com/GENEXIS-AI/chromex/releases/latest) and download `chromex-unpacked-extension.zip` from **Assets**.
+1. Install the official Codex CLI and confirm it works. See the official Codex CLI install options at <https://github.com/openai/codex>.
 
-The extension ZIP only installs the Chrome UI. The local bridge must also be installed once from the source checkout or `chromex-public-source.zip`.
+```bash
+npm install -g @openai/codex
+codex --version
+```
 
-Developer source install:
+   Chromex requires `@openai/codex` **0.130.0 or newer**. Older releases (for example 0.124.x and 0.125.x) refuse some bootstrap feature flags and surface as `codex app-server exited with code 1` immediately after a successful `codex login`.
+
+2. Download `chromex-local-bridge.zip` from the latest [GitHub Release](https://github.com/GENEXIS-AI/chromex/releases/latest), unzip it, and run:
+
+```bash
+node scripts/install-native-host.mjs --browser=chrome
+```
+
+3. Fully quit every Chrome window, reopen Chrome, then press **Check connection** in Chromex.
+
+The Store extension can run only after this one-time local bridge registration. The bridge lets Chrome start the local Codex app-server safely through Chrome Native Messaging; the extension itself cannot install that local host automatically.
+
+## Install From Source
+
+Use the source checkout or [`chromex-public-source.zip`](https://github.com/GENEXIS-AI/chromex/releases/latest/download/chromex-public-source.zip):
 
 ```bash
 git clone https://github.com/GENEXIS-AI/chromex.git
@@ -48,11 +60,13 @@ npm run build
 node scripts/install-native-host.mjs
 ```
 
-Then open `chrome://extensions`, enable **Developer mode**, select **Load unpacked**, and choose:
+Then close every Chrome window, reopen Chrome, open `chrome://extensions`, enable **Developer mode**, select **Load unpacked**, and choose:
 
 ```text
 packages/extension/dist
 ```
+
+Important: run `npm install`, `npm run build`, and `install-native-host.mjs` from the `chromex` source folder that contains `package.json`. If Windows reports `ENOENT Could not read package.json`, you are in the wrong folder.
 
 ### Windows Local Bridge Setup
 
@@ -62,6 +76,8 @@ On Windows, install Node.js 20 LTS or newer, then install and verify the Codex C
 npm install -g @openai/codex
 codex --version
 ```
+
+Use the npm install path above even if `winget install Codex -s msstore` fails. `0x8a15005e: The server certificate did not match any of the expected values` is a Windows Store / TLS certificate-chain problem outside Chromex, not a Chromex install step.
 
 Then use **PowerShell** from the `chromex` source folder:
 
@@ -75,7 +91,7 @@ Then open `chrome://extensions`, click **Reload** on Chromex, and press **Check 
 
 If the side panel still says the local bridge is waiting:
 
-1. Confirm Chromex is loaded from the release `chromex-extension` folder or from `packages/extension/dist`.
+1. Confirm Chromex is loaded from `packages/extension/dist`.
 2. Copy the extension ID shown on the Chromex card in `chrome://extensions`.
 3. Re-run the installer with that ID:
 
@@ -86,6 +102,16 @@ node scripts/install-native-host.mjs <extension-id> --browser=chrome
 The expected public release ID is `menmlhahmendmkiicbjihgjhppkgaeom`. If Chrome shows a different ID, use the ID shown in Chrome.
 
 If login fails with `Failed to start codex app-server`, Chromex can reach the local bridge but cannot start the Codex CLI. Re-run `codex --version`. If Windows cannot find it, set the optional Codex binary path to `%APPDATA%\npm\codex.cmd`, or set the folder to `%APPDATA%\npm`. Do not put your workspace folder in the Codex binary field; the workspace folder and Codex executable path are separate settings.
+
+To force executable detection on Windows:
+
+```powershell
+npm install -g @openai/codex
+where codex
+codex --version
+```
+
+If `where codex` prints `C:\Users\<you>\AppData\Roaming\npm\codex.cmd`, open Chromex settings and set the optional Codex binary path to `%APPDATA%\npm\codex.cmd`, save, close every Chrome window, reopen Chrome, and press **Check connection**.
 
 ## Runtime Boundary
 
@@ -113,6 +139,7 @@ The extension ships Chrome `_locales` entries for English, Korean, Japanese, Chi
 - The extension does not store raw OpenAI API keys, OAuth tokens, or ChatGPT session tokens in Chrome extension storage.
 - Codex OAuth / ChatGPT login is handled through the local Codex app-server flow.
 - API-key login is an optional local fallback and is never used automatically without user confirmation.
+- Realtime translation uses a separately confirmed OpenAI API key path and can be disconnected from settings.
 - Page content, tab data, screenshots, browser history, microphone input, and browser actions are used only for user-requested workflows.
 - `history`, `tabs`, screen capture, microphone, and site access are requested only when a feature needs them.
 - Conversation history is session-only by default. Persistent local chat history is opt-in.
@@ -127,8 +154,12 @@ Read [SECURITY.md](./SECURITY.md) and [PRIVACY.md](./PRIVACY.md) before publishi
 - Automatic routing for page, file, image, history, voice, and browser-control requests.
 - `@` picker for selecting one or more open tabs.
 - `/` picker for profile selection.
+- Plan mode for turning ambiguous requests into an explicit plan before execution.
 - Attachments for images, text, PDF, DOCX, CSV, TSV, XLSX, and XLSM.
 - Read strategy policy for DOM, vision, hybrid, and site-adapter workflows.
+- Selected-text context injection with fact-check suggestions and right-click ask flow.
+- Editable site suggestions where the visible command and the sent prompt can be different.
+- Translation/Live mode with live transcript history, optional realtime translation playback, and transcript-grounded follow-up chat.
 - Site-aware suggestions for YouTube, news, research, mail, collaboration, notes, task tools, shopping, travel, and Korean work services.
 - YouTube adapter with current timestamp context and seek actions.
 - Non-destructive image editing for uploaded images, page images, or visible screen captures.
@@ -170,6 +201,7 @@ Chromex uses normal open-source release history from `0.1.1` onward. Versioning,
 ## Troubleshooting
 
 - **Native host missing or forbidden**: run `npm run build`, then `node scripts/install-native-host.mjs --browser=chrome`, reload the extension in `chrome://extensions`, and check Chromex onboarding/system status. If Chrome shows a different extension ID, run `node scripts/install-native-host.mjs <extension-id> --browser=chrome`.
+- **Codex executable is not detected**: run `npm install -g @openai/codex`, `where codex`, and `codex --version`. If needed, set the optional Codex binary path in Chromex to `%APPDATA%\npm\codex.cmd`, save, fully restart Chrome, and press **Check connection**.
 - **Model list does not load**: confirm the native bridge is connected, then sign in through the app-server-backed login flow.
 - **Page context is unavailable**: open Chromex from the target tab or approve the Chrome site permission prompt when the workflow requests access.
 - **Chrome still shows old UI**: run `npm run build`, reload the extension card, and confirm Chrome is loading `packages/extension/dist`.

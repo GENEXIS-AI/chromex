@@ -1,6 +1,6 @@
 {
   "name": "chromex",
-  "version": "0.1.2",
+  "version": "0.1.7",
   "private": true,
   "license": "MIT",
   "author": "GenexisAI CHOI",
@@ -25,7 +25,8 @@
     "diagnose:extension": "node scripts/diagnose-extension-load.mjs",
     "sync:extension": "npm run build && node scripts/diagnose-extension-load.mjs --sync",
     "package:webstore": "npm run build --workspace @codex-sidepanel/extension && node scripts/package-chrome-web-store.mjs",
-    "package:public": "npm run build && node scripts/package-public-release.mjs",
+    "package:local-bridge": "npm run build --workspace @codex-sidepanel/shared && npm run build --workspace @codex-sidepanel/bridge && npm run build --workspace @codex-sidepanel/native-host && node scripts/package-local-bridge.mjs",
+    "package:public": "npm run build && node scripts/package-public-release.mjs && node scripts/package-local-bridge.mjs",
     "store:assets": "node scripts/generate-webstore-assets.mjs",
     "release:audit": "node scripts/release-audit.mjs",
     "release:audit:history": "node scripts/audit-git-history.mjs",

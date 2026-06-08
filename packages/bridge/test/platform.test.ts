@@ -8,6 +8,7 @@ import {
   resolveDefaultSecretStorePath,
   resolveHookShellCommand,
   resolveOpenFolderCommand,
+  resolveRevealPathCommand,
 } from "../src/platform.js";
 
 describe("cross-platform runtime paths", () => {
@@ -53,6 +54,21 @@ describe("cross-platform runtime paths", () => {
     expect(resolveOpenFolderCommand("C:\\Images", "win32")).toEqual({
       command: "explorer.exe",
       args: ["C:\\Images"],
+    });
+  });
+
+  test("reveals generated files with OS-specific folder commands", () => {
+    expect(resolveRevealPathCommand("/tmp/images/generated.pdf", false, "darwin")).toEqual({
+      command: "open",
+      args: ["-R", "/tmp/images/generated.pdf"],
+    });
+    expect(resolveRevealPathCommand("/tmp/images/generated.pdf", false, "linux")).toEqual({
+      command: "xdg-open",
+      args: ["/tmp/images"],
+    });
+    expect(resolveRevealPathCommand("C:\\Images\\generated.pdf", false, "win32")).toEqual({
+      command: "explorer.exe",
+      args: ["/select,C:\\Images\\generated.pdf"],
     });
   });
 

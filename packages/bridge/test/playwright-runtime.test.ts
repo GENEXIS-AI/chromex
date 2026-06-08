@@ -17,4 +17,10 @@ describe("Playwright runtime helpers", () => {
       "chrome-win64/headless_shell.exe",
     ]);
   });
+
+  test("recognizes current macOS Playwright Chromium cache layouts", () => {
+    expect(chromiumExecutableCandidates("darwin")).toContain(
+      "chrome-mac-x64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+    );
+  });
 });

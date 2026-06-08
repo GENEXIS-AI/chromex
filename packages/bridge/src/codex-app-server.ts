@@ -1,6 +1,8 @@
 import { spawn, type ChildProcessByStdio } from "node:child_process";
+import { createRequire } from "node:module";
 import type { Readable, Writable } from "node:stream";
 import readline from "node:readline";
+import { pathToFileURL } from "node:url";
 
 import { resolveCodexCommand, type CodexCommandResolution } from "./codex-discovery.js";
 
@@ -38,6 +40,24 @@ const APP_SERVER_OVERLOADED_MESSAGE = "Server overloaded; retry later.";
 const MAX_OVERLOAD_RETRIES = 4;
 const BASE_OVERLOAD_RETRY_DELAY_MS = 100;
 const MAX_OVERLOAD_RETRY_DELAY_MS = 2000;
+const require = createRequire(resolveCurrentModuleUrl(import.meta.url));
+const BRIDGE_PACKAGE_VERSION = readBridgePackageVersion();
+const PROVIDER_API_KEY_ENV_KEYS = [
+  "OPENAI_API_KEY",
+  "OPENAI_API_KEY_FILE",
+  "CODEX_API_KEY",
+  "CODEX_API_KEY_FILE",
+] as const;
+
+function resolveCurrentModuleUrl(moduleUrl: string | undefined): string {
+  if (moduleUrl) {
+    return moduleUrl;
+  }
+  if (typeof __filename === "string") {
+    return pathToFileURL(__filename).href;
+  }
+  return pathToFileURL(process.argv[1] ?? process.cwd()).href;
+}
 
 export class CodexAppServerClient {
   #process: ChildProcessByStdio<Writable, Readable, null> | null = null;
@@ -145,13 +165,14 @@ export class CodexAppServerClient {
     if (!resolution.resolvedCommand) {
       throw new Error(
         resolution.configuredCommandInvalid
-          ? `Configured Codex binary could not be used and no fallback Codex binary was detected automatically.`
-          : "No Codex binary was detected automatically. Install Codex or add it to PATH.",
+          ? `Configured Codex binary could not be used and no fallback Codex CLI or app-server binary was detected automatically.`
+          : "No Codex CLI or app-server binary was detected automatically. Install Codex or add it to PATH.",
       );
     }
     const command = resolution.resolvedCommand;
-    this.#process = this.#spawnImpl(command, this.#buildAppServerArgs(), {
+    this.#process = this.#spawnImpl(command, this.#buildAppServerArgs(command), {
       stdio: ["pipe", "pipe", "inherit"],
+      env: createCodexAppServerProcessEnv(process.env),
       ...createCodexSpawnOptions(command),
     });
     this.#process.on("error", (error) => {
@@ -176,7 +197,8 @@ export class CodexAppServerClient {
       await this.#requestInternal("initialize", {
         clientInfo: {
           name: "codex-chrome-sidepanel-bridge",
-          version: "0.1.0",
+          title: "Chromex",
+          version: BRIDGE_PACKAGE_VERSION,
         },
         capabilities: this.#experimentalApi ? { experimentalApi: true } : {},
       });
@@ -188,13 +210,8 @@ export class CodexAppServerClient {
     }
   }
 
-  #buildAppServerArgs(): string[] {
-    return [
-      "app-server",
-      ...this.#enabledFeatures.flatMap((feature) => ["--enable", feature]),
-      "--listen",
-      "stdio://",
-    ];
+  #buildAppServerArgs(command: string): string[] {
+    return createCodexAppServerArgs(command, this.#enabledFeatures);
   }
 
   #write(message: JsonRpcMessage): void {
@@ -361,11 +378,58 @@ function toStartupError(command: string, error: unknown): Error {
   return new Error(`Failed to start codex app-server with "${command}": ${message}`);
 }
 
+export function createCodexAppServerProcessEnv(baseEnv: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const env = { ...baseEnv };
+  for (const key of PROVIDER_API_KEY_ENV_KEYS) {
+    deleteEnvKeyCaseInsensitive(env, key);
+  }
+  return env;
+}
+
+function deleteEnvKeyCaseInsensitive(env: NodeJS.ProcessEnv, key: string): void {
+  delete env[key];
+  const normalized = key.toLowerCase();
+  for (const actualKey of Object.keys(env)) {
+    if (actualKey.toLowerCase() === normalized) {
+      delete env[actualKey];
+    }
+  }
+}
+
+export function createCodexAppServerArgs(command: string, enabledFeatures: string[] = []): string[] {
+  const transportArgs = [
+    ...Array.from(new Set(enabledFeatures)).filter(Boolean).flatMap((feature) => ["--enable", feature]),
+    "--listen",
+    "stdio://",
+  ];
+  if (isStandaloneCodexAppServerCommand(command)) {
+    return transportArgs;
+  }
+  return ["app-server", ...transportArgs];
+}
+
 export function createCodexSpawnOptions(
   command: string,
   platformName: NodeJS.Platform = process.platform,
 ): { shell?: boolean } {
   return platformName === "win32" ? { shell: true } : {};
+}
+
+function isStandaloneCodexAppServerCommand(command: string): boolean {
+  const basename = command.replace(/\\/gu, "/").split("/").pop()?.toLowerCase() ?? "";
+  const stem = basename.replace(/\.(?:exe|cmd|bat|com)$/iu, "");
+  return stem === "codex-app-server" || /^codex-app-server-(?:aarch64|x86_64)-/u.test(stem);
+}
+
+function readBridgePackageVersion(): string {
+  try {
+    const packageJson = require("../package.json") as { version?: unknown };
+    return typeof packageJson.version === "string" && packageJson.version.trim()
+      ? packageJson.version
+      : "0.0.0";
+  } catch {
+    return "0.0.0";
+  }
 }
 
 function delay(delayMs: number): Promise<void> {

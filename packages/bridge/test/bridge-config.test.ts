@@ -6,7 +6,11 @@ import { PassThrough } from "node:stream";
 
 import { afterEach, describe, expect, test } from "vitest";
 
-import { createCodexSpawnOptions } from "../src/codex-app-server.js";
+import {
+  createCodexAppServerArgs,
+  createCodexAppServerProcessEnv,
+  createCodexSpawnOptions,
+} from "../src/codex-app-server.js";
 import { BridgeHarnessRuntime, CodexAppServerClient, CodexVoicePlane, InMemoryBridgeSecrets } from "../src/index.js";
 import type { BridgeEvent } from "../src/index.js";
 
@@ -106,6 +110,27 @@ describe("InMemoryBridgeSecrets", () => {
     expect(secondStore.hasOpenAiApiKey()).toBe(true);
     expect(secondStore.getOpenAiApiKey()).toBe("persisted-test-openai-key");
   });
+
+  test("does not auto-import provider API keys from the process environment", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "bridge-secrets-"));
+    tempDirs.push(dir);
+    const secretPath = join(dir, "secrets.json");
+    const previousEnvKey = process.env[OPENAI_API_KEY_ENV_NAME];
+    process.env[OPENAI_API_KEY_ENV_NAME] = "test-env-key-should-not-be-used";
+
+    try {
+      const store = new InMemoryBridgeSecrets({ secretPath });
+
+      expect(store.hasOpenAiApiKey()).toBe(false);
+      expect(store.getOpenAiApiKey()).toBeUndefined();
+    } finally {
+      if (previousEnvKey) {
+        process.env[OPENAI_API_KEY_ENV_NAME] = previousEnvKey;
+      } else {
+        delete process.env[OPENAI_API_KEY_ENV_NAME];
+      }
+    }
+  });
 });
 
 describe("Codex app-server startup", () => {
@@ -123,6 +148,42 @@ describe("Codex app-server startup", () => {
       shell: true,
     });
     expect(createCodexSpawnOptions("/usr/local/bin/codex", "darwin")).toEqual({});
+  });
+
+  test("uses the correct subcommand shape for Codex CLI and standalone app-server binaries", () => {
+    expect(createCodexAppServerArgs("/usr/local/bin/codex", ["realtime_conversation"])).toEqual([
+      "app-server",
+      "--enable",
+      "realtime_conversation",
+      "--listen",
+      "stdio://",
+    ]);
+    expect(createCodexAppServerArgs("C:\\Tools\\codex-app-server.exe", ["realtime_conversation"])).toEqual([
+      "--enable",
+      "realtime_conversation",
+      "--listen",
+      "stdio://",
+    ]);
+    expect(createCodexAppServerArgs("C:\\Tools\\codex-app-server-x86_64-pc-windows-msvc.exe")).toEqual([
+      "--listen",
+      "stdio://",
+    ]);
+  });
+
+  test("does not forward provider API key environment values into Codex app-server", () => {
+    const env = createCodexAppServerProcessEnv({
+      PATH: "/usr/bin",
+      OPENAI_API_KEY: "test-openai-env-key",
+      OpenAI_Api_Key_File: "/tmp/openai-key",
+      CODEX_API_KEY: "test-codex-env-key",
+      CODEX_API_KEY_FILE: "/tmp/codex-key",
+    });
+
+    expect(env.PATH).toBe("/usr/bin");
+    expect(env.OPENAI_API_KEY).toBeUndefined();
+    expect(env.OpenAI_Api_Key_File).toBeUndefined();
+    expect(env.CODEX_API_KEY).toBeUndefined();
+    expect(env.CODEX_API_KEY_FILE).toBeUndefined();
   });
 });
 
@@ -569,7 +630,7 @@ describe("CodexAppServerClient", () => {
     await client.shutdown();
   });
 
-  test("starts app-server realtime voice over websocket and appends spoken text", async () => {
+  test("does not start websocket realtime voice through API-key auth", async () => {
     const child = createFakeChildProcess();
     const writes: Array<Record<string, unknown>> = [];
     let inputBuffer = "";
@@ -593,7 +654,7 @@ describe("CodexAppServerClient", () => {
           child.stdout.write(
             `${JSON.stringify({
               id: message.id,
-              result: { account: { type: "chatgpt" }, requiresOpenaiAuth: false },
+              result: { account: { type: "apiKey" }, requiresOpenaiAuth: false },
             })}\n`,
           );
         }
@@ -638,54 +699,213 @@ describe("CodexAppServerClient", () => {
     });
 
     const state = await voice.start({ voice: "sage" });
-    await voice.appendText({ text: "Hello Codex." });
-    await voice.appendAudio({
-      audio: {
-        data: "AQID",
-        sampleRate: 24_000,
-        numChannels: 1,
-        samplesPerChannel: 3,
-      },
-    });
 
     expect(state).toMatchObject({
-      threadId: "thread-voice",
-      transport: "websocket",
-      outputModality: "audio",
+      status: "error",
+      error: expect.stringMatching(/does not run Codex requests through API-key auth/u),
+      realtimeAvailable: false,
     });
-    expect(writes.find((message) => message.method === "thread/realtime/start")).toMatchObject({
+    expect(writes.find((message) => message.method === "thread/start")).toBeUndefined();
+    expect(writes.find((message) => message.method === "thread/realtime/start")).toBeUndefined();
+    await expect(voice.appendText({ text: "Hello Codex." })).rejects.toThrow(/No active Codex realtime voice thread/u);
+    expect(emitted).toEqual([]);
+
+    await client.shutdown();
+  });
+
+  test("preserves the requested realtime session id when the app-server started notification omits it", async () => {
+    const child = createFakeChildProcess();
+    const writes: Array<Record<string, unknown>> = [];
+    let inputBuffer = "";
+
+    child.stdin.on("data", (chunk: Buffer) => {
+      inputBuffer += chunk.toString("utf8");
+      let newlineIndex = inputBuffer.indexOf("\n");
+      while (newlineIndex >= 0) {
+        const line = inputBuffer.slice(0, newlineIndex);
+        inputBuffer = inputBuffer.slice(newlineIndex + 1);
+        newlineIndex = inputBuffer.indexOf("\n");
+        if (!line.trim()) {
+          continue;
+        }
+        const message = JSON.parse(line) as { id?: number; method?: string; params?: Record<string, unknown> };
+        writes.push(message as Record<string, unknown>);
+        if (message.id && message.method === "initialize") {
+          child.stdout.write(`${JSON.stringify({ id: message.id, result: {} })}\n`);
+        }
+        if (message.id && message.method === "account/read") {
+          child.stdout.write(
+            `${JSON.stringify({
+              id: message.id,
+              result: { account: { type: "chatgpt" }, requiresOpenaiAuth: false },
+            })}\n`,
+          );
+        }
+        if (message.id && message.method === "thread/start") {
+          child.stdout.write(`${JSON.stringify({ id: message.id, result: { thread: { id: "thread-dictation" } } })}\n`);
+        }
+        if (message.id && message.method === "thread/realtime/start") {
+          child.stdout.write(`${JSON.stringify({ id: message.id, result: {} })}\n`);
+          child.stdout.write(
+            `${JSON.stringify({
+              method: "thread/realtime/started",
+              params: { threadId: "thread-dictation", version: "v2" },
+            })}\n`,
+          );
+        }
+      }
+    });
+
+    const client = new CodexAppServerClient({
+      experimentalApi: true,
+      spawnImpl: () => child as never,
+      resolveCommandImpl: async () => ({
+        configuredCommand: null,
+        resolvedCommand: "/opt/homebrew/bin/codex",
+        source: "path",
+        configuredCommandInvalid: false,
+      }),
+    });
+    const userRoot = await mkdtemp(join(tmpdir(), "voice-user-"));
+    tempDirs.push(userRoot);
+    const emitted: BridgeEvent[] = [];
+    const voice = new CodexVoicePlane({
+      client,
+      harness: new BridgeHarnessRuntime({ userRoot }),
+      emitEvent: (event) => emitted.push(event),
+    });
+
+    await voice.start({
+      sdp: "offer-sdp",
+      outputModality: "text",
+      sessionId: "sidepanel-dictation-1",
+      prompt: "Transcribe only.",
+    });
+
+    const realtimeStart = writes.find((message) => message.method === "thread/realtime/start");
+    expect(realtimeStart).toMatchObject({
       params: {
-        threadId: "thread-voice",
-        outputModality: "audio",
-        voice: "sage",
-        transport: {
-          type: "websocket",
-        },
+        threadId: "thread-dictation",
+        outputModality: "text",
       },
     });
-    expect(writes.find((message) => message.method === "thread/realtime/appendText")).toMatchObject({
-      params: {
-        threadId: "thread-voice",
-        text: "Hello Codex.",
-      },
-    });
-    expect(writes.find((message) => message.method === "thread/realtime/appendAudio")).toMatchObject({
-      params: {
-        threadId: "thread-voice",
-        audio: {
-          data: "AQID",
-          sampleRate: 24_000,
-          numChannels: 1,
-          samplesPerChannel: 3,
-        },
-      },
-    });
+    expect(realtimeStart?.params).not.toHaveProperty("sessionId");
+    expect(realtimeStart?.params).not.toHaveProperty("realtimeSessionId");
     expect(emitted).toContainEqual({
       type: "voice.session.started",
-      threadId: "thread-voice",
-      sessionId: "voice-session-1",
-      transport: "websocket",
+      threadId: "thread-dictation",
+      sessionId: "sidepanel-dictation-1",
+      transport: "webrtc",
     });
+
+    await client.shutdown();
+  });
+
+  test("preserves realtime session ids on stopped and error notifications", async () => {
+    const child = createFakeChildProcess();
+    const writes: Array<Record<string, unknown>> = [];
+    let inputBuffer = "";
+
+    child.stdin.on("data", (chunk: Buffer) => {
+      inputBuffer += chunk.toString("utf8");
+      let newlineIndex = inputBuffer.indexOf("\n");
+      while (newlineIndex >= 0) {
+        const line = inputBuffer.slice(0, newlineIndex);
+        inputBuffer = inputBuffer.slice(newlineIndex + 1);
+        newlineIndex = inputBuffer.indexOf("\n");
+        if (!line.trim()) {
+          continue;
+        }
+        const message = JSON.parse(line) as { id?: number; method?: string; params?: Record<string, unknown> };
+        writes.push(message as Record<string, unknown>);
+        if (message.id && message.method === "initialize") {
+          child.stdout.write(`${JSON.stringify({ id: message.id, result: {} })}\n`);
+        }
+        if (message.id && message.method === "account/read") {
+          child.stdout.write(
+            `${JSON.stringify({
+              id: message.id,
+              result: { account: { type: "chatgpt" }, requiresOpenaiAuth: false },
+            })}\n`,
+          );
+        }
+        if (message.id && message.method === "thread/start") {
+          child.stdout.write(`${JSON.stringify({ id: message.id, result: { thread: { id: "thread-dictation" } } })}\n`);
+        }
+        if (message.id && message.method === "thread/realtime/start") {
+          child.stdout.write(`${JSON.stringify({ id: message.id, result: {} })}\n`);
+          child.stdout.write(
+            `${JSON.stringify({
+              method: "thread/realtime/started",
+              params: { threadId: "thread-dictation", sessionId: "sidepanel-dictation-2", version: "v2" },
+            })}\n`,
+          );
+        }
+      }
+    });
+
+    const client = new CodexAppServerClient({
+      experimentalApi: true,
+      spawnImpl: () => child as never,
+      resolveCommandImpl: async () => ({
+        configuredCommand: null,
+        resolvedCommand: "/opt/homebrew/bin/codex",
+        source: "path",
+        configuredCommandInvalid: false,
+      }),
+    });
+    const userRoot = await mkdtemp(join(tmpdir(), "voice-user-"));
+    tempDirs.push(userRoot);
+    const emitted: BridgeEvent[] = [];
+    const voice = new CodexVoicePlane({
+      client,
+      harness: new BridgeHarnessRuntime({ userRoot }),
+      emitEvent: (event) => emitted.push(event),
+    });
+
+    await voice.start({
+      sdp: "offer-sdp",
+      outputModality: "text",
+      sessionId: "sidepanel-dictation-2",
+      prompt: "Transcribe only.",
+    });
+
+    child.stdout.write(
+      `${JSON.stringify({
+        method: "thread/realtime/error",
+        params: { threadId: "thread-dictation", sessionId: "sidepanel-dictation-2", message: "Audio input failed." },
+      })}\n`,
+    );
+    child.stdout.write(
+      `${JSON.stringify({
+        method: "thread/realtime/closed",
+        params: { threadId: "thread-dictation", sessionId: "sidepanel-dictation-2", reason: "audio ended" },
+      })}\n`,
+    );
+
+    await waitFor(() => {
+      expect(emitted).toContainEqual({
+        type: "voice.error",
+        threadId: "thread-dictation",
+        sessionId: "sidepanel-dictation-2",
+        message: "Audio input failed.",
+      });
+      expect(emitted).toContainEqual({
+        type: "voice.session.stopped",
+        threadId: "thread-dictation",
+        sessionId: "sidepanel-dictation-2",
+        reason: "audio ended",
+      });
+    });
+
+    const realtimeStart = writes.find((message) => message.method === "thread/realtime/start");
+    expect(realtimeStart).toMatchObject({
+      params: {
+        threadId: "thread-dictation",
+      },
+    });
+    expect(realtimeStart?.params).not.toHaveProperty("sessionId");
+    expect(realtimeStart?.params).not.toHaveProperty("realtimeSessionId");
 
     await client.shutdown();
   });

@@ -1,3 +1,7 @@
+import { chmod, mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { describe, expect, test } from "vitest";
 
 import { resolveCodexCommand } from "../src/codex-discovery.js";
@@ -66,6 +70,42 @@ describe("resolveCodexCommand", () => {
     });
   });
 
+  test("prefers the standalone app-server command from PATH when it is installed", async () => {
+    const result = await resolveCodexCommand({
+      configuredCommand: "",
+      envCommand: "",
+      pathValue: "/opt/homebrew/bin:/usr/bin",
+      platformName: "darwin",
+      homeDirectory: "/Users/example",
+      isExecutable: createExecutableProbe(["/opt/homebrew/bin/codex-app-server", "/opt/homebrew/bin/codex"]),
+    });
+
+    expect(result).toEqual({
+      configuredCommand: "",
+      resolvedCommand: "/opt/homebrew/bin/codex-app-server",
+      source: "path",
+      configuredCommandInvalid: false,
+    });
+  });
+
+  test("finds the standalone app-server in the macOS Codex app bundle", async () => {
+    const result = await resolveCodexCommand({
+      configuredCommand: "",
+      envCommand: "",
+      pathValue: "/usr/bin:/bin:/usr/sbin:/sbin",
+      platformName: "darwin",
+      homeDirectory: "/Users/example",
+      isExecutable: createExecutableProbe(["/Applications/Codex.app/Contents/Resources/codex-app-server"]),
+    });
+
+    expect(result).toEqual({
+      configuredCommand: "",
+      resolvedCommand: "/Applications/Codex.app/Contents/Resources/codex-app-server",
+      source: "common",
+      configuredCommandInvalid: false,
+    });
+  });
+
   test("resolves Windows absolute commands and PATH variants with Windows path semantics", async () => {
     const result = await resolveCodexCommand({
       configuredCommand: "C:\\Users\\example\\AppData\\Local\\Programs\\Codex\\codex.exe",
@@ -78,6 +118,44 @@ describe("resolveCodexCommand", () => {
     expect(result).toEqual({
       configuredCommand: "C:\\Users\\example\\AppData\\Local\\Programs\\Codex\\codex.exe",
       resolvedCommand: "C:\\Users\\example\\AppData\\Local\\Programs\\Codex\\codex.exe",
+      source: "configured",
+      configuredCommandInvalid: false,
+    });
+  });
+
+  test("accepts a configured Windows install folder by resolving codex-app-server.exe inside it", async () => {
+    const result = await resolveCodexCommand({
+      configuredCommand: "C:\\Users\\example\\AppData\\Local\\Programs\\Codex",
+      pathValue: "C:\\Windows\\System32",
+      platformName: "win32",
+      homeDirectory: "C:\\Users\\example",
+      isExecutable: createExecutableProbe(["C:\\Users\\example\\AppData\\Local\\Programs\\Codex\\codex-app-server.exe"]),
+      isDirectory: createDirectoryProbe(["C:\\Users\\example\\AppData\\Local\\Programs\\Codex"]),
+    });
+
+    expect(result).toEqual({
+      configuredCommand: "C:\\Users\\example\\AppData\\Local\\Programs\\Codex",
+      resolvedCommand: "C:\\Users\\example\\AppData\\Local\\Programs\\Codex\\codex-app-server.exe",
+      source: "configured",
+      configuredCommandInvalid: false,
+    });
+  });
+
+  test("accepts an unpacked Windows app-server release artifact without renaming it", async () => {
+    const result = await resolveCodexCommand({
+      configuredCommand: "C:\\Users\\example\\Downloads\\codex-release",
+      pathValue: "C:\\Windows\\System32",
+      platformName: "win32",
+      homeDirectory: "C:\\Users\\example",
+      isExecutable: createExecutableProbe([
+        "C:\\Users\\example\\Downloads\\codex-release\\codex-app-server-x86_64-pc-windows-msvc.exe",
+      ]),
+      isDirectory: createDirectoryProbe(["C:\\Users\\example\\Downloads\\codex-release"]),
+    });
+
+    expect(result).toEqual({
+      configuredCommand: "C:\\Users\\example\\Downloads\\codex-release",
+      resolvedCommand: "C:\\Users\\example\\Downloads\\codex-release\\codex-app-server-x86_64-pc-windows-msvc.exe",
       source: "configured",
       configuredCommandInvalid: false,
     });
@@ -196,6 +274,27 @@ describe("resolveCodexCommand", () => {
     });
   });
 
+  test("finds the standalone Windows app-server when Chrome provides a minimal PATH", async () => {
+    const result = await resolveCodexCommand({
+      configuredCommand: "",
+      envCommand: "",
+      pathValue: "C:\\Windows\\System32",
+      env: {
+        LOCALAPPDATA: "C:\\Users\\example\\AppData\\Local",
+      },
+      platformName: "win32",
+      homeDirectory: "C:\\Users\\example",
+      isExecutable: createExecutableProbe(["C:\\Users\\example\\AppData\\Local\\Programs\\Codex\\codex-app-server.exe"]),
+    });
+
+    expect(result).toEqual({
+      configuredCommand: "",
+      resolvedCommand: "C:\\Users\\example\\AppData\\Local\\Programs\\Codex\\codex-app-server.exe",
+      source: "common",
+      configuredCommandInvalid: false,
+    });
+  });
+
   test("finds common Windows package-manager shims when Chrome provides a minimal PATH", async () => {
     const result = await resolveCodexCommand({
       configuredCommand: "",
@@ -276,6 +375,28 @@ describe("resolveCodexCommand", () => {
       resolvedCommand: "",
       source: "missing",
       configuredCommandInvalid: true,
+    });
+  });
+
+  test("detects a Windows npm cmd shim by file existence even when execute bits are absent", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "chromex-codex-shim-"));
+    const shimPath = join(tempDir, "codex.cmd");
+    await writeFile(shimPath, "@echo off\r\n");
+    await chmod(shimPath, 0o600);
+
+    const result = await resolveCodexCommand({
+      configuredCommand: shimPath,
+      envCommand: "",
+      pathValue: "",
+      platformName: "win32",
+      homeDirectory: "C:\\Users\\example",
+    });
+
+    expect(result).toEqual({
+      configuredCommand: shimPath,
+      resolvedCommand: shimPath,
+      source: "configured",
+      configuredCommandInvalid: false,
     });
   });
 });

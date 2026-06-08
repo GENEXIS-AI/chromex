@@ -5,7 +5,7 @@ import { dirname, resolve } from "node:path";
 import readline from "node:readline";
 
 import { NativeMessageStreamDecoder, encodeNativeMessage } from "./framing.js";
-import { createBridgeProcessEnv } from "./environment.js";
+import { createBridgeProcessEnv, mergeShellProviderEnv } from "./environment.js";
 
 export class NativeHostRelay {
   readonly #decoder = new NativeMessageStreamDecoder();
@@ -13,9 +13,10 @@ export class NativeHostRelay {
   #shuttingDown = false;
 
   start(): void {
+    const bridgeBaseEnv = mergeShellProviderEnv(process.env);
     this.#bridge = spawn(process.execPath, [this.#resolveBridgeEntry()], {
       stdio: ["pipe", "pipe", "inherit"],
-      env: createBridgeProcessEnv(process.env),
+      env: createBridgeProcessEnv(bridgeBaseEnv),
     });
     this.#bridge.stdin.on("error", (error) => {
       if (this.#handleOutputError(error)) {

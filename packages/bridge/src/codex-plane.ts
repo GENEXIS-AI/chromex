@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   type CodexAppOption,
+  type CodexTurnPlan,
   type CodexStructuredInput,
   fitTextToTokenBudget,
   type CodexMcpServerOption,
@@ -40,19 +41,31 @@ import type {
   BridgeEvent,
   BridgeImagePlane,
   BridgeVoicePlane,
+  GoalClearResult,
+  GoalGetResult,
+  GoalSetParams,
+  GoalSetResult,
   ImageEditParams,
   ImageGenerateParams,
   ImagePreviewParams,
   LoginParams,
+  PlanUserInputResponseParams,
   PromptSendParams,
   SessionParams,
   ThreadCompactParams,
   ThreadCompactResult,
+  ThreadGoal,
   VoiceStartParams,
   VoiceStopParams,
 } from "./types.js";
 
 type NotificationPayload = {
+  method: string;
+  params?: Record<string, unknown>;
+};
+
+type ServerRequestPayload = {
+  id: string | number;
   method: string;
   params?: Record<string, unknown>;
 };
@@ -74,8 +87,15 @@ type AgentMessageItem = {
   body?: unknown;
   markdown?: unknown;
   output?: unknown;
+  outputText?: unknown;
+  output_text?: unknown;
   final?: unknown;
+  response?: unknown;
+  result?: unknown;
+  answer?: unknown;
   value?: unknown;
+  parts?: unknown;
+  items?: unknown;
 };
 
 type ThreadScopedEventContext = {
@@ -86,6 +106,15 @@ type ThreadScopedEventContext = {
 type ContextCompactionItem = {
   id?: string;
   type?: string;
+};
+
+type PlanItem = {
+  id?: string;
+  type?: string;
+  explanation?: unknown;
+  plan?: unknown;
+  steps?: unknown;
+  items?: unknown;
 };
 
 type AccountReadResult = {
@@ -127,6 +156,13 @@ const COMPACTION_WAIT_TIMEOUT_MS = 20 * 60 * 1000;
 const MAX_PROMPT_RECONNECT_ATTEMPTS = 5;
 const BASE_PROMPT_RECONNECT_DELAY_MS = 600;
 const MAX_PROMPT_RECONNECT_DELAY_MS = 8_000;
+const MAX_GOAL_AUTOCONTINUE_TURNS = 20;
+const GOAL_AUTOCONTINUE_MESSAGE =
+  "Continue working toward the active goal. If the goal is fully achieved, update the goal status to complete. Otherwise, complete the next necessary step now and continue until the goal is complete.";
+const REALTIME_REQUIRES_API_KEY_ERROR =
+  "Codex app-server WebSocket realtime audio and transcription require API-key authentication. ChatGPT login can still use WebRTC realtime when the browser provides an SDP offer.";
+const CHROMEX_API_KEY_AUTH_DISABLED_ERROR =
+  "Chromex does not run Codex requests through API-key auth. Sign out of the Codex API-key session and sign in with ChatGPT OAuth, then retry.";
 
 function hasAuthenticatedCodexAccount(result: AccountReadResult): boolean {
   return Boolean(result.account) || result.requiresOpenaiAuth === false;
@@ -151,6 +187,21 @@ function isFreeCodexAccount(result: AccountReadResult): boolean {
 
 function isApiKeyCodexAccount(result: AccountReadResult): boolean {
   return result.account?.type === "apiKey";
+}
+
+function assertChromexChatgptManagedAuth(result: AccountReadResult): void {
+  if (isApiKeyCodexAccount(result)) {
+    throw new Error(CHROMEX_API_KEY_AUTH_DISABLED_ERROR);
+  }
+}
+
+function createRealtimeRequiresApiKeyState(): VoiceSessionState {
+  return {
+    status: "error",
+    errorCode: "requires-api-key",
+    error: REALTIME_REQUIRES_API_KEY_ERROR,
+    realtimeAvailable: false,
+  };
 }
 
 function normalizeImageEditParamsForAccount(params: ImageEditParams, account: AccountReadResult): ImageEditParams {
@@ -190,6 +241,216 @@ function isContextCompactionItem(value: unknown): value is ContextCompactionItem
   return typeof value === "object" && value !== null && (value as { type?: unknown }).type === "contextCompaction";
 }
 
+function isPlanItem(value: unknown): value is PlanItem {
+  const record = asRecord(value);
+  if (!record) {
+    return false;
+  }
+  const type = String(record.type ?? "");
+  return isPlanItemType(type) || isPlanToolName(getPlanToolName(record));
+}
+
+function extractTurnPlanFromItem(item: unknown, context: ThreadScopedEventContext): CodexTurnPlan | null {
+  if (!isPlanItem(item)) {
+    return null;
+  }
+  const record = asRecord(item);
+  if (!record) {
+    return null;
+  }
+  const planRecord = findPlanPayloadRecord(record);
+  const rawSteps = Array.isArray(planRecord?.plan)
+    ? planRecord.plan
+    : Array.isArray(planRecord?.steps)
+      ? planRecord.steps
+      : Array.isArray(planRecord?.items)
+        ? planRecord.items
+        : [];
+  const steps = normalizeTurnPlanSteps(rawSteps);
+  if (!steps.length) {
+    return null;
+  }
+  return {
+    threadId: context.threadId,
+    turnId: context.turnId,
+    explanation: extractTextContent(planRecord?.explanation ?? planRecord?.summary ?? planRecord?.title) || null,
+    steps,
+  };
+}
+
+function normalizeTurnPlanSteps(rawSteps: unknown[]): Array<{ step: string; status: string }> {
+  return rawSteps
+    .flatMap((step) => {
+      const stepRecord = asRecord(step);
+      const text = stepRecord
+        ? extractTextContent(stepRecord.step ?? stepRecord.text ?? stepRecord.title ?? stepRecord.description)
+        : extractTextContent(step);
+      const status = stepRecord ? extractTextContent(stepRecord.status ?? stepRecord.state) : "";
+      return splitPlanStepText(text).map((part) => ({
+        step: part,
+        status: status || "pending",
+      }));
+    })
+    .filter((step) => step.step);
+}
+
+function splitPlanStepText(text: string): string[] {
+  const normalized = text.trim();
+  if (!normalized) {
+    return [];
+  }
+  const lines = normalized
+    .split(/\r?\n/u)
+    .map((line) => line.replace(/^\s*(?:[-*]|\d+[.)])\s+/u, "").trim())
+    .filter(Boolean);
+  return lines.length > 1 ? lines : [normalized];
+}
+
+function isPlanItemType(type: string): boolean {
+  return /^(?:plan|turnPlan|update_plan)$/iu.test(type.trim());
+}
+
+function isPlanToolName(name: string): boolean {
+  return /^(?:plan|update_plan|turn\.plan\.updated)$/iu.test(name.trim());
+}
+
+function getPlanToolName(record: Record<string, unknown>): string {
+  return (
+    getStringField(record, "name") ||
+    getStringField(record, "toolName") ||
+    getStringField(record, "tool_name") ||
+    getNestedString(record, ["tool", "name"]) ||
+    getNestedString(record, ["function", "name"]) ||
+    getNestedString(record, ["call", "name"]) ||
+    getNestedString(record, ["call", "function", "name"]) ||
+    getNestedString(record, ["toolCall", "name"]) ||
+    getNestedString(record, ["toolCall", "toolName"]) ||
+    getNestedString(record, ["toolCall", "function", "name"]) ||
+    getNestedString(record, ["tool_call", "name"]) ||
+    getNestedString(record, ["tool_call", "function", "name"]) ||
+    getNestedString(record, ["functionCall", "name"]) ||
+    getNestedString(record, ["function_call", "name"]) ||
+    getNestedString(record, ["mcpToolCall", "name"]) ||
+    getNestedString(record, ["mcp_tool_call", "name"])
+  );
+}
+
+function findPlanPayloadRecord(record: Record<string, unknown>): Record<string, unknown> | null {
+  const candidates = listPlanPayloadCandidates(record);
+  return (
+    candidates.find(
+      (candidate) => Array.isArray(candidate.plan) || Array.isArray(candidate.steps) || Array.isArray(candidate.items),
+    ) ?? null
+  );
+}
+
+function listPlanPayloadCandidates(record: Record<string, unknown>): Record<string, unknown>[] {
+  const output: Record<string, unknown>[] = [];
+  const queue: unknown[] = [
+    record,
+    record.arguments,
+    record.argumentsJson,
+    record.arguments_json,
+    record.args,
+    record.input,
+    record.inputJson,
+    record.input_json,
+    record.params,
+    record.output,
+    record.outputJson,
+    record.output_json,
+    record.result,
+    record.response,
+    record.structuredContent,
+    record.structured_content,
+    record.content,
+    record.data,
+    record.payload,
+    record.value,
+    record.parsedArguments,
+    record.parsed_arguments,
+    record.toolCall,
+    record.tool_call,
+    record.functionCall,
+    record.function_call,
+    record.mcpToolCall,
+    record.mcp_tool_call,
+    record.call,
+  ];
+  const seen = new Set<unknown>();
+
+  while (queue.length) {
+    const value = queue.shift();
+    if (value == null || seen.has(value)) {
+      continue;
+    }
+    seen.add(value);
+    if (typeof value === "string") {
+      const parsed = parseJsonValue(value);
+      if (parsed !== null) {
+        queue.push(parsed);
+      } else if (value.trim()) {
+        output.push({ items: [value] });
+      }
+      continue;
+    }
+    if (Array.isArray(value)) {
+      output.push({ items: value });
+      queue.push(...value);
+      continue;
+    }
+    const candidate = asRecord(value);
+    if (!candidate) {
+      continue;
+    }
+    output.push(candidate);
+    queue.push(
+      candidate.arguments,
+      candidate.argumentsJson,
+      candidate.arguments_json,
+      candidate.args,
+      candidate.input,
+      candidate.inputJson,
+      candidate.input_json,
+      candidate.params,
+      candidate.output,
+      candidate.outputJson,
+      candidate.output_json,
+      candidate.result,
+      candidate.response,
+      candidate.structuredContent,
+      candidate.structured_content,
+      candidate.content,
+      candidate.data,
+      candidate.payload,
+      candidate.value,
+      candidate.parsedArguments,
+      candidate.parsed_arguments,
+      candidate.toolCall,
+      candidate.tool_call,
+      candidate.functionCall,
+      candidate.function_call,
+      candidate.mcpToolCall,
+      candidate.mcp_tool_call,
+      candidate.call,
+    );
+  }
+
+  return output;
+}
+
+function parseJsonValue(value: string): unknown | null {
+  const trimmed = value.trim();
+  if (!trimmed || (!trimmed.startsWith("{") && !trimmed.startsWith("["))) {
+    return null;
+  }
+  try {
+    return JSON.parse(trimmed) as unknown;
+  } catch {
+    return null;
+  }
+}
+
 function extractAgentMessageText(item: AgentMessageItem): string {
   for (const candidate of [
     item.text,
@@ -197,8 +458,15 @@ function extractAgentMessageText(item: AgentMessageItem): string {
     item.body,
     item.markdown,
     item.output,
+    item.outputText,
+    item.output_text,
     item.final,
+    item.response,
+    item.result,
+    item.answer,
     item.value,
+    item.parts,
+    item.items,
     item.content,
   ]) {
     const text = extractTextContent(candidate);
@@ -232,7 +500,23 @@ function extractTextContent(value: unknown, depth = 0): string {
     return "";
   }
 
-  for (const key of ["text", "content", "message", "body", "markdown", "output_text", "output", "final", "value"]) {
+  for (const key of [
+    "text",
+    "content",
+    "message",
+    "body",
+    "markdown",
+    "output_text",
+    "outputText",
+    "output",
+    "final",
+    "response",
+    "result",
+    "answer",
+    "value",
+    "parts",
+    "items",
+  ]) {
     const text = extractTextContent(record[key], depth + 1);
     if (text) {
       return text;
@@ -299,6 +583,7 @@ function createTurnActivityEvent(input: {
   const rawType = getStringField(item, "type") || "item";
   const type = rawType.toLowerCase();
   const itemId = getStringField(item, "id") || `${rawType}-${input.status}`;
+  const activitySignature = getActivitySignature(item, rawType);
   const base = {
     type: "turn.activity" as const,
     threadId: input.threadId,
@@ -312,7 +597,7 @@ function createTurnActivityEvent(input: {
     return null;
   }
 
-  if (type.includes("web") || type.includes("search")) {
+  if (type.includes("web") || type.includes("search") || looksLikeWebSearchActivity(activitySignature)) {
     return {
       ...base,
       kind: "web",
@@ -370,6 +655,14 @@ function createTurnActivityEvent(input: {
   }
 
   if (type.includes("tool") || type.includes("mcp") || type.includes("function")) {
+    if (looksLikeWebSearchActivity(activitySignature)) {
+      return {
+        ...base,
+        kind: "web",
+        title: input.status === "running" ? "Searching the web" : "Web search complete",
+        detail: getWebSearchActivityDetail(item, rawType),
+      };
+    }
     return {
       ...base,
       kind: "tool",
@@ -398,6 +691,44 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 function getStringField(record: Record<string, unknown>, field: string): string {
   const value = record[field];
   return typeof value === "string" ? value.trim() : "";
+}
+
+function getActivitySignature(item: Record<string, unknown>, rawType: string): string {
+  return [
+    rawType,
+    getNestedString(item, ["namespace"]),
+    getNestedString(item, ["server"]),
+    getNestedString(item, ["tool"]),
+    getNestedString(item, ["toolName"]),
+    getNestedString(item, ["name"]),
+    getNestedString(item, ["action"]),
+    getNestedString(item, ["arguments", "tool"]),
+    getNestedString(item, ["arguments", "name"]),
+    getNestedString(item, ["arguments", "query"]),
+    getNestedString(item, ["input", "tool"]),
+    getNestedString(item, ["input", "name"]),
+    getNestedString(item, ["input", "query"]),
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+}
+
+function looksLikeWebSearchActivity(value: string): boolean {
+  return /(?:\bweb\b|web[_-]?search|browser[_-]?search|search[_-]?query|searchquery|web\.run|open[_-]?url|fetch[_-]?(?:url|page)|crawl|browse)/iu.test(
+    value,
+  );
+}
+
+function getTurnErrorMessage(value: unknown): string {
+  const record = asRecord(value);
+  if (!record) {
+    return getErrorMessage(value);
+  }
+  const message = getStringField(record, "message");
+  const additionalDetails =
+    getStringField(record, "additionalDetails") || getStringField(record, "additional_details");
+  return [message, additionalDetails].filter(Boolean).join("\n").trim();
 }
 
 function getNestedString(record: Record<string, unknown>, path: string[]): string {
@@ -464,6 +795,119 @@ function summarizeString(value: string, maxLength = 180): string {
   return `${normalized.slice(0, maxLength - 1).trimEnd()}…`;
 }
 
+function mapThreadGoal(value: Record<string, unknown> | undefined | null, fallbackThreadId = ""): ThreadGoal {
+  return {
+    threadId: String(value?.threadId ?? fallbackThreadId),
+    objective: String(value?.objective ?? ""),
+    status: String(value?.status ?? "active"),
+    tokenBudget: normalizeOptionalNumber(value?.tokenBudget),
+    tokensUsed: normalizeOptionalNumber(value?.tokensUsed),
+    timeUsedSeconds: normalizeOptionalNumber(value?.timeUsedSeconds),
+    budgetLimited: typeof value?.budgetLimited === "boolean" ? value.budgetLimited : null,
+    createdAt: normalizeOptionalNumber(value?.createdAt),
+    updatedAt: normalizeOptionalNumber(value?.updatedAt),
+  };
+}
+
+function normalizeGoalStatus(status: string | null | undefined): string {
+  return (status ?? "").trim().toLowerCase();
+}
+
+function isGoalTerminalStatus(status: string | null | undefined): boolean {
+  return /^(?:complete|completed|done|success|succeeded|cancelled|canceled|failed|error)$/iu.test(
+    normalizeGoalStatus(status),
+  );
+}
+
+function shouldAutoContinueGoal(goal: ThreadGoal | null, completedContinuationTurns: number): boolean {
+  return Boolean(goal) && !isGoalTerminalStatus(goal?.status) && completedContinuationTurns < MAX_GOAL_AUTOCONTINUE_TURNS;
+}
+
+function buildGoalAutoContinueMessage(params: PromptSendParams, goal: ThreadGoal | null): string {
+  const objective = (goal?.objective || params.goalObjective || params.message).trim();
+  if (!objective) {
+    return GOAL_AUTOCONTINUE_MESSAGE;
+  }
+  return `${GOAL_AUTOCONTINUE_MESSAGE}\n\nActive goal: ${objective}`;
+}
+
+function buildGoalAutocontinueLimitMessage(goal: ThreadGoal | null): string {
+  const objective = goal?.objective?.trim();
+  return [
+    `Goal is still active, but Chromex paused after ${MAX_GOAL_AUTOCONTINUE_TURNS} automatic continuation turns to avoid an infinite loop.`,
+    objective ? `Active goal: ${objective}` : "",
+    "Send a follow-up message to continue from the current state.",
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+function createGoalContinuationParams(params: PromptSendParams, goal: ThreadGoal | null): PromptSendParams {
+  const {
+    contexts: _contexts,
+    fileAttachments: _fileAttachments,
+    routePlan: _routePlan,
+    ...rest
+  } = params;
+  return {
+    ...rest,
+    message: buildGoalAutoContinueMessage(params, goal),
+    contexts: [],
+    fileAttachments: [],
+  };
+}
+
+function normalizeOptionalNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function normalizePlanUserInputAnswers(
+  answers: Record<string, { answers?: unknown } | undefined>,
+): Record<string, { answers: string[] }> {
+  const normalized: Record<string, { answers: string[] }> = {};
+  for (const [id, answer] of Object.entries(answers)) {
+    const values = Array.isArray(answer?.answers) ? answer.answers : [];
+    normalized[id] = {
+      answers: values.map((value) => String(value).trim()).filter(Boolean),
+    };
+  }
+  return normalized;
+}
+
+function normalizePlanUserInputQuestions(value: unknown): Array<{
+  id: string;
+  header: string;
+  question: string;
+  isOther: boolean;
+  isSecret: boolean;
+  options: Array<{ label: string; description: string }>;
+}> {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .map((question) => {
+      const record = question && typeof question === "object" ? (question as Record<string, unknown>) : {};
+      return {
+        id: String(record.id ?? "").trim(),
+        header: String(record.header ?? "").trim(),
+        question: String(record.question ?? "").trim(),
+        isOther: record.isOther === true,
+        isSecret: record.isSecret === true,
+        options: Array.isArray(record.options)
+          ? record.options.map((option) => {
+              const optionRecord = option && typeof option === "object" ? (option as Record<string, unknown>) : {};
+              return {
+                label: String(optionRecord.label ?? "").trim(),
+                description: String(optionRecord.description ?? "").trim(),
+              };
+            }).filter((option) => option.label)
+          : [],
+      };
+    })
+    .filter((question) => question.id && question.question);
+}
+
 function shouldRetryPromptFailure(error: unknown, failedAttempts: number): boolean {
   if (failedAttempts >= MAX_PROMPT_RECONNECT_ATTEMPTS) {
     return false;
@@ -485,6 +929,10 @@ function shouldRetryPromptFailure(error: unknown, failedAttempts: number): boole
 
 function isMissingThreadFailure(error: unknown): boolean {
   return /\bthread not found\b|no turns for conversation|unknown conversation/iu.test(getErrorMessage(error));
+}
+
+function isPlanModeEphemeralThreadFailure(error: unknown): boolean {
+  return /(?:plan_mode_start_failed:)?ephemeral thread does not support goals/iu.test(getErrorMessage(error));
 }
 
 function computePromptRetryDelay(retryAttempt: number): number {
@@ -639,6 +1087,23 @@ function createTurnApprovalParamsForStructuredInputs(
   };
 }
 
+function createPlanModeTurnStartParams(params: PromptSendParams): Record<string, unknown> {
+  if (!params.planMode) {
+    return {};
+  }
+  return {
+    collaborationMode: {
+      mode: "plan",
+      settings: {
+        model: params.model ?? "",
+        reasoning_effort: params.reasoningEffort ?? "medium",
+        developer_instructions:
+          "In plan mode, always produce a visible plan or a visible clarification. If the user's objective is underspecified, ask exactly one concise clarification question using request_user_input or assistant text. Do not finish with only an internal/tool-only plan item. When enough context is available, return 3-7 concrete steps and wait for the user to accept or revise before execution.",
+      },
+    },
+  };
+}
+
 function hasExplicitExternalToolMention(inputs: PromptSendParams["structuredInputs"]): boolean {
   return (
     inputs?.some(
@@ -700,6 +1165,14 @@ export class AppServerCodexPlane implements BridgeCodexPlane {
   #threadId: string | undefined = undefined;
   #activeTurnId: string | null = null;
   #runtimeFeatureEnablementPromise: Promise<void> | null = null;
+  #pendingUserInputRequests = new Map<
+    string,
+    {
+      resolve: (value: unknown) => void;
+      reject: (error: Error) => void;
+      threadId: string;
+    }
+  >();
 
   constructor(options: {
     client: CodexAppServerClient;
@@ -719,6 +1192,9 @@ export class AppServerCodexPlane implements BridgeCodexPlane {
     this.#diagnostics = options.diagnostics;
     this.#retryDelayImpl = options.retryDelayImpl ?? delay;
     this.#client.onNotification((notification) => this.#handleNotification(notification));
+    this.#client.onRequest?.((request) => this.#handleServerRequest(request as ServerRequestPayload), {
+      concurrency: "parallel",
+    });
   }
 
   async accountStatus(): Promise<AccountStatus> {
@@ -745,15 +1221,12 @@ export class AppServerCodexPlane implements BridgeCodexPlane {
 
   async login(params: LoginParams): Promise<unknown> {
     if (params.type === "apiKey") {
-      const apiKey = params.apiKey ?? this.#secrets.getOpenAiApiKey();
+      const apiKey = params.apiKey;
       if (!apiKey) {
-        throw new Error("API key login requires params.apiKey or a configured bridge API key");
+        throw new Error("API key login requires params.apiKey");
       }
       this.#secrets.setOpenAiApiKey(apiKey);
-      return this.#client.request("account/login/start", {
-        type: "apiKey",
-        apiKey,
-      });
+      return { stored: true };
     }
 
     return this.#client.request("account/login/start", {
@@ -776,6 +1249,11 @@ export class AppServerCodexPlane implements BridgeCodexPlane {
   }
 
   async listModels() {
+    assertChromexChatgptManagedAuth(
+      (await this.#client.request("account/read", {
+        refreshToken: false,
+      })) as AccountReadResult,
+    );
     const result = (await this.#client.request("model/list", {
       limit: 50,
       includeHidden: false,
@@ -924,6 +1402,46 @@ export class AppServerCodexPlane implements BridgeCodexPlane {
     return mapRateLimits(result);
   }
 
+  async setGoal(params: GoalSetParams): Promise<GoalSetResult> {
+    const result = (await this.#client.request("thread/goal/set", {
+      threadId: params.threadId,
+      ...(params.objective?.trim() ? { objective: params.objective.trim() } : {}),
+      ...(params.status ? { status: params.status } : {}),
+      ...(params.tokenBudget !== undefined ? { tokenBudget: params.tokenBudget } : {}),
+      ...(params.budgetLimited !== undefined ? { budgetLimited: params.budgetLimited } : {}),
+    })) as { goal?: Record<string, unknown> } | undefined;
+    return { goal: mapThreadGoal(result?.goal, params.threadId) };
+  }
+
+  async getGoal(params: { threadId: string }): Promise<GoalGetResult> {
+    const result = (await this.#client.request("thread/goal/get", {
+      threadId: params.threadId,
+    })) as { goal?: Record<string, unknown> | null };
+    return { goal: result.goal ? mapThreadGoal(result.goal, params.threadId) : null };
+  }
+
+  async clearGoal(params: { threadId: string }): Promise<GoalClearResult> {
+    return (await this.#client.request("thread/goal/clear", {
+      threadId: params.threadId,
+    })) as GoalClearResult;
+  }
+
+  async respondToUserInputRequest(params: PlanUserInputResponseParams): Promise<{ ok: true }> {
+    const requestId = params.requestId.trim();
+    const pending = this.#pendingUserInputRequests.get(requestId);
+    if (!pending) {
+      throw new Error("Plan input request is no longer active.");
+    }
+    this.#pendingUserInputRequests.delete(requestId);
+    await this.#record("plan.user_input.responded", {
+      requestId,
+      threadId: pending.threadId,
+      answerCount: Object.keys(params.answers ?? {}).length,
+    });
+    pending.resolve({ answers: normalizePlanUserInputAnswers(params.answers) });
+    return { ok: true };
+  }
+
   async openSession(params: SessionParams): Promise<{ threadId: string }> {
     await this.#ensureAppAndPluginRuntimeFeatures();
     const cwd = await this.#resolveCwd(params.cwd);
@@ -965,21 +1483,38 @@ export class AppServerCodexPlane implements BridgeCodexPlane {
     params: PromptSendParams,
     emit: (event: BridgeEvent) => void,
   ): Promise<{ threadId: string; turnId: string }> {
+    assertChromexChatgptManagedAuth(
+      (await this.#client.request("account/read", {
+        refreshToken: false,
+      })) as AccountReadResult,
+    );
     await this.#ensureAppAndPluginRuntimeFeatures();
     const cwd = await this.#resolveCwd(params.cwd);
     const tempPaths: string[] = [];
     let threadId = params.threadId ?? this.#threadId ?? "";
+    let recoveredPlanModeEphemeralThread = false;
+    let preparedGoalThreadId: string | null = null;
+    let goalContinuationTurns = 0;
+    let goalForNextTurn: ThreadGoal | null = null;
     try {
-      for (let failedAttempts = 0; ; failedAttempts += 1) {
+      let failedAttempts = 0;
+      while (true) {
         let unsubscribe: () => void = () => undefined;
         let turnId = "";
         const outputTasks: Promise<void>[] = [];
         const emittedImageItemIds = new Set<string>();
         const emittedAgentMessageItemIds = new Set<string>();
+        let emittedPlanCount = 0;
+        const turnParams =
+          goalContinuationTurns > 0 ? createGoalContinuationParams(params, goalForNextTurn) : params;
 
         try {
           if (!threadId) {
             threadId = (await this.openSession({ ...params, ...(cwd ? { cwd } : {}) })).threadId;
+          }
+          if (preparedGoalThreadId !== threadId) {
+            await this.#preparePlanModeThread(params, threadId, emit);
+            preparedGoalThreadId = threadId;
           }
 
           const completed = new Promise<void>((resolve, reject) => {
@@ -990,6 +1525,24 @@ export class AppServerCodexPlane implements BridgeCodexPlane {
                 }
                 const notificationTurnId = getNotificationTurnId(notification);
                 const eventContext = createThreadScopedEventContext(threadId, notificationTurnId || turnId);
+
+                if (notification.method === "error") {
+                  const errorMessage =
+                    getTurnErrorMessage(notification.params?.error) || "Codex app-server reported an error.";
+                  const failedTurnId = notificationTurnId || turnId;
+                  unsubscribe();
+                  if (failedTurnId) {
+                    emit({
+                      type: "turn.failed",
+                      threadId,
+                      turnId: failedTurnId,
+                      message: errorMessage,
+                      clientRequestId: params.clientRequestId ?? null,
+                    });
+                  }
+                  reject(new Error(errorMessage));
+                  return;
+                }
 
                 if (notification.method === "item/agentMessage/delta") {
                   emit({
@@ -1003,6 +1556,15 @@ export class AppServerCodexPlane implements BridgeCodexPlane {
 
                 if (notification.method === "item/completed") {
                   const item = notification.params?.item as (ImageGenerationItem & AgentMessageItem) | undefined;
+                  const plan = extractTurnPlanFromItem(item, eventContext);
+                  if (plan) {
+                    emittedPlanCount += 1;
+                    emit({
+                      type: "turn.plan.updated",
+                      plan,
+                    });
+                    return;
+                  }
                   if (item?.type === "agentMessage") {
                     const itemId = String(item.id ?? "agent-message");
                     const text = extractAgentMessageText(item);
@@ -1035,16 +1597,39 @@ export class AppServerCodexPlane implements BridgeCodexPlane {
 
                 if (notification.method === "turn/completed") {
                   const completedTurnId = notificationTurnId;
-                  const turn = notification.params?.turn as { error?: { message?: string }; items?: unknown[] } | undefined;
+                  const turn = notification.params?.turn as { error?: unknown; items?: unknown[] } | undefined;
                   unsubscribe();
-                  if (turn?.error?.message) {
-                    reject(new Error(turn.error.message));
+                  const turnErrorMessage = getTurnErrorMessage(turn?.error);
+                  if (turnErrorMessage) {
+                    const failedTurnId = completedTurnId || turnId;
+                    if (failedTurnId) {
+                      emit({
+                        type: "turn.failed",
+                        threadId,
+                        turnId: failedTurnId,
+                        message: turnErrorMessage,
+                        clientRequestId: params.clientRequestId ?? null,
+                      });
+                    }
+                    reject(new Error(turnErrorMessage));
                     return;
                   }
                   this.#emitAgentMessagesFromItems(
                     turn?.items ?? [],
                     emit,
                     emittedAgentMessageItemIds,
+                    createThreadScopedEventContext(threadId, completedTurnId || turnId),
+                  );
+                  emittedPlanCount += this.#emitTurnPlansFromItems(
+                    turn?.items ?? [],
+                    emit,
+                    createThreadScopedEventContext(threadId, completedTurnId || turnId),
+                  );
+                  this.#emitPlanModeClarificationFallback(
+                    turnParams,
+                    emit,
+                    emittedAgentMessageItemIds,
+                    emittedPlanCount,
                     createThreadScopedEventContext(threadId, completedTurnId || turnId),
                   );
                   void Promise.allSettled(outputTasks)
@@ -1067,7 +1652,7 @@ export class AppServerCodexPlane implements BridgeCodexPlane {
             });
           });
 
-          const input = await this.#buildInput({ ...params, threadId }, tempPaths);
+          const input = await this.#buildInput({ ...turnParams, threadId }, tempPaths);
           const turn = await requestTurnStartWithReasoningSummaryFallback(
             this.#client,
             (event, details) => this.#record(event, details),
@@ -1075,10 +1660,11 @@ export class AppServerCodexPlane implements BridgeCodexPlane {
               threadId,
               input,
               ...(cwd ? { cwd } : {}),
-              ...(params.model ? { model: params.model } : {}),
-              ...(params.serviceTier ? { serviceTier: params.serviceTier } : {}),
-              ...(params.reasoningEffort ? { effort: params.reasoningEffort } : {}),
-              ...createTurnApprovalParamsForStructuredInputs(params.structuredInputs),
+              ...(turnParams.model ? { model: turnParams.model } : {}),
+              ...(turnParams.serviceTier ? { serviceTier: turnParams.serviceTier } : {}),
+              ...(turnParams.reasoningEffort ? { effort: turnParams.reasoningEffort } : {}),
+              ...createTurnApprovalParamsForStructuredInputs(turnParams.structuredInputs),
+              ...createPlanModeTurnStartParams(turnParams),
               personality: "pragmatic",
             },
           );
@@ -1102,6 +1688,42 @@ export class AppServerCodexPlane implements BridgeCodexPlane {
                 error: getErrorMessage(error),
               }),
             );
+
+          const goalAfterTurn = await this.#readExplicitGoalAfterTurn(params, threadId, emit).catch((error) => {
+            void this.#record("goal.get.failed_after_turn", {
+              threadId,
+              turnId,
+              error: getErrorMessage(error),
+            });
+            return null;
+          });
+          if (shouldAutoContinueGoal(goalAfterTurn, goalContinuationTurns)) {
+            goalContinuationTurns += 1;
+            goalForNextTurn = goalAfterTurn;
+            failedAttempts = 0;
+            await this.#record("goal.auto_continue", {
+              threadId,
+              turnId,
+              status: goalAfterTurn?.status ?? null,
+              continuationTurn: goalContinuationTurns,
+              maxContinuationTurns: MAX_GOAL_AUTOCONTINUE_TURNS,
+            });
+            continue;
+          }
+          if (
+            params.useGoal === true &&
+            goalAfterTurn &&
+            !isGoalTerminalStatus(goalAfterTurn.status) &&
+            goalContinuationTurns >= MAX_GOAL_AUTOCONTINUE_TURNS
+          ) {
+            emit({
+              type: "message.completed",
+              itemId: `goal-auto-continue-limit-${turnId || "turn"}`,
+              text: buildGoalAutocontinueLimitMessage(goalAfterTurn),
+              threadId,
+              turnId,
+            });
+          }
           return { threadId, turnId };
         } catch (error) {
           unsubscribe();
@@ -1114,12 +1736,36 @@ export class AppServerCodexPlane implements BridgeCodexPlane {
             });
             return { threadId, turnId };
           }
+          if (
+            (params.planMode || params.useGoal === true) &&
+            threadId &&
+            !recoveredPlanModeEphemeralThread &&
+            isPlanModeEphemeralThreadFailure(error)
+          ) {
+            const staleThreadId = threadId;
+            recoveredPlanModeEphemeralThread = true;
+            threadId = "";
+            preparedGoalThreadId = null;
+            goalContinuationTurns = 0;
+            goalForNextTurn = null;
+            this.#threadId = undefined;
+            this.#activeTurnId = null;
+            await this.#record("plan.ephemeral_thread.recovering", {
+              clientRequestId: params.clientRequestId ?? null,
+              staleThreadId,
+              error: getErrorMessage(error),
+            });
+            continue;
+          }
           if (!shouldRetryPromptFailure(error, failedAttempts)) {
             throw error;
           }
 
           if (isMissingThreadFailure(error)) {
             threadId = "";
+            preparedGoalThreadId = null;
+            goalContinuationTurns = 0;
+            goalForNextTurn = null;
             this.#threadId = undefined;
             this.#activeTurnId = null;
           }
@@ -1140,12 +1786,102 @@ export class AppServerCodexPlane implements BridgeCodexPlane {
             maxAttempts: MAX_PROMPT_RECONNECT_ATTEMPTS,
             reason,
           });
+          failedAttempts += 1;
           await this.#retryDelayImpl(computePromptRetryDelay(retryAttempt));
         }
       }
     } finally {
       await Promise.all(tempPaths.map(async (path) => rm(path, { force: true }).catch(() => undefined)));
     }
+  }
+
+  async #preparePlanModeThread(
+    params: PromptSendParams,
+    threadId: string,
+    emit: (event: BridgeEvent) => void,
+  ): Promise<void> {
+    if (params.useGoal !== true) {
+      return;
+    }
+    const objective = (params.goalObjective ?? params.message).trim();
+    if (!objective) {
+      return;
+    }
+    try {
+      const result = await this.setGoal({
+        threadId,
+        objective,
+      });
+      emit({
+        type: "goal.updated",
+        threadId,
+        goal: result.goal,
+      });
+    } catch (error) {
+      const detail = getErrorMessage(error);
+      await this.#record("goal.set.failed", {
+        threadId,
+        error: detail,
+      });
+      throw new Error(`plan_mode_start_failed:${detail}`);
+    }
+  }
+
+  async #readExplicitGoalAfterTurn(
+    params: PromptSendParams,
+    threadId: string,
+    emit: (event: BridgeEvent) => void,
+  ): Promise<ThreadGoal | null> {
+    if (params.useGoal !== true) {
+      return null;
+    }
+    const result = await this.getGoal({ threadId });
+    if (result.goal) {
+      emit({
+        type: "goal.updated",
+        threadId,
+        goal: result.goal,
+      });
+    }
+    await this.#record("goal.get.after_turn", {
+      threadId,
+      status: result.goal?.status ?? null,
+      objective: result.goal?.objective ?? null,
+    });
+    return result.goal;
+  }
+
+  #handleServerRequest(request: ServerRequestPayload): Promise<unknown> | unknown {
+    if (request.method !== "item/tool/requestUserInput") {
+      return undefined;
+    }
+    const params = request.params ?? {};
+    const requestId = String(request.id);
+    const threadId = String(params.threadId ?? "");
+    const questions = normalizePlanUserInputQuestions(params.questions);
+    if (!threadId || questions.length === 0 || !this.#emitEvent) {
+      return { answers: {} };
+    }
+    void this.#record("plan.user_input.requested", {
+      requestId,
+      threadId,
+      turnId: String(params.turnId ?? ""),
+      itemId: String(params.itemId ?? ""),
+      questionCount: questions.length,
+    });
+
+    this.#emitEvent({
+      type: "plan.user_input.requested",
+      requestId,
+      threadId,
+      turnId: String(params.turnId ?? ""),
+      itemId: String(params.itemId ?? ""),
+      questions,
+    });
+
+    return new Promise((resolve, reject) => {
+      this.#pendingUserInputRequests.set(requestId, { resolve, reject, threadId });
+    });
   }
 
   async compactThread(params: ThreadCompactParams = {}): Promise<ThreadCompactResult> {
@@ -1415,6 +2151,65 @@ export class AppServerCodexPlane implements BridgeCodexPlane {
     }
   }
 
+  #emitTurnPlansFromItems(
+    items: unknown[],
+    emit: (event: BridgeEvent) => void,
+    context: ThreadScopedEventContext,
+  ): number {
+    let emittedCount = 0;
+    for (const item of items) {
+      const plan = extractTurnPlanFromItem(item, context);
+      if (!plan) {
+        continue;
+      }
+      void this.#record("turn.plan.updated.recovered", {
+        threadId: plan.threadId,
+        turnId: plan.turnId,
+        stepCount: plan.steps.length,
+      });
+      emit({
+        type: "turn.plan.updated",
+        plan,
+      });
+      emittedCount += 1;
+    }
+    return emittedCount;
+  }
+
+  #emitPlanModeClarificationFallback(
+    params: PromptSendParams,
+    emit: (event: BridgeEvent) => void,
+    emittedAgentMessageItemIds: Set<string>,
+    emittedPlanCount: number,
+    context: ThreadScopedEventContext,
+  ): void {
+    if (!params.planMode || emittedPlanCount > 0 || emittedAgentMessageItemIds.size > 0) {
+      return;
+    }
+    const question = params.routePlan?.intent?.needsClarification
+      ? params.routePlan.intent.clarificationQuestion?.trim()
+      : "";
+    if (!question) {
+      return;
+    }
+    const itemId = `plan-clarification-${context.turnId || "turn"}`;
+    if (emittedAgentMessageItemIds.has(itemId)) {
+      return;
+    }
+    emittedAgentMessageItemIds.add(itemId);
+    void this.#record("plan.clarification.fallback", {
+      threadId: context.threadId,
+      turnId: context.turnId,
+      question,
+    });
+    emit({
+      type: "message.completed",
+      itemId,
+      text: question,
+      ...context,
+    });
+  }
+
   async #resolveGeneratedImagePreviewFromThread(threadId: string, turnId: string): Promise<string | null> {
     const items = await this.#readGeneratedImageItemsFromThread(threadId, turnId).catch(() => []);
     for (const item of items) {
@@ -1486,6 +2281,25 @@ export class AppServerCodexPlane implements BridgeCodexPlane {
   }
 
   #handleNotification(notification: NotificationPayload): void {
+    if (notification.method === "error") {
+      const threadId = String(notification.params?.threadId ?? this.#threadId ?? "");
+      const turnId = String(notification.params?.turnId ?? this.#activeTurnId ?? "");
+      const message = getTurnErrorMessage(notification.params?.error) || "Codex app-server reported an error.";
+      if (!threadId || !turnId) {
+        return;
+      }
+      if (turnId === this.#activeTurnId) {
+        this.#activeTurnId = null;
+      }
+      this.#emitEvent?.({
+        type: "turn.failed",
+        threadId,
+        turnId,
+        message,
+      });
+      return;
+    }
+
     if (notification.method === "account/login/completed") {
       this.#emitEvent?.({
         type: "account.login.completed",
@@ -1501,6 +2315,43 @@ export class AppServerCodexPlane implements BridgeCodexPlane {
         type: "account.updated",
         authMode: (notification.params?.authMode as "chatgpt" | "apikey" | null | undefined) ?? null,
         planType: notification.params?.planType ? String(notification.params.planType) : null,
+      });
+      return;
+    }
+
+    if (notification.method === "thread/goal/updated") {
+      const threadId = String(notification.params?.threadId ?? this.#threadId ?? "");
+      this.#emitEvent?.({
+        type: "goal.updated",
+        threadId,
+        goal: mapThreadGoal((notification.params?.goal as Record<string, unknown> | undefined) ?? null, threadId),
+      });
+      return;
+    }
+
+    if (notification.method === "thread/goal/cleared") {
+      this.#emitEvent?.({
+        type: "goal.cleared",
+        threadId: String(notification.params?.threadId ?? this.#threadId ?? ""),
+      });
+      return;
+    }
+
+    if (notification.method === "serverRequest/resolved") {
+      const requestId = String(notification.params?.requestId ?? "");
+      const pending = requestId ? this.#pendingUserInputRequests.get(requestId) : undefined;
+      if (pending) {
+        this.#pendingUserInputRequests.delete(requestId);
+        pending.resolve({ answers: {} });
+      }
+      void this.#record("plan.user_input.resolved", {
+        requestId,
+        threadId: String(notification.params?.threadId ?? pending?.threadId ?? this.#threadId ?? ""),
+      });
+      this.#emitEvent?.({
+        type: "plan.user_input.resolved",
+        requestId,
+        threadId: String(notification.params?.threadId ?? pending?.threadId ?? this.#threadId ?? ""),
       });
       return;
     }
@@ -1526,7 +2377,7 @@ export class AppServerCodexPlane implements BridgeCodexPlane {
     }
 
     if (notification.method === "turn/completed") {
-      const turn = notification.params?.turn as { id?: string } | undefined;
+      const turn = notification.params?.turn as { id?: string; error?: unknown } | undefined;
       const threadId = String(notification.params?.threadId ?? this.#threadId ?? "");
       const turnId = String(turn?.id ?? this.#activeTurnId ?? "");
       if (!threadId || !turnId) {
@@ -1535,6 +2386,16 @@ export class AppServerCodexPlane implements BridgeCodexPlane {
 
       if (turnId === this.#activeTurnId) {
         this.#activeTurnId = null;
+      }
+      const errorMessage = getTurnErrorMessage(turn?.error);
+      if (errorMessage) {
+        this.#emitEvent?.({
+          type: "turn.failed",
+          threadId,
+          turnId,
+          message: errorMessage,
+        });
+        return;
       }
       this.#emitEvent?.({
         type: "turn.completed",
@@ -1558,6 +2419,20 @@ export class AppServerCodexPlane implements BridgeCodexPlane {
           threadId,
           turnId,
           itemId,
+        });
+        return;
+      }
+      const plan =
+        notification.method === "item/completed"
+          ? extractTurnPlanFromItem(item, {
+              threadId,
+              turnId,
+            })
+          : null;
+      if (plan) {
+        this.#emitEvent?.({
+          type: "turn.plan.updated",
+          plan,
         });
         return;
       }
@@ -1832,11 +2707,15 @@ export class CodexVoicePlane implements BridgeVoicePlane {
   }
 
   async start(params: VoiceStartParams = {}, _emit?: (event: BridgeEvent) => void): Promise<VoiceSessionState> {
+    const requestedTransport = params.sdp ? "webrtc" : "websocket";
     await this.#record("voice.session.start.requested", {
       hasThreadId: Boolean(params.threadId?.trim()),
       hasSdp: Boolean(params.sdp?.trim()),
+      sdpLength: params.sdp?.length ?? 0,
+      sdpStartsWithV0: params.sdp?.startsWith("v=0") ?? false,
       outputModality: params.outputModality ?? "audio",
       voice: normalizeCodexRealtimeVoice(params.voice) ?? null,
+      transport: requestedTransport,
     });
     const account = (await this.#client.request("account/read", {
       refreshToken: false,
@@ -1848,12 +2727,31 @@ export class CodexVoicePlane implements BridgeVoicePlane {
       };
       return this.#state;
     }
+    if (isApiKeyCodexAccount(account)) {
+      this.#state = {
+        status: "error",
+        error: CHROMEX_API_KEY_AUTH_DISABLED_ERROR,
+        realtimeAvailable: false,
+      };
+      return this.#state;
+    }
+    if (requestedTransport === "websocket" && !isApiKeyCodexAccount(account)) {
+      this.#state = createRealtimeRequiresApiKeyState();
+      await this.#record("voice.realtime.start.blocked", {
+        reason: "requires-api-key",
+        accountType: account.account?.type ?? null,
+        transport: requestedTransport,
+        outputModality: params.outputModality ?? "audio",
+      });
+      return this.#state;
+    }
 
     const threadId = params.threadId?.trim() || (await this.#startVoiceThread(params));
     const outputModality = params.outputModality ?? "audio";
     const voice = normalizeCodexRealtimeVoice(params.voice);
-    const transport = params.sdp ? "webrtc" : "websocket";
+    const transport = requestedTransport;
     const sessionId = params.sessionId?.trim() || `sidepanel-voice-${Date.now()}`;
+    const realtimeSessionId = params.realtimeSessionId?.trim();
     this.#threadId = threadId;
     this.#state = {
       status: "connecting",
@@ -1876,7 +2774,7 @@ export class CodexVoicePlane implements BridgeVoicePlane {
       await this.#client.request("thread/realtime/start", {
         threadId,
         outputModality,
-        sessionId,
+        ...(realtimeSessionId ? { realtimeSessionId } : {}),
         ...(params.prompt ? { prompt: params.prompt } : {}),
         ...(voice ? { voice } : {}),
         ...(params.sdp ? { transport: { type: "webrtc", sdp: params.sdp } } : { transport: { type: "websocket" } }),
@@ -1886,6 +2784,7 @@ export class CodexVoicePlane implements BridgeVoicePlane {
         sessionId,
         transport,
         outputModality,
+        hasUpstreamRealtimeSessionId: Boolean(realtimeSessionId),
       });
     } catch (error) {
       await this.#record("voice.realtime.start.failed", {
@@ -1902,9 +2801,10 @@ export class CodexVoicePlane implements BridgeVoicePlane {
 
   async stop(params: VoiceStopParams = {}): Promise<void> {
     const threadId = params.threadId?.trim() || this.#threadId;
+    const sessionId = params.sessionId?.trim() || this.#state.sessionId || null;
     await this.#harness.runHooks("VoiceSessionStop", "voice.session.stop", {
       status: "stopping",
-      sessionId: this.#state.sessionId,
+      sessionId,
       threadId,
     });
     if (threadId) {
@@ -1912,6 +2812,7 @@ export class CodexVoicePlane implements BridgeVoicePlane {
       this.#emitEvent?.({
         type: "voice.session.stopped",
         threadId,
+        sessionId,
         reason: null,
       });
     }
@@ -1975,7 +2876,7 @@ export class CodexVoicePlane implements BridgeVoicePlane {
   }
 
   async #startVoiceThread(params: VoiceStartParams): Promise<string> {
-    const cwd = params.cwd?.trim() || (await this.#harness.getWorkspaceRoot());
+    const cwd = params.cwd?.trim() || "";
     const result = (await this.#client.request("thread/start", {
       ...(cwd ? { cwd } : {}),
       ephemeral: true,
@@ -1997,10 +2898,20 @@ export class CodexVoicePlane implements BridgeVoicePlane {
     if (!threadId || (this.#threadId && threadId !== this.#threadId)) {
       return;
     }
+    const upstreamSessionId =
+      notification.params?.realtimeSessionId != null
+        ? String(notification.params.realtimeSessionId)
+        : notification.params?.sessionId != null
+          ? String(notification.params.sessionId)
+          : null;
+    const stateSessionId = this.#state.sessionId ?? null;
+    const sessionId =
+      stateSessionId?.startsWith("sidepanel-voice-") && upstreamSessionId
+        ? upstreamSessionId
+        : (stateSessionId ?? upstreamSessionId);
 
     switch (notification.method) {
       case "thread/realtime/started": {
-        const sessionId = notification.params?.sessionId ? String(notification.params.sessionId) : null;
         this.#state = {
           ...this.#state,
           status: "active",
@@ -2064,12 +2975,14 @@ export class CodexVoicePlane implements BridgeVoicePlane {
         this.#state = {
           status: "error",
           threadId,
+          ...(sessionId ? { sessionId } : {}),
           error: message,
           realtimeAvailable: true,
         };
         this.#emitEvent?.({
           type: "voice.error",
           threadId,
+          sessionId,
           message,
         });
         return;
@@ -2079,6 +2992,7 @@ export class CodexVoicePlane implements BridgeVoicePlane {
         this.#emitEvent?.({
           type: "voice.session.stopped",
           threadId,
+          sessionId,
           reason: notification.params?.reason ? String(notification.params.reason) : null,
         });
         return;
@@ -2169,6 +3083,7 @@ export class CodexImagePlane implements BridgeImagePlane {
       if (!hasAuthenticatedCodexAccount(account)) {
         throw new Error("Image editing requires signing in to Codex. ChatGPT login is enough; an API key is only a fallback.");
       }
+      assertChromexChatgptManagedAuth(account);
       if (isFreeCodexAccount(account)) {
         throw new Error(createImageGenerationUnavailableForPlanMessage(getCodexAccountPlanType(account)));
       }
@@ -2236,6 +3151,7 @@ export class CodexImagePlane implements BridgeImagePlane {
       if (!hasAuthenticatedCodexAccount(account)) {
         throw new Error("Image generation requires signing in to Codex. ChatGPT login is enough; an API key is only a fallback.");
       }
+      assertChromexChatgptManagedAuth(account);
       if (isFreeCodexAccount(account)) {
         throw new Error(createImageGenerationUnavailableForPlanMessage(getCodexAccountPlanType(account)));
       }

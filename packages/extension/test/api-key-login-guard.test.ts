@@ -16,15 +16,15 @@ describe("API-key login guard", () => {
     ).not.toThrow();
   });
 
-  test("requires explicit confirmation before reusing a stored API key", () => {
+  test("requires entering an API key instead of reusing a stored key by confirmation only", () => {
     expect(() => assertApiKeyLoginExplicitlyConfirmed({ loginType: "apiKey" })).toThrow(
-      /explicit user confirmation/u,
+      /requires entering an API key/u,
     );
     expect(() =>
       assertApiKeyLoginExplicitlyConfirmed({
         loginType: "apiKey",
         confirmed: true,
       }),
-    ).not.toThrow();
+    ).toThrow(/requires entering an API key/u);
   });
 });

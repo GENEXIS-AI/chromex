@@ -5,12 +5,15 @@ import {
 } from "@codex-sidepanel/shared";
 
 import type {
+  ConferenceTranscriptSnapshotEntry,
+  ConversationConferenceModeSnapshot,
   ConversationMessage,
   ConversationMessageAttachment,
   ConversationMessageImage,
   ConversationSummary,
   ExtensionSettings,
   SavedConversation,
+  VoiceInputAudioSource,
 } from "../types.js";
 import { normalizeStoredProfiles } from "../profile-templates.js";
 import type { SkillOption } from "../sidepanel/skills.js";
@@ -46,8 +49,11 @@ export const DEFAULT_SETTINGS: ExtensionSettings = {
   allowVoiceNavigation: true,
   allowBrowserActions: true,
   browserActionPermissionMode: "ask",
+  imagePromptHoverButtonEnabled: true,
+  planModeEnabled: false,
   playwrightBrowserControlEnabled: false,
   preferredVoice: "",
+  voiceInputAudioSource: "microphone",
   workspaceRoot: "",
   codexBinPath: "",
   enabledCodexSkillIds: [],
@@ -70,7 +76,10 @@ export async function getStoredSettings(): Promise<ExtensionSettings> {
     uiLanguage: normalizeUiLanguageSetting(settings.uiLanguage),
     uiTheme: normalizeUiThemeSetting(settings.uiTheme),
     preferredVoice: normalizeCodexRealtimeVoice(settings.preferredVoice),
+    voiceInputAudioSource: normalizeVoiceInputAudioSource(settings.voiceInputAudioSource),
     browserActionPermissionMode: normalizeBrowserActionPermissionMode(settings.browserActionPermissionMode),
+    imagePromptHoverButtonEnabled: settings.imagePromptHoverButtonEnabled !== false,
+    planModeEnabled: settings.planModeEnabled === true,
     playwrightBrowserControlEnabled: settings.playwrightBrowserControlEnabled === true,
     enabledCodexSkillIds: normalizeEnabledCodexSkillIds(settings.enabledCodexSkillIds),
     customSiteSuggestions: normalizeCustomSiteSuggestions(settings.customSiteSuggestions),
@@ -86,9 +95,14 @@ export async function updateStoredSettings(patch: Partial<ExtensionSettings>): P
     uiLanguage: normalizeUiLanguageSetting(patch.uiLanguage ?? current.uiLanguage),
     uiTheme: normalizeUiThemeSetting(patch.uiTheme ?? current.uiTheme),
     preferredVoice: normalizeCodexRealtimeVoice(patch.preferredVoice ?? current.preferredVoice),
+    voiceInputAudioSource: normalizeVoiceInputAudioSource(
+      patch.voiceInputAudioSource ?? current.voiceInputAudioSource,
+    ),
     browserActionPermissionMode: normalizeBrowserActionPermissionMode(
       patch.browserActionPermissionMode ?? current.browserActionPermissionMode,
     ),
+    imagePromptHoverButtonEnabled: (patch.imagePromptHoverButtonEnabled ?? current.imagePromptHoverButtonEnabled) !== false,
+    planModeEnabled: (patch.planModeEnabled ?? current.planModeEnabled) === true,
     playwrightBrowserControlEnabled: (patch.playwrightBrowserControlEnabled ?? current.playwrightBrowserControlEnabled) === true,
     enabledCodexSkillIds: normalizeEnabledCodexSkillIds(
       patch.enabledCodexSkillIds ?? current.enabledCodexSkillIds,
@@ -106,6 +120,10 @@ export async function updateStoredSettings(patch: Partial<ExtensionSettings>): P
 
 function normalizeBrowserActionPermissionMode(value: unknown): BrowserActionPermissionMode {
   return value === "auto-review" || value === "full" || value === "ask" ? value : "ask";
+}
+
+function normalizeVoiceInputAudioSource(value: unknown): VoiceInputAudioSource {
+  return value === "computer" ? "computer" : "microphone";
 }
 
 export async function resetStoredSettings(): Promise<ExtensionSettings> {
@@ -337,17 +355,23 @@ export function toConversationSummary(conversation: SavedConversation): Conversa
     id: conversation.id,
     title: conversation.title,
     profileId: conversation.profileId,
+    conversationMode: conversation.conversationMode === "conference" ? "conference" : "chat",
     updatedAt: conversation.updatedAt,
   };
 }
 
 function buildConversationTitle(conversation: SavedConversation): string {
   const firstUserMessage = conversation.messages.find((message) => message.role === "user")?.text.trim();
-  if (!firstUserMessage) {
-    return "New chat";
+  const titleSource =
+    firstUserMessage ||
+    conversation.conferenceMode?.entries.find((entry) => entry.translationText || entry.sourceText)?.translationText.trim() ||
+    conversation.conferenceMode?.entries.find((entry) => entry.translationText || entry.sourceText)?.sourceText.trim() ||
+    "";
+  if (!titleSource) {
+    return conversation.conversationMode === "conference" ? "Live transcript" : "New chat";
   }
 
-  return firstUserMessage.length <= 48 ? firstUserMessage : `${firstUserMessage.slice(0, 47).trimEnd()}…`;
+  return titleSource.length <= 48 ? titleSource : `${titleSource.slice(0, 47).trimEnd()}…`;
 }
 
 function normalizeStoredSkills(skills: SkillOption[]): SkillOption[] {
@@ -402,15 +426,21 @@ export function prepareConversationsForStorage(
 }
 
 export function shouldPersistConversationInHistory(conversation: SavedConversation): boolean {
-  return (conversation.messages ?? []).length > 0;
+  return (conversation.messages ?? []).length > 0 || hasConferenceModeHistory(conversation);
 }
 
 export function sanitizeConversationForStorage(
   conversation: SavedConversation,
   options: { aggressive?: boolean } = {},
 ): SavedConversation {
+  const conferenceMode = sanitizeConferenceModeSnapshot(conversation.conferenceMode);
+  const baseConversation: SavedConversation = { ...conversation };
+  delete baseConversation.conferenceMode;
+  delete baseConversation.conversationMode;
   return {
-    ...conversation,
+    ...baseConversation,
+    conversationMode: conferenceMode || conversation.conversationMode === "conference" ? "conference" : "chat",
+    ...(conferenceMode ? { conferenceMode } : {}),
     messages: (conversation.messages ?? []).map((message) => {
       const images: ConversationMessageImage[] = (message.images ?? [])
         .map((image) => {
@@ -478,6 +508,50 @@ export function sanitizeConversationForStorage(
     historyQuery: conversation.historyQuery ?? "",
     readStrategyOverride: conversation.readStrategyOverride ?? "auto",
   };
+}
+
+function hasConferenceModeHistory(conversation: SavedConversation): boolean {
+  const snapshot = sanitizeConferenceModeSnapshot(conversation.conferenceMode);
+  return Boolean(
+    snapshot &&
+      (snapshot.entries.length > 0 ||
+        snapshot.partialSourceText ||
+        snapshot.partialTranslationText),
+  );
+}
+
+function sanitizeConferenceModeSnapshot(
+  snapshot: SavedConversation["conferenceMode"] | undefined,
+): ConversationConferenceModeSnapshot | null {
+  if (!snapshot || typeof snapshot !== "object") {
+    return null;
+  }
+  const entries: ConferenceTranscriptSnapshotEntry[] = (snapshot.entries ?? [])
+    .map((entry, index) => ({
+      id: (typeof entry.id === "string" && entry.id.trim()) || `conference-transcript-${index + 1}`,
+      sourceText: typeof entry.sourceText === "string" ? entry.sourceText.trim() : "",
+      translationText: typeof entry.translationText === "string" ? entry.translationText.trim() : "",
+      createdAt: Number.isFinite(entry.createdAt) ? Number(entry.createdAt) : Date.now(),
+    }))
+    .filter((entry) => entry.sourceText || entry.translationText);
+  const sourceLabel = typeof snapshot.sourceLabel === "string" ? snapshot.sourceLabel.trim() : "";
+  const partialSourceText = typeof snapshot.partialSourceText === "string" ? snapshot.partialSourceText.trim() : "";
+  const partialTranslationText =
+    typeof snapshot.partialTranslationText === "string" ? snapshot.partialTranslationText.trim() : "";
+  const targetLanguage = typeof snapshot.targetLanguage === "string" ? snapshot.targetLanguage.trim() : "";
+  const updatedAt = Number(snapshot.updatedAt);
+  const next: ConversationConferenceModeSnapshot = {
+    entries,
+    ...(sourceLabel ? { sourceLabel } : {}),
+    ...(partialSourceText ? { partialSourceText } : {}),
+    ...(partialTranslationText ? { partialTranslationText } : {}),
+    ...(targetLanguage ? { targetLanguage } : {}),
+    ...(typeof snapshot.livePlaybackEnabled === "boolean"
+      ? { livePlaybackEnabled: snapshot.livePlaybackEnabled }
+      : {}),
+    ...(Number.isFinite(updatedAt) ? { updatedAt } : {}),
+  };
+  return entries.length || partialSourceText || partialTranslationText ? next : null;
 }
 
 function trimConversationToStorageBudget(conversation: SavedConversation, maxBytes: number): SavedConversation {

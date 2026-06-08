@@ -55,6 +55,30 @@ describe("empty assistant response fallback", () => {
     ).toBe(false);
   });
 
+  test("does not show a fallback when a plan card was produced for the same turn", () => {
+    expect(
+      shouldShowEmptyAssistantResponseNotice({
+        messages: [
+          userMessage("user-1"),
+          {
+            id: "turn-trace-thread-1-turn-1",
+            role: "assistant",
+            text: "",
+            trace: [{ id: "plan-1", kind: "reasoning", title: "Plan", detail: "Draft first", status: "completed", timestampMs: 1 }],
+            plan: {
+              threadId: "thread-1",
+              turnId: "turn-1",
+              explanation: "Draft first, then verify.",
+              steps: [{ step: "Draft the implementation plan", status: "completed" }],
+            },
+          },
+        ],
+        traceMessageId: "turn-trace-thread-1-turn-1",
+        activeUserMessageId: "user-1",
+      }),
+    ).toBe(false);
+  });
+
   test("does not show a fallback for an earlier tool-only turn when a later turn is still working", () => {
     expect(
       shouldShowEmptyAssistantResponseNotice({
