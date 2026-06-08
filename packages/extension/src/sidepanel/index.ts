@@ -14694,8 +14694,20 @@ function getHarnessConfirmationPrompt(operation: string, fallback: unknown): str
   }
 }
 
+function sendRuntimeMessage<TResult>(
+  message: object,
+  options?: {
+    retries?: number;
+  },
+): Promise<TResult>;
+function sendRuntimeMessage(
+  message: object,
+  options?: {
+    retries?: number;
+  },
+): Promise<unknown>;
 async function sendRuntimeMessage<TResult = unknown>(
-  message: Record<string, unknown>,
+  message: object,
   options: {
     retries?: number;
   } = {},

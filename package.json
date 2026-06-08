@@ -15,7 +15,7 @@
     "typecheck": "npm run prepare:workspace && npm run typecheck --workspace @codex-sidepanel/bridge && npm run typecheck --workspace @codex-sidepanel/native-host && npm run typecheck --workspace @codex-sidepanel/extension",
     "typecheck:structure-pilot": "npm run typecheck --workspace @codex-sidepanel/shared",
     "lint:workspaces": "npm run lint --workspaces --if-present",
-    "lint:deps": "npx -y dependency-cruiser@17.1.0 --config .dependency-cruiser.cjs packages/shared/src packages/bridge/src packages/native-host/src packages/extension/src",
+    "lint:deps": "npx -y -p dependency-cruiser@17.1.0 -p typescript@5.9.3 depcruise --config .dependency-cruiser.cjs packages/shared/src packages/bridge/src packages/native-host/src packages/extension/src",
     "lint:structure": "node scripts/check-structural-discipline.mjs && npm run lint:deps",
     "lint": "npm run lint:workspaces && npm run lint:structure",
     "i18n:generate": "node scripts/generate-extension-locales.mjs",
