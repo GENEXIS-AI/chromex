@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { access, cp, mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
 import { homedir, platform, tmpdir } from "node:os";
@@ -39,9 +40,7 @@ try {
     ...launchOptions,
   });
 
-  const serviceWorker = await waitForExtensionServiceWorker(browserContext);
-
-  const extensionId = new URL(serviceWorker.url()).host;
+  const extensionId = await resolveExtensionId(browserContext, stagedExtensionPath);
   const microphonePermissionPage = await browserContext.newPage();
   await microphonePermissionPage.goto(`chrome-extension://${extensionId}/mic-permission.html?locale=ko`, {
     waitUntil: "domcontentloaded",
@@ -1099,7 +1098,7 @@ try {
     window.__CODEX_SIDEPANEL_SMOKE__?.getDryRunSubmissions?.() ?? [],
   );
   const quickSystemPrompt = quickSystemSubmissions.at(-1) ?? "";
-  if (!/current|현재/i.test(quickSystemPrompt)) {
+  if (!/current|현재|当前/i.test(quickSystemPrompt)) {
     throw new Error(`Smoke test failed: quick system did not submit current-page prompt (${JSON.stringify(quickSystemSubmissions)}).`);
   }
 
@@ -1418,7 +1417,7 @@ async function detectChromiumLaunchOptions() {
   throw new Error(
     [
       "Smoke tests need Chromium or Chrome for Testing.",
-      "Run `npx -y playwright@1.59.1 install chromium`, set `BROWSER_EXECUTABLE_PATH`, or install Chrome for Testing.",
+      "Run `npm run smoke:install-browser`, set `BROWSER_EXECUTABLE_PATH`, or install Chrome for Testing.",
       "Google Chrome and Microsoft Edge no longer support command-line side-loading for this workflow.",
     ].join(" "),
   );
@@ -1436,8 +1435,22 @@ async function waitForSmokeHarness(page) {
   throw new Error("Smoke test failed: the sidepanel smoke harness never became ready.");
 }
 
-async function waitForExtensionServiceWorker(browserContext) {
-  const deadline = Date.now() + 30_000;
+async function resolveExtensionId(browserContext, extensionRoot) {
+  const serviceWorker = await waitForExtensionServiceWorker(browserContext, 10_000);
+  if (serviceWorker) {
+    return new URL(serviceWorker.url()).host;
+  }
+
+  const manifest = JSON.parse(await readFile(join(extensionRoot, "manifest.json"), "utf8"));
+  if (typeof manifest.key === "string" && manifest.key.trim()) {
+    return extensionIdFromManifestKey(manifest.key);
+  }
+
+  throw new Error("Smoke test failed: the MV3 service worker never became available and manifest key is missing.");
+}
+
+async function waitForExtensionServiceWorker(browserContext, timeoutMs = 30_000) {
+  const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const [serviceWorker] = browserContext.serviceWorkers();
     if (serviceWorker) {
@@ -1445,16 +1458,21 @@ async function waitForExtensionServiceWorker(browserContext) {
     }
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
-  throw new Error("Smoke test failed: the MV3 service worker never became available.");
+  return null;
+}
+
+function extensionIdFromManifestKey(key) {
+  const digest = createHash("sha256").update(Buffer.from(key, "base64")).digest();
+  return Array.from(digest.subarray(0, 16), (byte) => byte.toString(16).padStart(2, "0"))
+    .join("")
+    .replace(/[0-9a-f]/gu, (nibble) => String.fromCharCode("a".charCodeAt(0) + Number.parseInt(nibble, 16)));
 }
 
 async function installPlaywrightChromium() {
-  const version = await readPlaywrightVersion();
-  const npxCommand = process.platform === "win32" ? "npx.cmd" : "npx";
-  const args = ["-y", `playwright@${version}`, "install", "chromium"];
+  const cliPath = resolve(process.cwd(), "node_modules", "playwright-core", "cli.js");
 
   await new Promise((resolvePromise, rejectPromise) => {
-    const child = spawn(npxCommand, args, {
+    const child = spawn(process.execPath, [cliPath, "install", "chromium"], {
       cwd: process.cwd(),
       env: {
         ...process.env,
@@ -1471,23 +1489,6 @@ async function installPlaywrightChromium() {
       rejectPromise(new Error(`Failed to install Playwright Chromium (exit code ${code ?? "unknown"}).`));
     });
   });
-}
-
-async function readPlaywrightVersion() {
-  const packageJsonPath = resolve(process.cwd(), "package.json");
-  const packageJson = JSON.parse(await readFile(packageJsonPath, "utf8"));
-  const version =
-    packageJson.devDependencies?.playwright ??
-    packageJson.devDependencies?.["playwright-core"] ??
-    packageJson.dependencies?.playwright ??
-    packageJson.dependencies?.["playwright-core"];
-
-  if (typeof version !== "string") {
-    return "1.59.1";
-  }
-
-  const normalized = version.replace(/^[^\d]*/, "");
-  return normalized || "1.59.1";
 }
 
 async function findPlaywrightChromiumExecutable() {

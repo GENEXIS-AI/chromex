@@ -45,8 +45,15 @@ jobs:
       - name: Audit production dependencies
         run: npm run audit
 
-      - name: Install Playwright Chromium
-        run: npm run smoke:install-browser
+      - name: Set up Chrome for smoke test
+        uses: browser-actions/setup-chrome@v2
+        id: setup-chrome
+        with:
+          chrome-version: 147.0.7727.15
+          install-dependencies: ${{ matrix.os == 'ubuntu-latest' }}
 
-      - name: Extension smoke test
+      - name: Run extension smoke test
+        env:
+          BROWSER_EXECUTABLE_PATH: ${{ steps.setup-chrome.outputs.chrome-path }}
+          SMOKE_INSTALL_BROWSER: "0"
         run: npm run smoke

@@ -17,7 +17,7 @@
     "i18n:generate": "node scripts/generate-extension-locales.mjs",
     "i18n:generate:sidepanel": "node scripts/generate-sidepanel-i18n-translations.mjs",
     "smoke": "node scripts/smoke-extension.mjs",
-    "smoke:install-browser": "npx -y playwright@1.59.1 install chromium",
+    "smoke:install-browser": "node ./node_modules/playwright-core/cli.js install chromium",
     "diagnose:extension": "node scripts/diagnose-extension-load.mjs",
     "sync:extension": "npm run build && node scripts/diagnose-extension-load.mjs --sync",
     "package:webstore": "npm run build --workspace @codex-sidepanel/extension && node scripts/package-chrome-web-store.mjs",

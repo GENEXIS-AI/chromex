@@ -1,6 +1,14 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+
 import { describe, expect, test } from "vitest";
 
 import { prepareUserFileAttachments } from "../src/file-attachments.js";
+
+const MINIMAL_PDF_BYTES = readFileSync(
+  fileURLToPath(new URL("./fixtures/brief.pdf", import.meta.url)),
+);
+const MINIMAL_PDF_BASE64 = MINIMAL_PDF_BYTES.toString("base64");
 
 const PNG_BYTES = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00]);
 const XLSX_FIXTURE_BASE64 =
@@ -193,4 +201,22 @@ describe("prepareUserFileAttachments", () => {
     expect(result.sections[0]).toContain("Kind: binary");
     expect(result.sections[0]).toContain("not parsed automatically");
   });
+
+  test("extracts text from a PDF attachment", async () => {
+    const result = await prepareUserFileAttachments([
+      {
+        id: "file-1",
+        name: "brief.pdf",
+        mimeType: "application/pdf",
+        sizeBytes: MINIMAL_PDF_BYTES.byteLength,
+        lastModified: 1,
+        base64: MINIMAL_PDF_BASE64,
+        kind: "pdf",
+      },
+    ]);
+
+    expect(result.uploadedImages).toEqual([]);
+    expect(result.sections[0]).toContain("Kind: pdf");
+    expect(result.sections[0]).toContain("Hello Chromex PDF");
+  }, 15_000);
 });
