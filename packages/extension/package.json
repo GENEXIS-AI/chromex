@@ -1,6 +1,6 @@
 {
   "name": "@codex-sidepanel/extension",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "license": "MIT",
   "type": "module",
   "scripts": {
@@ -9,7 +9,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@codex-sidepanel/shared": "0.1.7",
+    "@codex-sidepanel/shared": "0.1.8",
     "lucide": "^1.11.0"
   }
 }
