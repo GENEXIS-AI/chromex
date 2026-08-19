@@ -214,10 +214,10 @@ MIT. [LICENSE](../LICENSE)를 참고하세요.
 
 ## Star History
 
-<a href="https://www.star-history.com/#GENEXIS-AI/chromex&Date">
+<a href="https://star-history.dera.page/#GENEXIS-AI/chromex&Date">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=GENEXIS-AI/chromex&type=Date&theme=dark" />
-    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=GENEXIS-AI/chromex&type=Date" />
-    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=GENEXIS-AI/chromex&type=Date" />
+    <source media="(prefers-color-scheme: dark)" srcset="https://star-history.dera.page/svg?repos=GENEXIS-AI/chromex&type=Date&theme=dark" />
+    <source media="(prefers-color-scheme: light)" srcset="https://star-history.dera.page/svg?repos=GENEXIS-AI/chromex&type=Date" />
+    <img alt="Star History Chart" src="https://star-history.dera.page/svg?repos=GENEXIS-AI/chromex&type=Date" />
   </picture>
 </a>
